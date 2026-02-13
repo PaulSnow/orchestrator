@@ -1,0 +1,34 @@
+# Runtime state (rebuilt on demand)
+state/*.json
+
+# Build output
+/orchestrator
+/run-all-tests
+/scan-all-repos
+/sync-all-repos
+/tmp/
+
+# Log files
+*.log
+
+# Generated reports (except templates)
+reports/*.json
+reports/*.xlsx
+reports/*.csv
+
+# Go
+/vendor/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# MCP server binary
+mcp-server/orchestrator-mcp

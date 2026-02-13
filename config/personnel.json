@@ -1,0 +1,12 @@
+{
+  "team": [
+    {
+      "name": "Paul Snow",
+      "github": "PaulSnow",
+      "gitlab": "PaulSnow",
+      "role": "Lead Developer",
+      "focus": ["staking", "protocol", "governance", "infrastructure"],
+      "repos": ["accumulate", "staking", "devnet", "accman", "liteclient"]
+    }
+  ]
+}

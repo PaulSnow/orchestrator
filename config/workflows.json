@@ -1,0 +1,45 @@
+{
+  "workflows": {
+    "build": {
+      "description": "Build a repository",
+      "steps": [
+        {"action": "cd", "target": "{{repo.local}}"},
+        {"action": "run", "command": "go build ./...", "condition": "repo.language == 'go'"},
+        {"action": "run", "command": "npm run build", "condition": "repo.language == 'javascript'"}
+      ],
+      "log_file": "/tmp/orchestrator-build-{{repo.name}}.log"
+    },
+    "test": {
+      "description": "Run tests for a repository",
+      "steps": [
+        {"action": "cd", "target": "{{repo.local}}"},
+        {"action": "run", "command": "go test ./... -short -timeout 10m", "condition": "repo.language == 'go'"},
+        {"action": "run", "command": "npm test", "condition": "repo.language == 'javascript'"}
+      ],
+      "log_file": "/tmp/orchestrator-test-{{repo.name}}.log"
+    },
+    "status": {
+      "description": "Check git status of a repository",
+      "steps": [
+        {"action": "cd", "target": "{{repo.local}}"},
+        {"action": "run", "command": "git status --porcelain"},
+        {"action": "run", "command": "git log --oneline -5"}
+      ]
+    },
+    "pull": {
+      "description": "Pull latest changes from remote",
+      "steps": [
+        {"action": "cd", "target": "{{repo.local}}"},
+        {"action": "run", "command": "git fetch origin"},
+        {"action": "run", "command": "git pull --ff-only"}
+      ]
+    },
+    "review": {
+      "description": "Review pending merge requests or pull requests",
+      "steps": [
+        {"action": "cd", "target": "{{repo.local}}"},
+        {"action": "run", "command": "git log origin/{{repo.default_branch}}..HEAD --oneline"}
+      ]
+    }
+  }
+}

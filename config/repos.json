@@ -1,0 +1,158 @@
+{
+  "repositories": [
+    {
+      "name": "accumulate",
+      "platform": "gitlab",
+      "remote": "git@gitlab.com:accumulatenetwork/accumulate.git",
+      "local": "/home/paul/go/src/gitlab.com/AccumulateNetwork/accumulate",
+      "default_branch": "develop",
+      "language": "go",
+      "has_claude_md": false,
+      "tags": ["core", "protocol"],
+      "description": "Core Accumulate protocol implementation"
+    },
+    {
+      "name": "staking",
+      "platform": "gitlab",
+      "remote": "git@gitlab.com:AccumulateNetwork/Core/staking.git",
+      "local": "/home/paul/go/src/gitlab.com/AccumulateNetwork/staking",
+      "default_branch": "main",
+      "language": "go",
+      "has_claude_md": true,
+      "tags": ["staking", "reports"],
+      "description": "Staking rewards distribution and report generation"
+    },
+    {
+      "name": "accman",
+      "platform": "gitlab",
+      "remote": "git@gitlab.com:accumulatenetwork/accman.git",
+      "local": "/home/paul/go/src/gitlab.com/AccumulateNetwork/accman",
+      "default_branch": "main",
+      "language": "go",
+      "has_claude_md": true,
+      "tags": ["tooling"],
+      "description": "Accumulate account manager CLI"
+    },
+    {
+      "name": "accnet",
+      "platform": "gitlab",
+      "remote": "git@gitlab.com:AccumulateNetwork/Ecosystem/AccNet.git",
+      "local": "/home/paul/go/src/gitlab.com/AccumulateNetwork/accnet",
+      "default_branch": "main",
+      "language": "go",
+      "has_claude_md": true,
+      "tags": ["ecosystem", "network"],
+      "description": "AccNet network management tool"
+    },
+    {
+      "name": "devnet",
+      "platform": "gitlab",
+      "remote": "git@gitlab.com:AccumulateNetwork/Core/Devnet.git",
+      "local": "/home/paul/go/src/gitlab.com/AccumulateNetwork/devnet",
+      "default_branch": "main",
+      "language": "go",
+      "has_claude_md": true,
+      "tags": ["devnet", "testing"],
+      "description": "Development network management and testing"
+    },
+    {
+      "name": "explorer",
+      "platform": "gitlab",
+      "remote": "git@gitlab.com:accumulatenetwork/ecosystem/explorer.git",
+      "local": "/home/paul/go/src/gitlab.com/AccumulateNetwork/explorer",
+      "default_branch": "develop",
+      "language": "javascript",
+      "has_claude_md": false,
+      "tags": ["ecosystem", "frontend"],
+      "description": "Accumulate block explorer web application"
+    },
+    {
+      "name": "wallet",
+      "platform": "gitlab",
+      "remote": "git@gitlab.com:accumulatenetwork/core/wallet.git",
+      "local": "/home/paul/go/src/gitlab.com/AccumulateNetwork/wallet",
+      "default_branch": "develop",
+      "language": "javascript",
+      "has_claude_md": true,
+      "tags": ["core", "wallet", "frontend"],
+      "description": "Accumulate wallet application"
+    },
+    {
+      "name": "kermit",
+      "platform": "gitlab",
+      "remote": "git@gitlab.com:accumulatenetwork/kermit.git",
+      "local": "/home/paul/go/src/gitlab.com/AccumulateNetwork/kermit",
+      "default_branch": "main",
+      "language": "javascript",
+      "has_claude_md": true,
+      "tags": ["ecosystem", "tooling"],
+      "description": "Kermit network monitoring tool"
+    },
+    {
+      "name": "liteclient",
+      "platform": "gitlab",
+      "remote": "git@gitlab.com:accumulatenetwork/core/liteclient.git",
+      "local": "/home/paul/go/src/gitlab.com/AccumulateNetwork/liteclient",
+      "default_branch": "main",
+      "language": "go",
+      "has_claude_md": true,
+      "tags": ["core", "client"],
+      "description": "Lightweight Accumulate client library"
+    },
+    {
+      "name": "launch-api-server",
+      "platform": "gitlab",
+      "remote": "git@gitlab.com:AccumulateNetwork/launch-API-Server.git",
+      "local": "/home/paul/go/src/gitlab.com/AccumulateNetwork/launch-API-Server",
+      "default_branch": "master",
+      "language": "go",
+      "has_claude_md": true,
+      "tags": ["infrastructure", "api"],
+      "description": "API server launcher for Accumulate nodes"
+    },
+    {
+      "name": "deploy-app-server",
+      "platform": "gitlab",
+      "remote": "unknown",
+      "local": "/home/paul/go/src/gitlab.com/AccumulateNetwork/DeployAppServer",
+      "default_branch": "main",
+      "language": "go",
+      "has_claude_md": true,
+      "tags": ["infrastructure", "deployment"],
+      "description": "Application server deployment tool"
+    },
+    {
+      "name": "genesis",
+      "platform": "gitlab",
+      "remote": "git@gitlab.com:accumulatenetwork/governance/genesis.git",
+      "local": "/home/paul/go/src/gitlab.com/AccumulateNetwork/genesis",
+      "default_branch": "main",
+      "language": "unknown",
+      "has_claude_md": false,
+      "tags": ["governance", "genesis"],
+      "description": "Genesis configuration and data"
+    },
+    {
+      "name": "backupdbs",
+      "platform": "gitlab",
+      "remote": "git@gitlab.com:AccumulateNetwork/backupdbs.git",
+      "local": "/home/paul/go/src/gitlab.com/AccumulateNetwork/backupdbs",
+      "default_branch": "main",
+      "language": "go",
+      "has_claude_md": false,
+      "tags": ["infrastructure", "database"],
+      "description": "Database backup tools"
+    },
+    {
+      "name": "orchestrator",
+      "platform": "github",
+      "remote": "git@github.com:PaulSnow/orchestrator.git",
+      "local": "/home/paul/go/src/github.com/PaulSnow/orchestrator",
+      "default_branch": "main",
+      "language": "go",
+      "has_claude_md": true,
+      "tags": ["meta", "orchestration"],
+      "description": "AI-assisted development orchestration control plane"
+    }
+  ]
+}
