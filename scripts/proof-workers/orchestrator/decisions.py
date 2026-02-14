@@ -59,12 +59,14 @@ def compute_decision(
 
     # Not running, no signal: process crashed or was killed externally
     if snapshot.status == "running":
-        if snapshot.retry_count < cfg.max_retries:
+        has_progress = bool(snapshot.new_commits.strip())
+        if has_progress or snapshot.retry_count < cfg.max_retries:
             return [Decision(
                 action="restart",
                 worker=worker_id,
                 issue=snapshot.issue_number,
-                reason="process disappeared without signal file",
+                reason="process disappeared"
+                       + (", progress detected — retrying" if has_progress else ", retrying"),
                 continuation=True,
             )]
         else:
@@ -72,7 +74,7 @@ def compute_decision(
                 action="skip",
                 worker=worker_id,
                 issue=snapshot.issue_number,
-                reason="exceeded retry limit after process crash",
+                reason="exceeded retry limit after process crash (no progress)",
             )]
 
     return [Decision(
@@ -157,7 +159,8 @@ def _handle_finished_worker(
 
     else:
         # Non-zero exit code
-        if snapshot.retry_count < cfg.max_retries:
+        has_progress = bool(snapshot.new_commits.strip())
+        if has_progress or snapshot.retry_count < cfg.max_retries:
             # If Claude crashed with no useful output (API error, token limit),
             # restart with a fresh prompt instead of continuation context
             use_continuation = _has_meaningful_output(snapshot.log_tail)
@@ -165,7 +168,8 @@ def _handle_finished_worker(
                 action="restart",
                 worker=worker_id,
                 issue=issue_num,
-                reason=f"exit code {snapshot.exit_code}, retrying"
+                reason=f"exit code {snapshot.exit_code}"
+                       + (", progress detected — retrying" if has_progress else ", retrying")
                        + (" (fresh)" if not use_continuation else " (continuation)"),
                 continuation=use_continuation,
             ))
@@ -174,7 +178,7 @@ def _handle_finished_worker(
                 action="skip",
                 worker=worker_id,
                 issue=issue_num,
-                reason=f"exit code {snapshot.exit_code}, exceeded retry limit",
+                reason=f"exit code {snapshot.exit_code}, exceeded retry limit (no progress)",
             ))
 
     return decisions

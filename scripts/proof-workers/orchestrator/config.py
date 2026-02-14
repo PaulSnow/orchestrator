@@ -20,7 +20,7 @@ class RunConfig:
     initial_assignments: dict[int, int] = field(default_factory=dict)  # worker_id -> issue_number
     num_workers: int = 5
     cycle_interval: int = 60  # seconds
-    max_retries: int = 3
+    max_retries: int = 10
     stall_timeout: int = 900  # seconds
     prompt_type: str = "implement"  # implement | review
     pipeline: list[str] = field(default_factory=lambda: ["implement"])
