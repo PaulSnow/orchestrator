@@ -114,6 +114,7 @@ def execute_decision(
         issue_num = decision.issue
         log_msg(f"Marking issue #{issue_num} as completed")
         state.update_issue_status(issue_num, "completed")
+        state.clear_signal(worker_id)
         state.log_event({"action": "mark_complete", "issue": issue_num})
 
     elif action == "reassign":
@@ -313,9 +314,12 @@ def execute_decision(
 
     elif action == "idle":
         log_msg(f"Worker {worker_id}: idle (no more issues)")
+        state.clear_signal(worker_id)
         worker = state.load_worker(worker_id)
         if worker:
             worker.status = "idle"
+            worker.issue_number = None
+            worker.stage = ""
             state.save_worker(worker)
 
     else:
