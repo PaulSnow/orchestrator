@@ -1,0 +1,342 @@
+{
+  "project": "staking-automation",
+  "repo": "staking",
+  "repo_path": "/home/paul/go/src/gitlab.com/AccumulateNetwork/staking",
+  "worktree_base": "/home/paul/go/src/gitlab.com/AccumulateNetwork/staking-worktrees",
+  "branch_prefix": "proof/issue-",
+  "pipeline": [
+    "optimize",
+    "write_tests",
+    "run_tests_fix",
+    "document"
+  ],
+  "project_context": {
+    "language": "go",
+    "build_command": "go build ./...",
+    "test_command": "go test ./... -v -short -timeout 15m",
+    "safety_rules": [
+      "The staking database is the sole data source. Do NOT make network queries.",
+      "NEVER reset blockchain data. No devnet start, devnet reset, or --reset flags.",
+      "NEVER delete database files. They are irreplaceable.",
+      "BadgerDB exclusive lock - only one process can open staking.db at a time."
+    ],
+    "commit_prefix": "proof",
+    "key_files": [
+      "CLAUDE.md",
+      "internal/light.go",
+      "internal/light_direct_chains.go"
+    ]
+  },
+  "issues": [
+    {
+      "number": 65,
+      "title": "Implement pay period boundary monitor daemon",
+      "priority": 1,
+      "depends_on": [],
+      "wave": 1,
+      "status": "failed",
+      "assigned_worker": 1,
+      "pipeline_stage": 3
+    },
+    {
+      "number": 72,
+      "title": "Refactor pull2 into importable library",
+      "priority": 1,
+      "depends_on": [],
+      "wave": 1,
+      "status": "pending",
+      "assigned_worker": null,
+      "pipeline_stage": 0
+    },
+    {
+      "number": 75,
+      "title": "Implement deterministic leader selection from key book",
+      "priority": 1,
+      "depends_on": [],
+      "wave": 1,
+      "status": "failed",
+      "assigned_worker": 3,
+      "pipeline_stage": 1
+    },
+    {
+      "number": 78,
+      "title": "Implement staking database replication and distribution",
+      "priority": 1,
+      "depends_on": [],
+      "wave": 1,
+      "status": "failed",
+      "assigned_worker": 4,
+      "pipeline_stage": 3
+    },
+    {
+      "number": 79,
+      "title": "Add open auditor mode to staking daemon",
+      "priority": 1,
+      "depends_on": [],
+      "wave": 1,
+      "status": "failed",
+      "assigned_worker": 5,
+      "pipeline_stage": 1
+    },
+    {
+      "number": 66,
+      "title": "Automate dual-phase pull2 pipeline",
+      "priority": 1,
+      "depends_on": [
+        65,
+        72
+      ],
+      "wave": 2,
+      "status": "pending",
+      "assigned_worker": null,
+      "pipeline_stage": 0
+    },
+    {
+      "number": 80,
+      "title": "Add unit tests for period boundary monitor",
+      "priority": 2,
+      "depends_on": [
+        65
+      ],
+      "wave": 2,
+      "status": "pending",
+      "assigned_worker": null,
+      "pipeline_stage": 0
+    },
+    {
+      "number": 81,
+      "title": "Add unit tests for pull2 pipeline automation",
+      "priority": 2,
+      "depends_on": [
+        72
+      ],
+      "wave": 2,
+      "status": "pending",
+      "assigned_worker": null,
+      "pipeline_stage": 0
+    },
+    {
+      "number": 83,
+      "title": "Add unit tests for leader selection and fallback",
+      "priority": 2,
+      "depends_on": [
+        75
+      ],
+      "wave": 2,
+      "status": "pending",
+      "assigned_worker": null,
+      "pipeline_stage": 0
+    },
+    {
+      "number": 85,
+      "title": "Add unit tests for snapshot creation, distribution, and bootstrap",
+      "priority": 2,
+      "depends_on": [
+        78
+      ],
+      "wave": 2,
+      "status": "pending",
+      "assigned_worker": null,
+      "pipeline_stage": 0
+    },
+    {
+      "number": 67,
+      "title": "Automate report generation and transaction building",
+      "priority": 1,
+      "depends_on": [
+        66
+      ],
+      "wave": 3,
+      "status": "pending",
+      "assigned_worker": null,
+      "pipeline_stage": 0
+    },
+    {
+      "number": 76,
+      "title": "Implement transaction submission by elected leader",
+      "priority": 1,
+      "depends_on": [
+        67,
+        75
+      ],
+      "wave": 4,
+      "status": "pending",
+      "assigned_worker": null,
+      "pipeline_stage": 0
+    },
+    {
+      "number": 82,
+      "title": "Add unit tests for report generation and transaction hashing",
+      "priority": 2,
+      "depends_on": [
+        67
+      ],
+      "wave": 4,
+      "status": "pending",
+      "assigned_worker": null,
+      "pipeline_stage": 0
+    },
+    {
+      "number": 77,
+      "title": "Implement validator verify-and-cosign",
+      "priority": 1,
+      "depends_on": [
+        75,
+        76,
+        67
+      ],
+      "wave": 5,
+      "status": "pending",
+      "assigned_worker": null,
+      "pipeline_stage": 0
+    },
+    {
+      "number": 70,
+      "title": "Implement transaction status monitor and confirmation",
+      "priority": 2,
+      "depends_on": [
+        76,
+        77
+      ],
+      "wave": 5,
+      "status": "pending",
+      "assigned_worker": null,
+      "pipeline_stage": 0
+    },
+    {
+      "number": 84,
+      "title": "Add unit tests for transaction submission, verification, and cosigning",
+      "priority": 2,
+      "depends_on": [
+        76,
+        77,
+        70
+      ],
+      "wave": 5,
+      "status": "pending",
+      "assigned_worker": null,
+      "pipeline_stage": 0
+    },
+    {
+      "number": 71,
+      "title": "Create staking daemon main binary",
+      "priority": 1,
+      "depends_on": [
+        65,
+        66,
+        67,
+        70,
+        75,
+        76,
+        77
+      ],
+      "wave": 6,
+      "status": "pending",
+      "assigned_worker": null,
+      "pipeline_stage": 0
+    },
+    {
+      "number": 74,
+      "title": "Add integration test harness for multi-validator simulation",
+      "priority": 2,
+      "depends_on": [
+        71
+      ],
+      "wave": 7,
+      "status": "pending",
+      "assigned_worker": null,
+      "pipeline_stage": 0
+    },
+    {
+      "number": 86,
+      "title": "End-to-end DevNet integration test for automated staking pipeline",
+      "priority": 1,
+      "depends_on": [
+        71,
+        78
+      ],
+      "wave": 7,
+      "status": "pending",
+      "assigned_worker": null,
+      "pipeline_stage": 0
+    },
+    {
+      "number": 73,
+      "title": "Add validator deployment guide and systemd integration",
+      "priority": 2,
+      "depends_on": [
+        71,
+        78,
+        79
+      ],
+      "wave": 7,
+      "status": "pending",
+      "assigned_worker": null,
+      "pipeline_stage": 0
+    }
+  ],
+  "initial_assignments": {
+    "1": 65,
+    "2": 72,
+    "3": 75,
+    "4": 78,
+    "5": 79
+  },
+  "wave_order": [
+    {
+      "wave": 1,
+      "issues": [
+        65,
+        72,
+        75,
+        78,
+        79
+      ]
+    },
+    {
+      "wave": 2,
+      "issues": [
+        66,
+        80,
+        81,
+        83,
+        85
+      ]
+    },
+    {
+      "wave": 3,
+      "issues": [
+        67
+      ]
+    },
+    {
+      "wave": 4,
+      "issues": [
+        76,
+        82
+      ]
+    },
+    {
+      "wave": 5,
+      "issues": [
+        77,
+        70,
+        84
+      ]
+    },
+    {
+      "wave": 6,
+      "issues": [
+        71
+      ]
+    },
+    {
+      "wave": 7,
+      "issues": [
+        74,
+        86,
+        73
+      ]
+    }
+  ]
+}
