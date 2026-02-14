@@ -1,33 +1,32 @@
 # Parallel Workers Playbook
 
-Run 5 autonomous Claude Code workers in parallel via tmux. This is the orchestrator's **primary execution model** for any work that spans multiple branches, requires concurrent reviews, test development, or multi-issue implementation.
+Run autonomous Claude Code workers in parallel via tmux. This is the orchestrator's **primary execution model** for any work that spans multiple branches, requires concurrent reviews, test development, or multi-issue implementation.
 
 Use this playbook for:
-- **Code reviews** across multiple branches (e.g., reviewing all issue branches in a repo)
+- **Code reviews** across multiple branches
 - **Test development** for multiple modules or branches
 - **Feature implementation** across multiple issues
 - **Any parallel work** that would exceed a single Claude session's context window
 
-Single Claude sessions stall on large review or test-writing tasks. The tmux infrastructure provides independent context windows per worker, automatic stall detection, and restart with continuation context.
+Each worker gets an independent context window, automatic stall detection, and restart with compressed progress summaries.
 
 ## Prerequisites
 
 - `tmux` installed
-- `jq` installed
-- `glab` installed and authenticated (for fetching issue descriptions)
 - `claude` CLI installed with API access
-- Staking repo at `/home/paul/go/src/gitlab.com/AccumulateNetwork/staking`
+- `glab` or `gh` installed and authenticated (for fetching issue descriptions)
+- Python 3.10+
 
 ## Quick Start
 
 ```bash
-cd /home/paul/go/src/github.com/PaulSnow/orchestrator
+cd /home/paul/go/src/github.com/PaulSnow/orchestrator/scripts/proof-workers
 
-# Dry run — validate prereqs and print what would happen
-./scripts/proof-workers/tmux-orchestrate.sh --dry-run
+# Dry run — validate config and print what would happen
+python3 -m orchestrator launch --dry-run
 
 # Launch everything
-./scripts/proof-workers/tmux-orchestrate.sh
+python3 -m orchestrator launch
 
 # Attach to the tmux session
 tmux attach -t proof-orchestrator
@@ -37,22 +36,37 @@ tmux attach -t proof-orchestrator
 
 ```
 tmux session: "proof-orchestrator"
-  Window 0: orchestrator   — bash loop invoking Claude Code every 15 min
-  Window 1: worker-1       — claude -p on issue #52
-  Window 2: worker-2       — claude -p on issue #56
-  Window 3: worker-3       — claude -p on issue #61
-  Window 4: worker-4       — claude -p on issue #55
-  Window 5: worker-5       — claude -p on issue #57
-  Window 6: dashboard      — live status display (watch)
+  Window 0: orchestrator   — Python monitor loop (decisions every 60s)
+  Window 1: worker-1       — claude -p on assigned issue
+  Window 2: worker-2       — claude -p on assigned issue
+  ...
+  Window N: worker-N       — claude -p on assigned issue
+  Window N+1: dashboard    — live TUI status display
 ```
 
-Switch windows: `Ctrl-b <number>` (0-6).
+Switch windows: `Ctrl-b w` (window list) or `Ctrl-b <number>`.
+
+## Pipeline Stages
+
+Each issue flows through a configurable pipeline. Stages are defined in `config/proof-issues.json`:
+
+```json
+"pipeline": ["optimize", "write_tests", "run_tests_fix", "document"]
+```
+
+When a worker finishes one stage, the monitor automatically advances it to the next stage on the same branch. Only after the final stage is the issue marked complete and the worker reassigned.
 
 ## Monitoring
 
-### Dashboard (window 6)
+### Dashboard
 
-Shows worker status, signal files, and log sizes. Refreshes every 30 seconds.
+Switch to the dashboard window for a live view of worker status, pipeline stage, and log activity.
+
+### CLI status
+
+```bash
+python3 -m orchestrator status
+```
 
 ### Manual checks
 
@@ -61,96 +75,80 @@ Shows worker status, signal files, and log sizes. Refreshes every 30 seconds.
 tail -20 /tmp/proof-worker-1.log
 
 # Worker state
-cat state/workers/worker-1.json | jq .
-
-# Orchestrator decisions
-cat /tmp/orchestrator-decisions-latest.json | jq .
+cat state/workers/worker-1.json | python3 -m json.tool
 
 # Orchestrator event log
 tail -20 state/orchestrator-log.jsonl
-
-# Is claude running in a worker?
-tmux list-panes -t proof-orchestrator:worker-1 -F '#{pane_pid}' | xargs -I{} pgrep -P {} -f claude
 ```
-
-## Issue Waves
-
-The orchestrator automatically assigns issues respecting dependencies:
-
-| Wave | Issues | Notes |
-|------|--------|-------|
-| 1 | #52, #56, #61, #55, #57 | Independent, run in parallel |
-| 2 | #53, #59 | #53 needs #52 |
-| 3 | #54, #60 | #54 needs #52, #53, #56 |
-| 4 | #58 | Needs all others |
 
 ## Manual Intervention
 
 ### Restart a stalled worker
 
-```bash
-# Kill the claude process in the worker window
-tmux send-keys -t proof-orchestrator:worker-3 C-c
+Kill the claude process — the monitor will detect it and restart automatically:
 
-# The orchestrator will detect this on next cycle and restart it.
-# Or restart manually:
-ISSUE=61; WORKER=3; WORKTREE=/home/paul/go/src/gitlab.com/AccumulateNetwork/staking-worktrees/issue-61
-cd $WORKTREE
-claude -p --dangerously-skip-permissions "$(./scripts/proof-workers/tmux-worker-prompt.sh $ISSUE $WORKER $WORKTREE --continuation)" > /tmp/proof-worker-${WORKER}.log 2>&1; echo $? > /tmp/orchestrator-signal-${WORKER}
+```bash
+tmux send-keys -t proof-orchestrator:worker-3 C-c
 ```
 
 ### Push a branch manually
 
 ```bash
-cd /home/paul/go/src/gitlab.com/AccumulateNetwork/staking-worktrees/issue-52
+cd /path/to/worktree/issue-52
 git push origin proof/issue-52
 ```
 
 ### Check what a worker produced
 
 ```bash
-cd /home/paul/go/src/gitlab.com/AccumulateNetwork/staking-worktrees/issue-52
+cd /path/to/worktree/issue-52
 git log --oneline origin/main..HEAD
 git diff origin/main --stat
+```
+
+### Add an issue mid-run
+
+```bash
+python3 -m orchestrator add-issue 99 --title "New feature" --wave 2
 ```
 
 ## Cleanup
 
 ```bash
 # Kill session and remove worktrees (preserves branches)
-./scripts/proof-workers/tmux-cleanup.sh
+python3 -m orchestrator cleanup
 
 # Kill session but keep worktrees for inspection
-./scripts/proof-workers/tmux-cleanup.sh --keep-worktrees
-
-# Delete proof branches after review
-git -C /home/paul/go/src/gitlab.com/AccumulateNetwork/staking branch --list 'proof/*' | \
-    xargs -r git -C /home/paul/go/src/gitlab.com/AccumulateNetwork/staking branch -D
+python3 -m orchestrator cleanup --keep-worktrees
 ```
 
 ## Configuration
 
-All issue definitions, dependencies, and initial assignments are in `config/proof-issues.json`. Edit this file to change issue assignments or add new issues.
+All settings are in `config/proof-issues.json`:
+
+- **issues**: Issue definitions with dependencies and wave ordering
+- **pipeline**: Stages each issue flows through (default: `["implement"]`)
+- **project_context**: Language, build/test commands, safety rules, key files
+- **initial_assignments**: Which worker starts on which issue
 
 ## State Files
 
-- `state/workers/worker-N.json` — Per-worker state (status, issue, retry count)
-- `state/orchestrator-log.jsonl` — Append-only event log
-- `/tmp/proof-worker-N.log` — Worker output logs
-- `/tmp/orchestrator-signal-N` — Worker completion signal files
-- `/tmp/orchestrator-decision.json` — Latest orchestrator decision output
-- `/tmp/orchestrator-status-report.json` — Latest status report
+- `state/workers/worker-N.json` -- per-worker state (status, issue, pipeline stage, retry count)
+- `state/orchestrator-log.jsonl` -- append-only event log
+- `/tmp/proof-worker-N.log` -- worker output logs
+- `/tmp/orchestrator-signal-N` -- worker completion signal files
+- `/tmp/proof-worker-prompt-N.md` -- generated prompt for each worker
 
-All state files under `state/workers/` are gitignored.
+All state files under `state/` are gitignored.
 
 ## Troubleshooting
 
-**Worker never starts**: Check `tmux` window for shell errors. Verify worktree was created.
+**Worker never starts**: Check the tmux window for shell errors. Verify the worktree was created.
 
-**Worker stalls**: The monitor detects stalls after 15 minutes of no log growth. It will restart with continuation context (previous log tail + git status).
+**Worker stalls**: The monitor detects stalls after the configured stall timeout (default 900s). It restarts with a compressed progress summary (commits, files changed, failure hint).
 
-**API rate limits**: Workers are launched with 30-second stagger. If rate limited, increase `STAGGER_DELAY` in `tmux-orchestrate.sh`.
+**API rate limits**: Workers are launched with a configurable stagger delay (default 30s). Increase `stagger_delay` in the config if rate limited.
 
-**BadgerDB lock contention**: Only one process can open staking.db. Workers should write code and tests without opening the real DB. Integration tests that need it must run one at a time.
+**Claude API crash (No messages returned)**: The decision engine detects these and restarts with a fresh prompt (no continuation context) to avoid repeating the same failure.
 
-**Orchestrator decisions look wrong**: Check `/tmp/orchestrator-decision.json` and `/tmp/orchestrator-claude-stderr.log` for the raw Claude output.
+**BadgerDB lock contention**: Only one process can open staking.db. Workers should write code and tests without opening the real DB.

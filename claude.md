@@ -36,17 +36,18 @@ tmux session: "proof-orchestrator"
 - Each worker writes to `/tmp/proof-worker-N.log` and signals completion via `/tmp/orchestrator-signal-N`
 - The orchestrator monitors log growth and restarts stalled workers with continuation context
 - Configuration lives in `config/proof-issues.json`
-- Scripts live in `scripts/proof-workers/`
+- Python package lives in `scripts/proof-workers/orchestrator/`
 
-### Key scripts
+### CLI commands
 
-| Script | Purpose |
-|--------|---------|
-| `scripts/proof-workers/tmux-orchestrate.sh` | Launch full tmux session with workers |
-| `scripts/proof-workers/tmux-worker-prompt.sh` | Generate implementation prompts for workers |
-| `scripts/proof-workers/tmux-review-prompt.sh` | Generate review prompts for workers |
-| `scripts/proof-workers/tmux-monitor.sh` | Monitor loop: detect stalls, reassign work |
-| `scripts/proof-workers/tmux-cleanup.sh` | Kill session, optionally remove worktrees |
+| Command | Purpose |
+|---------|---------|
+| `python3 -m orchestrator launch` | Launch tmux session with workers |
+| `python3 -m orchestrator monitor` | Run the monitor loop (stall detection, reassignment) |
+| `python3 -m orchestrator dashboard` | Live TUI dashboard |
+| `python3 -m orchestrator status` | One-shot status report |
+| `python3 -m orchestrator cleanup` | Kill session, optionally remove worktrees |
+| `python3 -m orchestrator add-issue` | Add an issue mid-run |
 
 ### Why not Claude Code's built-in Task tool?
 

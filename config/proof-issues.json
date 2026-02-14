@@ -44,7 +44,7 @@
       "priority": 1,
       "depends_on": [],
       "wave": 1,
-      "status": "pending",
+      "status": "failed",
       "assigned_worker": null,
       "pipeline_stage": 0
     },

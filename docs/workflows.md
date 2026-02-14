@@ -78,57 +78,75 @@ Move a task from `tasks/active.md` to `tasks/completed.md`.
 /tmp/orchestrator task complete task-001
 ```
 
-## Parallel Execution Scripts (tmux)
+## Parallel Execution (Python Orchestrator)
 
-The orchestrator's primary execution model for multi-branch work. These scripts in `scripts/proof-workers/` manage tmux sessions with parallel Claude Code workers.
+The orchestrator's primary execution model for multi-branch work. The Python package in `scripts/proof-workers/orchestrator/` manages tmux sessions with parallel Claude Code workers.
 
-### tmux-orchestrate.sh
+Run all commands from `scripts/proof-workers/`.
 
-Launch the full tmux session with 5 workers, orchestrator monitor, and dashboard.
+### launch
+
+Launch the full tmux session with workers, monitor, and dashboard.
 
 ```bash
-# Dry run — validate prereqs and print what would happen
-./scripts/proof-workers/tmux-orchestrate.sh --dry-run
+# Dry run — validate config and print what would happen
+python3 -m orchestrator launch --dry-run
 
 # Launch everything
-./scripts/proof-workers/tmux-orchestrate.sh
+python3 -m orchestrator launch
+
+# Override number of workers
+python3 -m orchestrator launch --workers 3
 
 # Attach
 tmux attach -t proof-orchestrator
 ```
 
-Creates 7 tmux windows: orchestrator (0), worker-1..5 (1-5), dashboard (6). Workers run in git worktrees to avoid branch conflicts. Issues and assignments are configured in `config/proof-issues.json`.
+Creates tmux windows: orchestrator (0), worker-1..N (1-N), dashboard (N+1). Workers run in git worktrees to avoid branch conflicts. Issues, pipeline, and project context are configured in `config/proof-issues.json`.
 
-### tmux-worker-prompt.sh
+### monitor
 
-Generate an implementation prompt for a worker.
-
-```bash
-./scripts/proof-workers/tmux-worker-prompt.sh <issue_number> <worker_id> <worktree_path>
-```
-
-### tmux-review-prompt.sh
-
-Generate a review/test prompt for a worker. Includes a deep review checklist: completeness, test coverage, error handling, race conditions, security, and integration.
+The monitor loop runs automatically after launch. It collects worker snapshots, computes decisions deterministically, and executes actions (push, advance_stage, mark_complete, reassign, restart, skip).
 
 ```bash
-./scripts/proof-workers/tmux-review-prompt.sh <review_issue> <original_issue> <worker_id> <worktree_path>
+# Run manually (usually launched by the orchestrator)
+python3 -m orchestrator monitor --no-delay
 ```
 
-### tmux-monitor.sh
+### dashboard
 
-Monitor loop that checks workers every 15 minutes. Detects stalls (no log growth), restarts workers with continuation context, and reassigns completed workers to the next issue.
+Live TUI dashboard showing worker status, pipeline stage, and log activity.
 
-### tmux-cleanup.sh
+```bash
+python3 -m orchestrator dashboard
+```
+
+### status
+
+One-shot status report.
+
+```bash
+python3 -m orchestrator status
+```
+
+### cleanup
 
 Kill the tmux session and optionally remove worktrees.
 
 ```bash
 # Kill session and remove worktrees
-./scripts/proof-workers/tmux-cleanup.sh
+python3 -m orchestrator cleanup
 
 # Kill session but keep worktrees for inspection
-./scripts/proof-workers/tmux-cleanup.sh --keep-worktrees
+python3 -m orchestrator cleanup --keep-worktrees
+```
+
+### add-issue
+
+Add an issue to the config mid-run.
+
+```bash
+python3 -m orchestrator add-issue 99 --title "New feature" --wave 2
 ```
 
 ## Convenience Scripts

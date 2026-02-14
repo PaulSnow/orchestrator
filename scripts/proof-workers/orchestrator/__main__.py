@@ -13,7 +13,7 @@ from .state import StateManager, now_iso
 
 
 def cmd_launch(args: argparse.Namespace) -> None:
-    """Launch parallel workers (replaces tmux-orchestrate.sh)."""
+    """Launch parallel workers in a tmux session."""
     from . import git, tmux
     from .prompt import generate_prompt
 
@@ -225,7 +225,7 @@ def cmd_launch(args: argparse.Namespace) -> None:
 
 
 def cmd_monitor(args: argparse.Namespace) -> None:
-    """Run the monitor loop (replaces tmux-monitor.sh)."""
+    """Run the monitor loop."""
     from .monitor import run_monitor_loop
 
     cfg = load_config(args.config)
@@ -236,7 +236,7 @@ def cmd_monitor(args: argparse.Namespace) -> None:
 
 
 def cmd_cleanup(args: argparse.Namespace) -> None:
-    """Clean up tmux session and worktrees (replaces tmux-cleanup.sh)."""
+    """Clean up tmux session and worktrees."""
     from .cleanup import run_cleanup
 
     cfg = load_config(args.config)

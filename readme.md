@@ -45,12 +45,8 @@ cmd/                  - CLI tool
 internal/             - Core Go packages
 mcp-server/           - MCP server for Claude Desktop integration
 scripts/
-  proof-workers/      - tmux orchestration scripts (primary execution model)
-    tmux-orchestrate.sh    - Launch parallel worker session
-    tmux-worker-prompt.sh  - Generate implementation prompts
-    tmux-review-prompt.sh  - Generate review prompts
-    tmux-monitor.sh        - Stall detection and worker management
-    tmux-cleanup.sh        - Session and worktree cleanup
+  proof-workers/      - Python orchestrator package (primary execution model)
+    orchestrator/     - Python package: models, config, prompts, decisions, monitor
 reports/              - Generated reports and templates
 docs/                 - Documentation
 ```
@@ -73,25 +69,30 @@ Tasks are tracked in markdown files under `tasks/`:
 The orchestrator's primary execution model for multi-branch work:
 
 ```bash
+# From scripts/proof-workers/:
+
+# Dry run — validate config
+python3 -m orchestrator launch --dry-run
+
 # Launch 5 parallel Claude workers in tmux
-./scripts/proof-workers/tmux-orchestrate.sh
+python3 -m orchestrator launch
 
 # Attach to monitor progress
 tmux attach -t proof-orchestrator
+# Dashboard: Ctrl-b w, select dashboard
 
-# Dashboard: Ctrl-b 6
-# Workers: Ctrl-b 1-5
+# One-shot status
+python3 -m orchestrator status
+
 # Cleanup when done
-./scripts/proof-workers/tmux-cleanup.sh
+python3 -m orchestrator cleanup
 ```
 
 Each worker runs an independent Claude Code process in its own git worktree, with:
-- Automatic stall detection (15-min no-output threshold)
-- Continuation context on restart (previous log tail + git status)
+- Configurable pipeline stages (optimize -> write_tests -> run_tests_fix -> document)
+- Automatic stall detection and restart with compressed progress summaries
 - Signal-file based completion tracking
-- Live dashboard showing worker status and log sizes
-
-See `playbooks/parallel-proof-work.md` for the full guide.
+- Live dashboard showing worker status, pipeline stage, and log activity
 
 ## Playbooks
 

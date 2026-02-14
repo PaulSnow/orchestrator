@@ -18,6 +18,10 @@ reports/*.json
 reports/*.xlsx
 reports/*.csv
 
+# Python
+__pycache__/
+*.pyc
+
 # Go
 /vendor/
 
