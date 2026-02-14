@@ -17,14 +17,20 @@ def compute_decision(
     snapshot: WorkerSnapshot,
     cfg: RunConfig,
     state: StateManager,
+    claimed_issues: Optional[set[int]] = None,
 ) -> list[Decision]:
     """Compute deterministic decisions for a single worker.
 
     Returns a list of decisions (may be multiple, e.g. push + mark_complete + reassign).
     Handles ~90% of cases without invoking Claude.
+
+    claimed_issues: issues already assigned to other workers this cycle,
+    to prevent multiple workers from being assigned the same issue.
     """
     completed = state.get_completed_issues()
     in_progress = {i.number for i in cfg.issues if i.status == "in_progress"}
+    if claimed_issues:
+        in_progress = in_progress | claimed_issues
     worker_id = snapshot.worker_id
 
     # Worker is idle and not assigned
@@ -45,7 +51,7 @@ def compute_decision(
 
     # Signal file exists: worker finished
     if snapshot.signal_exists:
-        return _handle_finished_worker(snapshot, cfg, state, completed, in_progress)
+        return _handle_finished_worker(snapshot, cfg, state, completed, in_progress, claimed_issues)
 
     # Claude is running
     if snapshot.claude_running:
@@ -82,6 +88,7 @@ def _handle_finished_worker(
     state: StateManager,
     completed: set[int],
     in_progress: set[int],
+    claimed_issues: Optional[set[int]] = None,
 ) -> list[Decision]:
     """Handle a worker whose signal file exists (process exited)."""
     worker_id = snapshot.worker_id

@@ -28,7 +28,7 @@ def _fetch_from_platform(issue_number: int, repo_path: str, platform: str) -> st
     try:
         if platform == "gitlab":
             result = subprocess.run(
-                ["glab", "issue", "view", str(issue_number), "--raw"],
+                ["glab", "issue", "view", str(issue_number)],
                 capture_output=True,
                 text=True,
                 cwd=repo_path,

@@ -299,12 +299,16 @@ def execute_decision(
         issue_num = decision.issue
         log_msg(f"Worker {worker_id}: skipping issue #{issue_num} (exceeded retries)")
 
+        state.update_issue_status(issue_num, "failed")
+        state.clear_signal(worker_id)
+
         worker = state.load_worker(worker_id)
         if worker:
-            worker.status = "failed"
+            worker.status = "idle"
+            worker.issue_number = None
+            worker.stage = ""
             state.save_worker(worker)
 
-        state.update_issue_status(issue_num, "failed")
         state.log_event({"action": "skip", "worker": worker_id, "issue": issue_num})
 
     elif action == "idle":
@@ -363,9 +367,14 @@ def run_monitor_loop(cfg: RunConfig, state: StateManager,
             snapshots.append(collect_worker_snapshot(i, cfg, state))
 
         # 2. Compute decisions for each worker
+        #    Track issues claimed during this cycle to prevent duplicates
+        claimed_issues: set[int] = set()
         all_decisions: list[Decision] = []
         for snapshot in snapshots:
-            decisions = compute_decision(snapshot, cfg, state)
+            decisions = compute_decision(snapshot, cfg, state, claimed_issues)
+            for d in decisions:
+                if d.action == "reassign" and d.new_issue is not None:
+                    claimed_issues.add(d.new_issue)
             all_decisions.extend(decisions)
 
         # Log decisions
