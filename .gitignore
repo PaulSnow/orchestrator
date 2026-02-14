@@ -1,5 +1,7 @@
 # Runtime state (rebuilt on demand)
 state/*.json
+state/workers/
+state/*.jsonl
 
 # Build output
 /orchestrator

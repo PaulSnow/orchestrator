@@ -2,6 +2,8 @@
 
 Review code changes in a merge request or branch across Accumulate Network repositories.
 
+**For reviewing multiple branches at once** (e.g., all issue branches in a repo), use `playbooks/parallel-proof-work.md` and the tmux worker infrastructure instead of this single-session playbook. Single Claude sessions will stall on large multi-branch reviews due to context exhaustion.
+
 ## Prerequisites
 
 - Orchestrator CLI is built: `go build -o /tmp/orchestrator ./cmd/orchestrator/ > /tmp/orchestrator-build.log 2>&1`

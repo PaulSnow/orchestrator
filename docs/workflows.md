@@ -78,6 +78,59 @@ Move a task from `tasks/active.md` to `tasks/completed.md`.
 /tmp/orchestrator task complete task-001
 ```
 
+## Parallel Execution Scripts (tmux)
+
+The orchestrator's primary execution model for multi-branch work. These scripts in `scripts/proof-workers/` manage tmux sessions with parallel Claude Code workers.
+
+### tmux-orchestrate.sh
+
+Launch the full tmux session with 5 workers, orchestrator monitor, and dashboard.
+
+```bash
+# Dry run — validate prereqs and print what would happen
+./scripts/proof-workers/tmux-orchestrate.sh --dry-run
+
+# Launch everything
+./scripts/proof-workers/tmux-orchestrate.sh
+
+# Attach
+tmux attach -t proof-orchestrator
+```
+
+Creates 7 tmux windows: orchestrator (0), worker-1..5 (1-5), dashboard (6). Workers run in git worktrees to avoid branch conflicts. Issues and assignments are configured in `config/proof-issues.json`.
+
+### tmux-worker-prompt.sh
+
+Generate an implementation prompt for a worker.
+
+```bash
+./scripts/proof-workers/tmux-worker-prompt.sh <issue_number> <worker_id> <worktree_path>
+```
+
+### tmux-review-prompt.sh
+
+Generate a review/test prompt for a worker. Includes a deep review checklist: completeness, test coverage, error handling, race conditions, security, and integration.
+
+```bash
+./scripts/proof-workers/tmux-review-prompt.sh <review_issue> <original_issue> <worker_id> <worktree_path>
+```
+
+### tmux-monitor.sh
+
+Monitor loop that checks workers every 15 minutes. Detects stalls (no log growth), restarts workers with continuation context, and reassigns completed workers to the next issue.
+
+### tmux-cleanup.sh
+
+Kill the tmux session and optionally remove worktrees.
+
+```bash
+# Kill session and remove worktrees
+./scripts/proof-workers/tmux-cleanup.sh
+
+# Kill session but keep worktrees for inspection
+./scripts/proof-workers/tmux-cleanup.sh --keep-worktrees
+```
+
 ## Convenience Scripts
 
 Standalone Go scripts in `scripts/` that import the internal packages. Run with `go run`.
@@ -126,10 +179,11 @@ Step-by-step guides in `playbooks/` for multi-step operations:
 
 | Playbook | Purpose |
 |----------|---------|
+| `parallel-proof-work.md` | **Parallel work via tmux** (reviews, tests, multi-branch) |
 | `new-feature.md` | Implementing a new feature end-to-end |
 | `bug-fix.md` | Investigating and fixing a bug |
 | `release.md` | Coordinating a release across repos |
-| `code-review.md` | Reviewing code changes |
+| `code-review.md` | Reviewing a single branch |
 | `test-suite.md` | Running the full test suite |
 | `status-report.md` | Generating a weekly status report |
 

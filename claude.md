@@ -10,6 +10,53 @@ You are a **development orchestrator**. Your job is to:
 3. Track work items through their lifecycle
 4. Follow playbooks for multi-step workflows
 5. Report status and progress
+6. **Coordinate parallel work through tmux sessions** -- this is the primary mechanism for reviews, test development, and multi-branch work
+
+## Parallel Execution via tmux
+
+The orchestrator uses **tmux sessions with parallel Claude Code workers** as its primary execution model for any work that spans multiple branches, issues, or requires concurrent review/test/build operations. This is not optional -- single-session Claude Code will stall on large review or test-writing tasks due to context exhaustion.
+
+### When to use tmux workers
+
+- Code reviews across multiple branches
+- Writing tests for multiple modules
+- Building and testing multiple branches
+- Any task that benefits from parallelism and would exceed a single Claude session's context
+
+### How it works
+
+```
+tmux session: "proof-orchestrator"
+  Window 0: orchestrator    -- monitors workers, detects stalls, reassigns work
+  Window 1-5: worker-1..5   -- each runs `claude -p` on an assigned task
+  Window 6: dashboard       -- live status (signal files, log sizes, worker state)
+```
+
+- Workers run in **git worktrees** to avoid branch conflicts
+- Each worker writes to `/tmp/proof-worker-N.log` and signals completion via `/tmp/orchestrator-signal-N`
+- The orchestrator monitors log growth and restarts stalled workers with continuation context
+- Configuration lives in `config/proof-issues.json`
+- Scripts live in `scripts/proof-workers/`
+
+### Key scripts
+
+| Script | Purpose |
+|--------|---------|
+| `scripts/proof-workers/tmux-orchestrate.sh` | Launch full tmux session with workers |
+| `scripts/proof-workers/tmux-worker-prompt.sh` | Generate implementation prompts for workers |
+| `scripts/proof-workers/tmux-review-prompt.sh` | Generate review prompts for workers |
+| `scripts/proof-workers/tmux-monitor.sh` | Monitor loop: detect stalls, reassign work |
+| `scripts/proof-workers/tmux-cleanup.sh` | Kill session, optionally remove worktrees |
+
+### Why not Claude Code's built-in Task tool?
+
+The Task tool spawns agents that share the parent's context budget. For large codebases:
+- Agents hit "Prompt is too long" errors on large diffs
+- No automatic stall detection or restart
+- No resumability across session boundaries
+- No live dashboard for monitoring progress
+
+tmux workers are independent Claude processes with their own full context windows, stall detection, and signal-based coordination.
 
 ## Safety Rules
 
@@ -94,11 +141,14 @@ Playbooks in `playbooks/` provide step-by-step instructions for common workflows
 | `playbooks/new-feature.md` | Implementing a new feature |
 | `playbooks/bug-fix.md` | Investigating and fixing a bug |
 | `playbooks/release.md` | Coordinating a release |
-| `playbooks/code-review.md` | Reviewing code changes |
+| `playbooks/code-review.md` | Reviewing a single branch (single-session) |
 | `playbooks/test-suite.md` | Running tests across repos |
 | `playbooks/status-report.md` | Generating a status report |
+| `playbooks/parallel-proof-work.md` | **Parallel work via tmux** -- reviews, tests, multi-branch |
 
 Read the relevant playbook before starting a workflow. Follow its steps in order.
+
+**For multi-branch reviews, test writing, or any parallel work:** Use `playbooks/parallel-proof-work.md` and the tmux worker infrastructure. Do not attempt to review or test many branches in a single Claude session -- it will stall.
 
 ## CLI Tool
 
