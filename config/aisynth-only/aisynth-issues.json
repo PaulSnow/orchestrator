@@ -1,0 +1,499 @@
+{
+  "project": "aisynth",
+  "repo": "aisynth",
+  "repo_path": "/home/paul/go/src/github.com/PaulSnow/aisynth",
+  "worktree_base": "/home/paul/go/src/github.com/PaulSnow/aisynth-worktrees",
+  "branch_prefix": "feature/issue-",
+  "platform": "github",
+  "tmux_session": "aisynth-orchestrator",
+  "num_workers": 5,
+  "stagger_delay": 10,
+  "max_retries": 10,
+  "pipeline": [
+    "implement"
+  ],
+  "project_context": {
+    "language": "aisynth and c",
+    "build_command": "echo 'Specification phase' > /tmp/aisynth-build.log 2>&1",
+    "test_command": "echo 'Specification phase' > /tmp/aisynth-test.log 2>&1",
+    "safety_rules": [
+      "Follow docs/priority-list.md for dependencies",
+      "Issue #21 (Assembler) is P0 - blocks everything",
+      "Issue #39 (Import System) is P0 - blocks stdlib"
+    ],
+    "commit_prefix": "feat",
+    "key_files": [
+      "docs/priority-list.md",
+      "docs/dtrules-runtime-design.md"
+    ]
+  },
+  "issues": [
+    {
+      "number": 21,
+      "title": "Assembler P0",
+      "priority": 1,
+      "depends_on": [],
+      "wave": 1,
+      "status": "in_progress",
+      "assigned_worker": 1
+    },
+    {
+      "number": 1,
+      "title": "Comparison ops",
+      "priority": 2,
+      "depends_on": [],
+      "wave": 1,
+      "status": "in_progress",
+      "assigned_worker": 2
+    },
+    {
+      "number": 2,
+      "title": "Logical ops",
+      "priority": 2,
+      "depends_on": [],
+      "wave": 1,
+      "status": "in_progress",
+      "assigned_worker": 3,
+      "pipeline_stage": 1
+    },
+    {
+      "number": 3,
+      "title": "Mod/neg",
+      "priority": 2,
+      "depends_on": [],
+      "wave": 1,
+      "status": "in_progress",
+      "assigned_worker": 4
+    },
+    {
+      "number": 4,
+      "title": "Stack ops",
+      "priority": 2,
+      "depends_on": [],
+      "wave": 1,
+      "status": "in_progress",
+      "assigned_worker": 5
+    },
+    {
+      "number": 5,
+      "title": "Assembler",
+      "priority": 2,
+      "depends_on": [],
+      "wave": 1,
+      "status": "completed",
+      "assigned_worker": 1
+    },
+    {
+      "number": 10,
+      "title": "Type tracking",
+      "priority": 2,
+      "depends_on": [],
+      "wave": 1,
+      "status": "completed",
+      "assigned_worker": 2
+    },
+    {
+      "number": 22,
+      "title": "String Literals",
+      "priority": 1,
+      "depends_on": [
+        21
+      ],
+      "wave": 2,
+      "status": "pending"
+    },
+    {
+      "number": 23,
+      "title": "Local Variables",
+      "priority": 1,
+      "depends_on": [
+        21
+      ],
+      "wave": 2,
+      "status": "pending"
+    },
+    {
+      "number": 24,
+      "title": "Structs",
+      "priority": 1,
+      "depends_on": [
+        21,
+        23
+      ],
+      "wave": 3,
+      "status": "pending"
+    },
+    {
+      "number": 6,
+      "title": "Local vars impl",
+      "priority": 2,
+      "depends_on": [
+        23
+      ],
+      "wave": 3,
+      "status": "pending"
+    },
+    {
+      "number": 8,
+      "title": "Struct ops",
+      "priority": 2,
+      "depends_on": [
+        24
+      ],
+      "wave": 4,
+      "status": "pending"
+    },
+    {
+      "number": 25,
+      "title": "Enums",
+      "priority": 1,
+      "depends_on": [
+        24
+      ],
+      "wave": 4,
+      "status": "pending"
+    },
+    {
+      "number": 26,
+      "title": "Pattern Matching",
+      "priority": 1,
+      "depends_on": [
+        25
+      ],
+      "wave": 5,
+      "status": "pending"
+    },
+    {
+      "number": 27,
+      "title": "Comparisons",
+      "priority": 1,
+      "depends_on": [],
+      "wave": 5,
+      "status": "completed",
+      "assigned_worker": 3
+    },
+    {
+      "number": 28,
+      "title": "Boolean ops",
+      "priority": 1,
+      "depends_on": [],
+      "wave": 5,
+      "status": "completed",
+      "assigned_worker": 4
+    },
+    {
+      "number": 29,
+      "title": "Return Values",
+      "priority": 1,
+      "depends_on": [
+        23
+      ],
+      "wave": 5,
+      "status": "pending"
+    },
+    {
+      "number": 30,
+      "title": "Arrays",
+      "priority": 1,
+      "depends_on": [],
+      "wave": 6,
+      "status": "completed",
+      "assigned_worker": 5
+    },
+    {
+      "number": 7,
+      "title": "Array ops",
+      "priority": 2,
+      "depends_on": [
+        30
+      ],
+      "wave": 7,
+      "status": "completed",
+      "assigned_worker": 1
+    },
+    {
+      "number": 31,
+      "title": "For Loops",
+      "priority": 1,
+      "depends_on": [
+        30
+      ],
+      "wave": 7,
+      "status": "completed",
+      "assigned_worker": 4
+    },
+    {
+      "number": 20,
+      "title": "+LOOP",
+      "priority": 2,
+      "depends_on": [
+        31
+      ],
+      "wave": 8,
+      "status": "completed",
+      "assigned_worker": 1
+    },
+    {
+      "number": 32,
+      "title": "HashMap",
+      "priority": 1,
+      "depends_on": [
+        30,
+        25
+      ],
+      "wave": 7,
+      "status": "pending"
+    },
+    {
+      "number": 33,
+      "title": "Option Type",
+      "priority": 1,
+      "depends_on": [
+        25,
+        26
+      ],
+      "wave": 6,
+      "status": "pending"
+    },
+    {
+      "number": 12,
+      "title": "Optional ops",
+      "priority": 2,
+      "depends_on": [
+        33
+      ],
+      "wave": 7,
+      "status": "pending"
+    },
+    {
+      "number": 34,
+      "title": "Float Type",
+      "priority": 2,
+      "depends_on": [],
+      "wave": 6,
+      "status": "completed",
+      "assigned_worker": 1
+    },
+    {
+      "number": 35,
+      "title": "Nested matching",
+      "priority": 2,
+      "depends_on": [
+        26
+      ],
+      "wave": 6,
+      "status": "pending"
+    },
+    {
+      "number": 39,
+      "title": "Import System P0",
+      "priority": 1,
+      "depends_on": [
+        21
+      ],
+      "wave": 8,
+      "status": "pending"
+    },
+    {
+      "number": 36,
+      "title": "Result Type",
+      "priority": 1,
+      "depends_on": [
+        25,
+        26
+      ],
+      "wave": 6,
+      "status": "pending"
+    },
+    {
+      "number": 16,
+      "title": "Error handling",
+      "priority": 2,
+      "depends_on": [
+        36
+      ],
+      "wave": 7,
+      "status": "pending"
+    },
+    {
+      "number": 37,
+      "title": "JSON Library",
+      "priority": 1,
+      "depends_on": [
+        36,
+        32
+      ],
+      "wave": 9,
+      "status": "pending"
+    },
+    {
+      "number": 38,
+      "title": "File I/O",
+      "priority": 1,
+      "depends_on": [
+        36
+      ],
+      "wave": 7,
+      "status": "pending"
+    },
+    {
+      "number": 15,
+      "title": "I/O ops",
+      "priority": 2,
+      "depends_on": [
+        38
+      ],
+      "wave": 8,
+      "status": "pending"
+    },
+    {
+      "number": 40,
+      "title": "String Ops",
+      "priority": 1,
+      "depends_on": [],
+      "wave": 9,
+      "status": "completed",
+      "assigned_worker": 3
+    },
+    {
+      "number": 14,
+      "title": "String support",
+      "priority": 2,
+      "depends_on": [
+        40
+      ],
+      "wave": 10,
+      "status": "completed",
+      "assigned_worker": 3
+    },
+    {
+      "number": 41,
+      "title": "String format",
+      "priority": 2,
+      "depends_on": [
+        40
+      ],
+      "wave": 10,
+      "status": "completed",
+      "assigned_worker": 2
+    },
+    {
+      "number": 42,
+      "title": "Time Primitives",
+      "priority": 2,
+      "depends_on": [],
+      "wave": 10,
+      "status": "completed",
+      "assigned_worker": 2
+    },
+    {
+      "number": 11,
+      "title": "Type conversion",
+      "priority": 2,
+      "depends_on": [],
+      "wave": 10,
+      "status": "completed",
+      "assigned_worker": 1
+    },
+    {
+      "number": 13,
+      "title": "Bitwise ops",
+      "priority": 2,
+      "depends_on": [],
+      "wave": 10,
+      "status": "completed",
+      "assigned_worker": 4
+    },
+    {
+      "number": 17,
+      "title": "Debugging",
+      "priority": 2,
+      "depends_on": [],
+      "wave": 10,
+      "status": "completed",
+      "assigned_worker": 5
+    },
+    {
+      "number": 9,
+      "title": "GC",
+      "priority": 2,
+      "depends_on": [],
+      "wave": 10,
+      "status": "completed",
+      "assigned_worker": 2
+    },
+    {
+      "number": 18,
+      "title": "Stdlib",
+      "priority": 2,
+      "depends_on": [
+        39
+      ],
+      "wave": 11,
+      "status": "pending"
+    },
+    {
+      "number": 19,
+      "title": "Test suite",
+      "priority": 2,
+      "depends_on": [],
+      "wave": 11,
+      "status": "completed",
+      "assigned_worker": 5
+    },
+    {
+      "number": 43,
+      "title": "DTRules Types",
+      "priority": 1,
+      "depends_on": [
+        24,
+        25,
+        26,
+        32,
+        33,
+        36
+      ],
+      "wave": 12,
+      "status": "pending"
+    },
+    {
+      "number": 44,
+      "title": "DTRules Engine",
+      "priority": 1,
+      "depends_on": [
+        43
+      ],
+      "wave": 13,
+      "status": "pending"
+    },
+    {
+      "number": 45,
+      "title": "DTRules Loader",
+      "priority": 1,
+      "depends_on": [
+        43,
+        37
+      ],
+      "wave": 13,
+      "status": "pending"
+    },
+    {
+      "number": 46,
+      "title": "DTRules Testing",
+      "priority": 2,
+      "depends_on": [
+        44,
+        45
+      ],
+      "wave": 14,
+      "status": "pending"
+    }
+  ],
+  "initial_assignments": {
+    "1": 21,
+    "2": 1,
+    "3": 2,
+    "4": 3,
+    "5": 4
+  }
+}

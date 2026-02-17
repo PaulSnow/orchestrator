@@ -106,6 +106,7 @@ class Worker:
     commits: list[str] = field(default_factory=list)
     claude_pid: Optional[int] = None
     stage: str = ""  # current pipeline stage name (for display/logging)
+    source_config: Optional[str] = None  # path to config that owns this issue (cross-project)
 
     def to_dict(self) -> dict:
         d = {
@@ -123,6 +124,8 @@ class Worker:
         }
         if self.stage:
             d["stage"] = self.stage
+        if self.source_config:
+            d["source_config"] = self.source_config
         return d
 
     @classmethod
@@ -140,18 +143,20 @@ class Worker:
             commits=data.get("commits", []),
             claude_pid=data.get("claude_pid"),
             stage=data.get("stage", ""),
+            source_config=data.get("source_config"),
         )
 
 
 @dataclass
 class Decision:
     """A decision made by the orchestrator."""
-    action: str  # noop | push | mark_complete | reassign | restart | skip | idle | advance_stage
+    action: str  # noop | push | mark_complete | reassign | reassign_cross | restart | skip | idle | advance_stage | defer | retry_failed
     worker: int
     issue: Optional[int] = None
     new_issue: Optional[int] = None
     reason: str = ""
     continuation: bool = False
+    source_config: Optional[str] = None  # config path for cross-project assignments
 
     def to_dict(self) -> dict:
         d: dict = {"action": self.action, "worker": self.worker}
@@ -163,6 +168,8 @@ class Decision:
             d["reason"] = self.reason
         if self.continuation:
             d["continuation"] = True
+        if self.source_config:
+            d["source_config"] = self.source_config
         return d
 
 

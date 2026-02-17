@@ -162,17 +162,17 @@ class StateManager:
 
     # ── Signal files ───────────────────────────────────────────────────────
 
-    @staticmethod
-    def signal_path(worker_id: int) -> Path:
-        return Path(f"/tmp/orchestrator-signal-{worker_id}")
+    def signal_path(self, worker_id: int) -> Path:
+        project = self.cfg.project or "default"
+        return Path(f"/tmp/{project}-signal-{worker_id}")
 
-    @staticmethod
-    def log_path(worker_id: int) -> Path:
-        return Path(f"/tmp/proof-worker-{worker_id}.log")
+    def log_path(self, worker_id: int) -> Path:
+        project = self.cfg.project or "default"
+        return Path(f"/tmp/{project}-worker-{worker_id}.log")
 
-    @staticmethod
-    def prompt_path(worker_id: int) -> Path:
-        return Path(f"/tmp/proof-worker-prompt-{worker_id}.md")
+    def prompt_path(self, worker_id: int) -> Path:
+        project = self.cfg.project or "default"
+        return Path(f"/tmp/{project}-worker-prompt-{worker_id}.md")
 
     def read_signal(self, worker_id: int) -> Optional[int]:
         """Read exit code from signal file, or None if not present."""

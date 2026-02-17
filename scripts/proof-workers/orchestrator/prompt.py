@@ -20,11 +20,15 @@ def generate_prompt(
     cfg: RunConfig,
     state: StateManager,
     continuation: bool = False,
+    retry_context: str = "",
 ) -> str:
     """Dispatch to the correct stage prompt generator.
 
     This is the main entry point for prompt generation. It selects the
     right generator based on the pipeline stage name.
+
+    retry_context: optional analysis from a previous failed attempt,
+    injected so the worker knows what went wrong and how to fix it.
     """
     generators = {
         "implement": _generate_implement,
@@ -40,13 +44,13 @@ def generate_prompt(
 
     continuation_ctx = ""
     if continuation:
-        continuation_ctx = _get_continuation_context(worker_id, worktree)
+        continuation_ctx = _get_continuation_context(worker_id, worktree, state)
 
     header = _common_header(issue, worker_id, worktree, repo, cfg, state, stage)
     body = generator(issue, repo, cfg)
     footer = _common_footer(issue, worker_id, repo, cfg)
 
-    return f"{header}\n{body}\n{continuation_ctx}\n{footer}"
+    return f"{header}\n{retry_context}\n{body}\n{continuation_ctx}\n{footer}"
 
 
 def generate_review_prompt(
@@ -380,10 +384,144 @@ This code has been implemented, optimized, and all tests are passing. Your job i
 """
 
 
+# ── Retry context extraction ───────────────────────────────────────────────
+
+
+def extract_retry_context(log_path: str) -> str:
+    """Extract the analysis and explore output from a retry log.
+
+    Reads the log written by the retry_analyze and retry_explore phases
+    and formats it as context for the implement prompt. Strips DEADMAN
+    markers to keep the context clean.
+    """
+    from pathlib import Path
+
+    path = Path(log_path)
+    if not path.exists():
+        return ""
+
+    try:
+        text = path.read_text(errors="replace")
+    except OSError:
+        return ""
+
+    if not text.strip():
+        return ""
+
+    # Strip DEADMAN markers — they're infrastructure, not context
+    lines = [l for l in text.splitlines() if not l.startswith("[DEADMAN]")]
+    content = "\n".join(lines).strip()
+
+    if not content:
+        return ""
+
+    # Truncate to avoid blowing the context window
+    max_chars = 8000
+    if len(content) > max_chars:
+        content = content[-max_chars:]
+
+    return f"""
+## Previous Failure Analysis
+
+This issue previously failed. Two analysis passes were run to diagnose the problem and propose solutions. Their output is below — use it to avoid repeating the same mistakes.
+
+<failure-analysis>
+{content}
+</failure-analysis>
+
+**Important**: The above analysis was done by a separate session. Verify its conclusions against the actual code before acting on them. Focus on the recommended approach.
+"""
+
+
+# ── Retry analysis prompts ─────────────────────────────────────────────────
+
+
+def generate_failure_analysis_prompt(
+    issue: Issue,
+    worker_id: int,
+    worktree: str,
+    repo: RepoConfig,
+    cfg: RunConfig,
+    state: StateManager,
+) -> str:
+    """Generate a prompt to diagnose why a previous attempt failed.
+
+    Directs Claude to read the worker log, git state, and issue description,
+    then output a diagnosis of what went wrong.
+    """
+    project = cfg.project or "default"
+    log_file = f"/tmp/{project}-worker-{worker_id}.log"
+    branch = f"{repo.branch_prefix}{issue.number}"
+
+    return f"""You are diagnosing a failed attempt at implementing issue #{issue.number} ({issue.title}) in the {cfg.project} project.
+
+## Task
+
+Read the following sources and produce a short diagnosis of what went wrong:
+
+1. **Worker log**: `{log_file}` — read the last 200 lines for error messages and failure context
+2. **Git state**: Run `git log --oneline -10` and `git status` in the worktree at `{worktree}`
+3. **Issue description**: Issue #{issue.number} — {issue.title}
+4. **Branch**: `{branch}`
+
+## Output Format
+
+Write a structured diagnosis:
+- **Root cause**: What specifically failed (compilation error, test failure, wrong approach, API error, etc.)
+- **Progress made**: What was accomplished before the failure
+- **Key errors**: The specific error messages or failure points
+- **Blockers**: Any external dependencies or issues that prevented completion
+
+Keep the diagnosis concise (under 500 words). Focus on actionable information.
+"""
+
+
+def generate_explore_options_prompt(
+    issue: Issue,
+    worker_id: int,
+    worktree: str,
+    repo: RepoConfig,
+    cfg: RunConfig,
+    state: StateManager,
+) -> str:
+    """Generate a prompt to propose approaches to overcome a failure.
+
+    Runs after failure analysis. Directs Claude to propose concrete approaches
+    to overcome the identified failure.
+    """
+    branch = f"{repo.branch_prefix}{issue.number}"
+
+    return f"""Based on the failure analysis above, propose concrete approaches to successfully complete issue #{issue.number} ({issue.title}).
+
+## Context
+
+- **Worktree**: `{worktree}`
+- **Branch**: `{branch}`
+- **Project**: {cfg.project}
+{f"- **Language**: {cfg.project_context.language}" if cfg.project_context.language else ""}
+{f"- **Build**: `{cfg.project_context.build_command}`" if cfg.project_context.build_command else ""}
+{f"- **Test**: `{cfg.project_context.test_command}`" if cfg.project_context.test_command else ""}
+
+## Output Format
+
+Produce a ranked list of 2-3 approaches:
+
+1. **[Approach name]**: Description of the approach, what to change, and why it addresses the root cause.
+2. **[Approach name]**: Alternative approach if the first doesn't work.
+
+For each approach, specify:
+- Files to modify
+- Key changes needed
+- Risks or trade-offs
+
+Recommend the approach most likely to succeed. Keep this concise and actionable.
+"""
+
+
 # ── Continuation context ──────────────────────────────────────────────────
 
 
-def _get_continuation_context(worker_id: int, worktree: str) -> str:
+def _get_continuation_context(worker_id: int, worktree: str, state=None) -> str:
     """Build a compressed progress summary from the previous session.
 
     Instead of dumping raw log lines (which waste tokens and can cause the
@@ -392,7 +530,6 @@ def _get_continuation_context(worker_id: int, worktree: str) -> str:
     The worker gets a clean context with just enough info to continue.
     """
     from . import git
-    from .state import StateManager
 
     # Concrete progress: what commits exist on this branch
     git_log = git.get_log(worktree, count=10) or "(no commits yet)"
@@ -404,7 +541,7 @@ def _get_continuation_context(worker_id: int, worktree: str) -> str:
     git_status = git.get_status(worktree) or "(clean working tree)"
 
     # Extract failure reason from log — just the last few lines, not a dump
-    failure_hint = _extract_failure_hint(worker_id)
+    failure_hint = _extract_failure_hint(worker_id, state)
 
     return f"""
 
@@ -434,15 +571,16 @@ Review the commits and file changes to understand what was accomplished. Continu
 """
 
 
-def _extract_failure_hint(worker_id: int) -> str:
+def _extract_failure_hint(worker_id: int, state=None) -> str:
     """Extract a compact failure reason from the worker log.
 
     Looks for error lines, test failures, and build errors. Returns a
     short summary instead of raw log output.
     """
-    from .state import StateManager
+    if state is None:
+        return "No log available (no state manager)."
 
-    log_path = StateManager.log_path(worker_id)
+    log_path = state.log_path(worker_id)
     if not log_path.exists():
         return "No log available."
 

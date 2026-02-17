@@ -10,6 +10,9 @@ from typing import Optional
 
 from .models import Issue, ProjectContext, RepoConfig
 
+# Global worker count — easy to change: 1, 2, 5, etc.
+NUM_WORKERS = 5
+
 
 @dataclass
 class RunConfig:
@@ -77,9 +80,14 @@ def load_config(config_path: str | Path) -> RunConfig:
     cfg = RunConfig()
     cfg.config_path = config_path.resolve()
     cfg.orch_root = _find_orch_root(config_path)
-    cfg.state_dir = cfg.orch_root / "state"
 
     cfg.project = raw.get("project", "")
+
+    # Use project-specific state directory to allow multiple orchestrators
+    if cfg.project:
+        cfg.state_dir = cfg.orch_root / "state" / cfg.project
+    else:
+        cfg.state_dir = cfg.orch_root / "state"
     cfg.tmux_session = raw.get("tmux_session", cfg.tmux_session)
     cfg.num_workers = raw.get("num_workers", cfg.num_workers)
     cfg.cycle_interval = raw.get("cycle_interval", cfg.cycle_interval)
@@ -149,6 +157,8 @@ def _find_orch_root(config_path: Path) -> Path:
 
 def validate_config(cfg: RunConfig) -> list[str]:
     """Validate configuration and return list of errors (empty = valid)."""
+    from .prompt import VALID_STAGES
+
     errors: list[str] = []
 
     if not cfg.repos:
@@ -163,12 +173,46 @@ def validate_config(cfg: RunConfig) -> list[str]:
     if not cfg.issues:
         errors.append("No issues configured")
 
-    # Check issue dependencies reference valid issues
+    # Validate pipeline stages
+    if not cfg.pipeline:
+        errors.append("pipeline is empty - must have at least one stage")
+    else:
+        for stage in cfg.pipeline:
+            if stage not in VALID_STAGES:
+                errors.append(
+                    f"Invalid pipeline stage '{stage}'. Valid: {sorted(VALID_STAGES)}"
+                )
+
+    # Check issue dependencies reference valid issues and detect cycles
     issue_numbers = {i.number for i in cfg.issues}
     for issue in cfg.issues:
         for dep in issue.depends_on:
-            if dep not in issue_numbers:
+            if dep == issue.number:
+                errors.append(f"Issue #{issue.number} depends on itself")
+            elif dep not in issue_numbers:
                 errors.append(f"Issue #{issue.number} depends on #{dep} which is not in the issue list")
+
+    # Detect circular dependencies using DFS
+    dep_map = {i.number: set(i.depends_on) for i in cfg.issues}
+
+    def has_cycle(node: int, visited: set, stack: set) -> bool:
+        visited.add(node)
+        stack.add(node)
+        for dep in dep_map.get(node, set()):
+            if dep not in visited:
+                if has_cycle(dep, visited, stack):
+                    return True
+            elif dep in stack:
+                return True
+        stack.discard(node)
+        return False
+
+    visited: set[int] = set()
+    for num in issue_numbers:
+        if num not in visited:
+            if has_cycle(num, visited, set()):
+                errors.append(f"Circular dependency detected involving issue #{num}")
+                break
 
     # Check initial assignments reference valid workers and issues
     for worker_id, issue_num in cfg.initial_assignments.items():
@@ -185,3 +229,35 @@ def default_config_path() -> Path:
     script_dir = Path(__file__).resolve().parent.parent
     orch_root = script_dir.parent.parent
     return orch_root / "config" / "proof-issues.json"
+
+
+def default_config_dir() -> Path:
+    """Return the default config directory."""
+    script_dir = Path(__file__).resolve().parent.parent
+    orch_root = script_dir.parent.parent
+    return orch_root / "config"
+
+
+def load_all_configs(config_dir: str | Path) -> list[RunConfig]:
+    """Load all *-issues.json configs from a directory.
+
+    Returns a list of RunConfig objects, one per config file found.
+    """
+    config_dir = Path(config_dir)
+    if not config_dir.is_dir():
+        print(f"ERROR: Config directory not found: {config_dir}", file=sys.stderr)
+        sys.exit(1)
+
+    configs: list[RunConfig] = []
+    for config_path in sorted(config_dir.glob("*-issues.json")):
+        try:
+            cfg = load_config(config_path)
+            configs.append(cfg)
+        except (SystemExit, Exception) as e:
+            print(f"WARNING: Failed to load {config_path}: {e}", file=sys.stderr)
+
+    if not configs:
+        print(f"ERROR: No *-issues.json files found in {config_dir}", file=sys.stderr)
+        sys.exit(1)
+
+    return configs

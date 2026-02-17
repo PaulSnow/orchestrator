@@ -4,10 +4,17 @@ from __future__ import annotations
 
 import time
 from datetime import datetime, timezone
+from pathlib import Path
 
-from .config import RunConfig
+from .config import RunConfig, load_config
 from .issues import get_completed_count, get_failed_count, get_pending_count
 from .state import StateManager
+
+
+def _discover_all_configs(cfg: RunConfig) -> list[Path]:
+    """Find all *-issues.json config files in the config directory."""
+    config_dir = cfg.config_path.parent
+    return sorted(config_dir.glob("*-issues.json"))
 
 
 def _format_duration(seconds: float) -> str:
@@ -22,13 +29,13 @@ def _format_duration(seconds: float) -> str:
         return f"{hours}h {mins}m"
 
 
-def _get_log_last_line(worker_id: int) -> str:
+def _get_log_last_line(state: StateManager, worker_id: int) -> str:
     """Get a summary of the last log activity."""
-    log_path = StateManager.log_path(worker_id)
-    if not log_path.exists():
+    path = state.log_path(worker_id)
+    if not path.exists():
         return "--"
     try:
-        text = log_path.read_text(errors="replace")
+        text = path.read_text(errors="replace")
         lines = [l.strip() for l in text.splitlines() if l.strip()]
         if not lines:
             return "(empty)"
@@ -71,6 +78,32 @@ def _run_rich_dashboard(cfg: RunConfig, state: StateManager) -> None:
                 time.sleep(2)
     except KeyboardInterrupt:
         pass
+
+
+def _build_all_progress(cfg: RunConfig) -> list[str]:
+    """Build progress bars for all configured projects."""
+    lines = []
+    bar_width = 30
+    config_files = _discover_all_configs(cfg)
+
+    for config_path in config_files:
+        try:
+            other_cfg = load_config(config_path)
+        except (SystemExit, Exception):
+            continue
+        c = get_completed_count(other_cfg)
+        f = get_failed_count(other_cfg)
+        t = len(other_cfg.issues)
+        if t == 0:
+            continue
+        pct = c / t
+        filled = int(pct * bar_width)
+        bar = "#" * filled + "-" * (bar_width - filled)
+        label = other_cfg.project or config_path.stem
+        fail_str = f"  ({f} failed)" if f > 0 else ""
+        lines.append(f"  {label:<22} [{bar}] {c}/{t}{fail_str}")
+
+    return lines
 
 
 def _build_rich_display(cfg: RunConfig, state: StateManager,
@@ -130,21 +163,11 @@ def _build_rich_display(cfg: RunConfig, state: StateManager,
                 pass
 
         retries_str = str(worker.retry_count) if worker.retry_count > 0 else "--"
-        log_last = _get_log_last_line(i)
+        log_last = _get_log_last_line(state, i)
 
         worker_table.add_row(
             str(i), issue_str, stage_str, status_text, time_str, retries_str, log_last,
         )
-
-    # Progress bar
-    if total > 0:
-        pct = completed / total
-        bar_width = 30
-        filled = int(pct * bar_width)
-        bar = "#" * filled + "-" * (bar_width - filled)
-        progress_line = f"  Progress: [{bar}] {completed}/{total}"
-    else:
-        progress_line = "  No issues configured"
 
     # Build status lines
     pipeline_str = " -> ".join(cfg.pipeline) if len(cfg.pipeline) > 1 else cfg.pipeline[0] if cfg.pipeline else "implement"
@@ -176,7 +199,10 @@ def _build_rich_display(cfg: RunConfig, state: StateManager,
             total_retries += w.retry_count
     status_lines.append(f"  Retries: {total_retries} | Failures: {failed}")
     status_lines.append("")
-    status_lines.append(progress_line)
+
+    # Progress bars for all configured projects
+    progress_lines = _build_all_progress(cfg)
+    status_lines.extend(progress_lines)
 
     # Combine into panel
     from rich.console import Group
@@ -222,18 +248,14 @@ def _run_plain_dashboard(cfg: RunConfig, state: StateManager) -> None:
                 issue_str = f"#{worker.issue_number}" if worker.issue_number else "idle"
                 stage_str = worker.stage if worker.stage else "--"
                 retries = str(worker.retry_count) if worker.retry_count > 0 else "--"
-                log_last = _get_log_last_line(i)[:35]
+                log_last = _get_log_last_line(state, i)[:35]
                 print(f"{i:<4} {issue_str:<8} {stage_str:<15} {worker.status:<10} {retries:<8} {log_last}")
 
             print()
 
-            # Progress bar
-            if total > 0:
-                pct = completed / total
-                bar_width = 30
-                filled = int(pct * bar_width)
-                bar = "#" * filled + "-" * (bar_width - filled)
-                print(f"[{bar}] {completed}/{total}")
+            # Progress bars for all projects
+            for line in _build_all_progress(cfg):
+                print(line)
 
             print(f"\nFailures: {failed}")
             print("\nPress Ctrl-C to exit dashboard")

@@ -1,0 +1,747 @@
+{
+  "project": "dtrules",
+  "repo": "dtrules",
+  "repo_path": "/home/paul/go/src/github.com/DTRules/DTRules",
+  "worktree_base": "/home/paul/go/src/github.com/DTRules/DTRules-worktrees",
+  "branch_prefix": "fix/issue-",
+  "platform": "github",
+  "tmux_session": "dtrules-orchestrator",
+  "num_workers": 5,
+  "stagger_delay": 30,
+  "pipeline": [
+    "implement",
+    "optimize",
+    "write_tests",
+    "run_tests_fix",
+    "document"
+  ],
+  "project_context": {
+    "language": "java and go",
+    "build_command": "cd go && go build ./... > /tmp/go-build.log 2>&1",
+    "test_command": "cd go && go test ./... -v -short > /tmp/go-test.log 2>&1",
+    "safety_rules": [
+      "This is a multi-language project: Java and Go.",
+      "Maven is NOT installed and NOT required. Do NOT attempt to use mvn. The pom.xml is legacy (14-year-old Java code).",
+      "Java code must be compiled directly with javac if needed, but active development is in Go.",
+      "The Go code is in go/. Run Go commands from the go/ directory.",
+      "The Java code in dtrules-engine/, compilerutil/, dsl/, ui/ is legacy reference. Focus changes on the Go code.",
+      "Build and test only the Go code: cd go && go build ./... && go test ./... -v -short"
+    ],
+    "commit_prefix": "fix",
+    "key_files": [
+      "README.md",
+      "go/go.mod",
+      "go/README.md"
+    ]
+  },
+  "issues": [
+    {
+      "number": 31,
+      "title": "Optimize ASM runtime performance",
+      "priority": 1,
+      "depends_on": [],
+      "wave": 1,
+      "status": "completed",
+      "assigned_worker": 1,
+      "pipeline_stage": 4
+    },
+    {
+      "number": 29,
+      "title": "22-year anniversary post",
+      "priority": 2,
+      "depends_on": [],
+      "wave": 1,
+      "status": "completed",
+      "assigned_worker": 2,
+      "pipeline_stage": 4
+    },
+    {
+      "number": 24,
+      "title": "Upgrade Apache POI 3.7 to 3.17 to address CVE-2017-12626",
+      "priority": 1,
+      "depends_on": [],
+      "wave": 1,
+      "status": "completed",
+      "assigned_worker": 3,
+      "pipeline_stage": 4
+    },
+    {
+      "number": 14,
+      "title": "Balanced Decision Tables",
+      "priority": 2,
+      "depends_on": [],
+      "wave": 2,
+      "status": "completed",
+      "assigned_worker": 4,
+      "pipeline_stage": 4
+    },
+    {
+      "number": 7,
+      "title": "General Cleanup: otherwise always reported as unused",
+      "priority": 2,
+      "depends_on": [],
+      "wave": 2,
+      "status": "completed",
+      "assigned_worker": 5,
+      "pipeline_stage": 4
+    },
+    {
+      "number": 8,
+      "title": "General Cleanup: Documenting Fields on Decision Tables",
+      "priority": 2,
+      "depends_on": [],
+      "wave": 2,
+      "status": "completed",
+      "assigned_worker": 2,
+      "pipeline_stage": 4
+    },
+    {
+      "number": 3,
+      "title": "Trace.instancesof(Entity) NullPointerException",
+      "priority": 1,
+      "depends_on": [],
+      "wave": 2,
+      "status": "completed",
+      "assigned_worker": 2,
+      "pipeline_stage": 4
+    },
+    {
+      "number": 21,
+      "title": "failure to execute table",
+      "priority": 1,
+      "depends_on": [],
+      "wave": 2,
+      "status": "completed",
+      "assigned_worker": 3,
+      "pipeline_stage": 4
+    },
+    {
+      "number": 1,
+      "title": "Arrays are not rebuilt by setting a position in the Trace",
+      "priority": 2,
+      "depends_on": [],
+      "wave": 3,
+      "status": "completed",
+      "assigned_worker": 5,
+      "pipeline_stage": 4
+    },
+    {
+      "number": 20,
+      "title": "Change the Trace format of the XML so that all tags are consistent",
+      "priority": 2,
+      "depends_on": [],
+      "wave": 3,
+      "status": "completed",
+      "assigned_worker": 4,
+      "pipeline_stage": 4
+    },
+    {
+      "number": 22,
+      "title": "Columns in Trace not Highlighting",
+      "priority": 2,
+      "depends_on": [],
+      "wave": 3,
+      "status": "completed",
+      "assigned_worker": 3,
+      "pipeline_stage": 4
+    },
+    {
+      "number": 33,
+      "title": "Build Java performance measurement infrastructure",
+      "priority": 1,
+      "depends_on": [],
+      "wave": 4,
+      "status": "completed",
+      "assigned_worker": 2,
+      "pipeline_stage": 4
+    },
+    {
+      "number": 34,
+      "title": "Cross-runtime performance comparison (all 4 runtimes)",
+      "priority": 1,
+      "depends_on": [
+        33,
+        38
+      ],
+      "wave": 9,
+      "status": "pending",
+      "assigned_worker": null,
+      "pipeline_stage": 0
+    },
+    {
+      "number": 35,
+      "title": "Define formal bytecode specification for all runtimes",
+      "priority": 1,
+      "depends_on": [],
+      "wave": 4,
+      "status": "completed",
+      "assigned_worker": 3,
+      "pipeline_stage": 4
+    },
+    {
+      "number": 36,
+      "title": "Document and verify DTState memory layout for ASM access",
+      "priority": 1,
+      "depends_on": [
+        35
+      ],
+      "wave": 5,
+      "status": "in_progress",
+      "assigned_worker": 2,
+      "pipeline_stage": 0
+    },
+    {
+      "number": 37,
+      "title": "NativeASM: Complete arithmetic opcodes for all type combinations",
+      "priority": 1,
+      "depends_on": [
+        44
+      ],
+      "wave": 7,
+      "status": "pending",
+      "assigned_worker": null,
+      "pipeline_stage": 0
+    },
+    {
+      "number": 38,
+      "title": "Remove all VMState sync machinery",
+      "priority": 1,
+      "depends_on": [
+        37,
+        39,
+        70,
+        72
+      ],
+      "wave": 8,
+      "status": "pending",
+      "assigned_worker": null,
+      "pipeline_stage": 0
+    },
+    {
+      "number": 39,
+      "title": "x86-64-ASM: Complete arithmetic opcodes for all type combinations",
+      "priority": 1,
+      "depends_on": [
+        44
+      ],
+      "wave": 7,
+      "status": "pending",
+      "assigned_worker": null,
+      "pipeline_stage": 0
+    },
+    {
+      "number": 40,
+      "title": "Runtimes own their VMState; provide init/query interfaces",
+      "priority": 1,
+      "depends_on": [
+        35
+      ],
+      "wave": 5,
+      "status": "in_progress",
+      "assigned_worker": 2,
+      "pipeline_stage": 1
+    },
+    {
+      "number": 41,
+      "title": "x86-64-ASM: Complete comparison opcodes for all type combinations",
+      "priority": 1,
+      "depends_on": [
+        44
+      ],
+      "wave": 7,
+      "status": "pending",
+      "assigned_worker": null,
+      "pipeline_stage": 0
+    },
+    {
+      "number": 42,
+      "title": "NativeASM: Complete comparison opcodes for all type combinations",
+      "priority": 1,
+      "depends_on": [
+        44
+      ],
+      "wave": 7,
+      "status": "pending",
+      "assigned_worker": null,
+      "pipeline_stage": 0
+    },
+    {
+      "number": 43,
+      "title": "Automated cross-runtime validation for all test vectors",
+      "priority": 1,
+      "depends_on": [
+        37,
+        39,
+        70,
+        72
+      ],
+      "wave": 8,
+      "status": "pending",
+      "assigned_worker": null,
+      "pipeline_stage": 0
+    },
+    {
+      "number": 44,
+      "title": "Implement zero-overhead dispatch loop with no per-opcode stack frames",
+      "priority": 1,
+      "depends_on": [
+        36,
+        40
+      ],
+      "wave": 6,
+      "status": "pending",
+      "assigned_worker": null,
+      "pipeline_stage": 0
+    },
+    {
+      "number": 45,
+      "title": "Re-run benchmarks after architecture fix",
+      "priority": 1,
+      "depends_on": [
+        38
+      ],
+      "wave": 9,
+      "status": "pending",
+      "assigned_worker": null,
+      "pipeline_stage": 0
+    },
+    {
+      "number": 46,
+      "title": "x86-64-ASM: Complete boolean opcodes",
+      "priority": 1,
+      "depends_on": [
+        44
+      ],
+      "wave": 7,
+      "status": "pending",
+      "assigned_worker": null,
+      "pipeline_stage": 0
+    },
+    {
+      "number": 47,
+      "title": "NativeASM: Complete boolean opcodes",
+      "priority": 1,
+      "depends_on": [
+        44
+      ],
+      "wave": 7,
+      "status": "pending",
+      "assigned_worker": null,
+      "pipeline_stage": 0
+    },
+    {
+      "number": 48,
+      "title": "Update docs to reflect runtime-owned state model",
+      "priority": 1,
+      "depends_on": [
+        38
+      ],
+      "wave": 9,
+      "status": "pending",
+      "assigned_worker": null,
+      "pipeline_stage": 0
+    },
+    {
+      "number": 49,
+      "title": "Define memory management strategy for ASM runtimes",
+      "priority": 1,
+      "depends_on": [
+        35,
+        40
+      ],
+      "wave": 6,
+      "status": "completed",
+      "assigned_worker": 1,
+      "pipeline_stage": 4
+    },
+    {
+      "number": 50,
+      "title": "x86-64-ASM: Complete stack manipulation opcodes",
+      "priority": 1,
+      "depends_on": [
+        44
+      ],
+      "wave": 7,
+      "status": "pending",
+      "assigned_worker": null,
+      "pipeline_stage": 0
+    },
+    {
+      "number": 51,
+      "title": "NativeASM: Complete stack manipulation opcodes",
+      "priority": 1,
+      "depends_on": [
+        44
+      ],
+      "wave": 7,
+      "status": "pending",
+      "assigned_worker": null,
+      "pipeline_stage": 0
+    },
+    {
+      "number": 52,
+      "title": "Implement OpExec for recursive bytecode execution",
+      "priority": 1,
+      "depends_on": [
+        44
+      ],
+      "wave": 7,
+      "status": "pending",
+      "assigned_worker": null,
+      "pipeline_stage": 0
+    },
+    {
+      "number": 53,
+      "title": "Implement policy statement handling in stack operators",
+      "priority": 1,
+      "depends_on": [
+        35
+      ],
+      "wave": 5,
+      "status": "completed",
+      "assigned_worker": null,
+      "pipeline_stage": 4
+    },
+    {
+      "number": 54,
+      "title": "x86-64-ASM: Implement string opcodes via CGO callbacks",
+      "priority": 1,
+      "depends_on": [
+        44,
+        49
+      ],
+      "wave": 7,
+      "status": "pending",
+      "assigned_worker": null,
+      "pipeline_stage": 0
+    },
+    {
+      "number": 55,
+      "title": "NativeASM: Implement string opcodes via Go callbacks",
+      "priority": 1,
+      "depends_on": [
+        44,
+        49
+      ],
+      "wave": 7,
+      "status": "pending",
+      "assigned_worker": null,
+      "pipeline_stage": 0
+    },
+    {
+      "number": 56,
+      "title": "Define JSON schema for EDD, Decision Table, and Mapping formats",
+      "priority": 1,
+      "depends_on": [],
+      "wave": 4,
+      "status": "completed",
+      "assigned_worker": 4,
+      "pipeline_stage": 4
+    },
+    {
+      "number": 57,
+      "title": "NativeASM: Implement array opcodes via Go callbacks",
+      "priority": 1,
+      "depends_on": [
+        44,
+        49
+      ],
+      "wave": 7,
+      "status": "pending",
+      "assigned_worker": null,
+      "pipeline_stage": 0
+    },
+    {
+      "number": 58,
+      "title": "x86-64-ASM: Implement array opcodes via CGO callbacks",
+      "priority": 1,
+      "depends_on": [
+        44,
+        49
+      ],
+      "wave": 7,
+      "status": "pending",
+      "assigned_worker": null,
+      "pipeline_stage": 0
+    },
+    {
+      "number": 59,
+      "title": "NativeASM: Implement table opcodes via Go callbacks",
+      "priority": 1,
+      "depends_on": [
+        44,
+        49
+      ],
+      "wave": 7,
+      "status": "pending",
+      "assigned_worker": null,
+      "pipeline_stage": 0
+    },
+    {
+      "number": 60,
+      "title": "Add JSON struct tags and auto-detect format in Go loaders",
+      "priority": 1,
+      "depends_on": [
+        56
+      ],
+      "wave": 5,
+      "status": "completed",
+      "assigned_worker": 2,
+      "pipeline_stage": 4
+    },
+    {
+      "number": 61,
+      "title": "x86-64-ASM: Implement table opcodes via CGO callbacks",
+      "priority": 1,
+      "depends_on": [
+        44,
+        49
+      ],
+      "wave": 7,
+      "status": "pending",
+      "assigned_worker": null,
+      "pipeline_stage": 0
+    },
+    {
+      "number": 62,
+      "title": "Implement JSON loading for EDD and Decision Table files",
+      "priority": 1,
+      "depends_on": [
+        60
+      ],
+      "wave": 6,
+      "status": "completed",
+      "assigned_worker": 1,
+      "pipeline_stage": 4
+    },
+    {
+      "number": 63,
+      "title": "NativeASM: Implement control flow opcodes",
+      "priority": 1,
+      "depends_on": [
+        44
+      ],
+      "wave": 7,
+      "status": "pending",
+      "assigned_worker": null,
+      "pipeline_stage": 0
+    },
+    {
+      "number": 64,
+      "title": "x86-64-ASM: Implement control flow opcodes",
+      "priority": 1,
+      "depends_on": [
+        44
+      ],
+      "wave": 7,
+      "status": "pending",
+      "assigned_worker": null,
+      "pipeline_stage": 0
+    },
+    {
+      "number": 65,
+      "title": "Implement JSON loading for Mapping files",
+      "priority": 1,
+      "depends_on": [
+        60
+      ],
+      "wave": 6,
+      "status": "completed",
+      "assigned_worker": 1,
+      "pipeline_stage": 4
+    },
+    {
+      "number": 66,
+      "title": "Add JSON export for EDD, DT, and Mapping data",
+      "priority": 1,
+      "depends_on": [
+        60
+      ],
+      "wave": 6,
+      "status": "completed",
+      "assigned_worker": 2,
+      "pipeline_stage": 4
+    },
+    {
+      "number": 67,
+      "title": "NativeASM: Implement entity opcodes via Go callbacks",
+      "priority": 1,
+      "depends_on": [
+        44,
+        49
+      ],
+      "wave": 7,
+      "status": "pending",
+      "assigned_worker": null,
+      "pipeline_stage": 0
+    },
+    {
+      "number": 68,
+      "title": "x86-64-ASM: Implement entity opcodes via CGO callbacks",
+      "priority": 1,
+      "depends_on": [
+        44,
+        49
+      ],
+      "wave": 7,
+      "status": "pending",
+      "assigned_worker": null,
+      "pipeline_stage": 0
+    },
+    {
+      "number": 69,
+      "title": "Add JSON parsing library and loader infrastructure to Java",
+      "priority": 1,
+      "depends_on": [
+        56
+      ],
+      "wave": 5,
+      "status": "in_progress",
+      "assigned_worker": 3,
+      "pipeline_stage": 0
+    },
+    {
+      "number": 70,
+      "title": "NativeASM: Implement datetime opcodes via Go callbacks",
+      "priority": 1,
+      "depends_on": [
+        44,
+        49
+      ],
+      "wave": 7,
+      "status": "pending",
+      "assigned_worker": null,
+      "pipeline_stage": 0
+    },
+    {
+      "number": 71,
+      "title": "Automated tests verifying XML and JSON produce identical results",
+      "priority": 1,
+      "depends_on": [
+        62,
+        65,
+        69
+      ],
+      "wave": 7,
+      "status": "pending",
+      "assigned_worker": null,
+      "pipeline_stage": 0
+    },
+    {
+      "number": 72,
+      "title": "x86-64-ASM: Implement datetime opcodes via CGO callbacks",
+      "priority": 1,
+      "depends_on": [
+        44,
+        49
+      ],
+      "wave": 7,
+      "status": "pending",
+      "assigned_worker": null,
+      "pipeline_stage": 0
+    }
+  ],
+  "initial_assignments": {
+    "1": 31,
+    "2": 29,
+    "3": 24
+  },
+  "wave_order": [
+    {
+      "wave": 1,
+      "issues": [
+        24,
+        29,
+        31
+      ]
+    },
+    {
+      "wave": 2,
+      "issues": [
+        3,
+        7,
+        8,
+        14,
+        21
+      ]
+    },
+    {
+      "wave": 3,
+      "issues": [
+        1,
+        20,
+        22
+      ]
+    },
+    {
+      "wave": 4,
+      "issues": [
+        33,
+        35,
+        56
+      ]
+    },
+    {
+      "wave": 5,
+      "issues": [
+        36,
+        40,
+        53,
+        60,
+        69
+      ]
+    },
+    {
+      "wave": 6,
+      "issues": [
+        44,
+        49,
+        62,
+        65,
+        66
+      ]
+    },
+    {
+      "wave": 7,
+      "issues": [
+        37,
+        39,
+        41,
+        42,
+        46,
+        47,
+        50,
+        51,
+        52,
+        54,
+        55,
+        57,
+        58,
+        59,
+        61,
+        63,
+        64,
+        67,
+        68,
+        70,
+        71,
+        72
+      ]
+    },
+    {
+      "wave": 8,
+      "issues": [
+        38,
+        43
+      ]
+    },
+    {
+      "wave": 9,
+      "issues": [
+        34,
+        45,
+        48
+      ]
+    }
+  ]
+}

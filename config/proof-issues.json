@@ -34,7 +34,7 @@
       "priority": 1,
       "depends_on": [],
       "wave": 1,
-      "status": "failed",
+      "status": "completed",
       "assigned_worker": 1,
       "pipeline_stage": 3
     },
@@ -44,9 +44,9 @@
       "priority": 1,
       "depends_on": [],
       "wave": 1,
-      "status": "failed",
-      "assigned_worker": null,
-      "pipeline_stage": 0
+      "status": "completed",
+      "assigned_worker": 1,
+      "pipeline_stage": 3
     },
     {
       "number": 75,
@@ -54,9 +54,9 @@
       "priority": 1,
       "depends_on": [],
       "wave": 1,
-      "status": "failed",
+      "status": "completed",
       "assigned_worker": 3,
-      "pipeline_stage": 1
+      "pipeline_stage": 3
     },
     {
       "number": 78,
@@ -64,7 +64,7 @@
       "priority": 1,
       "depends_on": [],
       "wave": 1,
-      "status": "failed",
+      "status": "completed",
       "assigned_worker": 4,
       "pipeline_stage": 3
     },
@@ -74,9 +74,9 @@
       "priority": 1,
       "depends_on": [],
       "wave": 1,
-      "status": "failed",
-      "assigned_worker": 5,
-      "pipeline_stage": 1
+      "status": "completed",
+      "assigned_worker": 4,
+      "pipeline_stage": 3
     },
     {
       "number": 66,
@@ -87,9 +87,9 @@
         72
       ],
       "wave": 2,
-      "status": "pending",
-      "assigned_worker": null,
-      "pipeline_stage": 0
+      "status": "completed",
+      "assigned_worker": 2,
+      "pipeline_stage": 3
     },
     {
       "number": 80,
@@ -99,9 +99,9 @@
         65
       ],
       "wave": 2,
-      "status": "pending",
-      "assigned_worker": null,
-      "pipeline_stage": 0
+      "status": "completed",
+      "assigned_worker": 4,
+      "pipeline_stage": 3
     },
     {
       "number": 81,
@@ -111,9 +111,9 @@
         72
       ],
       "wave": 2,
-      "status": "pending",
-      "assigned_worker": null,
-      "pipeline_stage": 0
+      "status": "completed",
+      "assigned_worker": 2,
+      "pipeline_stage": 3
     },
     {
       "number": 83,
@@ -123,9 +123,9 @@
         75
       ],
       "wave": 2,
-      "status": "pending",
-      "assigned_worker": null,
-      "pipeline_stage": 0
+      "status": "completed",
+      "assigned_worker": 5,
+      "pipeline_stage": 3
     },
     {
       "number": 85,
@@ -135,9 +135,9 @@
         78
       ],
       "wave": 2,
-      "status": "pending",
-      "assigned_worker": null,
-      "pipeline_stage": 0
+      "status": "completed",
+      "assigned_worker": 4,
+      "pipeline_stage": 3
     },
     {
       "number": 67,
@@ -147,8 +147,8 @@
         66
       ],
       "wave": 3,
-      "status": "pending",
-      "assigned_worker": null,
+      "status": "in_progress",
+      "assigned_worker": 1,
       "pipeline_stage": 0
     },
     {

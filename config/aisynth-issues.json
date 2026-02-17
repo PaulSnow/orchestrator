@@ -1,0 +1,88 @@
+{
+  "project": "aisynth",
+  "repo": "aisynth",
+  "repo_path": "/home/paul/go/src/github.com/PaulSnow/aisynth",
+  "worktree_base": "/home/paul/go/src/github.com/PaulSnow/aisynth-worktrees",
+  "branch_prefix": "feature/issue-",
+  "platform": "github",
+  "tmux_session": "aisynth-orchestrator",
+  "num_workers": 5,
+  "stagger_delay": 30,
+  "pipeline": [
+    "implement",
+    "test",
+    "review"
+  ],
+  "project_context": {
+    "language": "aisynth and c",
+    "build_command": "echo 'No build yet - specification phase' > /tmp/aisynth-build.log 2>&1",
+    "test_command": "echo 'No tests yet - specification phase' > /tmp/aisynth-test.log 2>&1",
+    "safety_rules": [
+      "This is a bytecode language specification project - primarily documentation.",
+      "The language is in specification phase - implementation comes later.",
+      "Focus on writing clear, complete specifications in markdown.",
+      "DTRules runtime will be the first real implementation driving AISynth development.",
+      "Follow the iterative development plan in docs/iterative-development-plan.md"
+    ],
+    "commit_prefix": "feat",
+    "key_files": [
+      "README.md",
+      "spec/specification.md",
+      "docs/dtrules-runtime-design.md",
+      "docs/iterative-development-plan.md"
+    ]
+  },
+  "issues": [
+    {
+      "number": 43,
+      "title": "DTRules: Core Type Definitions",
+      "priority": 1,
+      "depends_on": [],
+      "wave": 1,
+      "status": "in_progress",
+      "assigned_worker": 1,
+      "pipeline_stage": 0
+    },
+    {
+      "number": 44,
+      "title": "DTRules: Evaluation Engine",
+      "priority": 1,
+      "depends_on": [
+        43
+      ],
+      "wave": 2,
+      "status": "pending",
+      "assigned_worker": null,
+      "pipeline_stage": 0
+    },
+    {
+      "number": 45,
+      "title": "DTRules: JSON Rule Loader",
+      "priority": 1,
+      "depends_on": [
+        43
+      ],
+      "wave": 2,
+      "status": "pending",
+      "assigned_worker": null,
+      "pipeline_stage": 0
+    },
+    {
+      "number": 46,
+      "title": "DTRules: Testing Framework and Examples",
+      "priority": 1,
+      "depends_on": [
+        43,
+        44,
+        45
+      ],
+      "wave": 3,
+      "status": "pending",
+      "assigned_worker": null,
+      "pipeline_stage": 0
+    }
+  ],
+  "initial_assignments": {
+    "1": 43
+  }
+}
