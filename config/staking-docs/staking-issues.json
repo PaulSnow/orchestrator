@@ -1,0 +1,104 @@
+{
+  "project": "staking-docs",
+  "tmux_session": "staking-docs",
+  "num_workers": 3,
+  "cycle_interval": 60,
+  "max_retries": 3,
+  "stall_timeout": 600,
+  "wall_clock_timeout": 1800,
+  "stagger_delay": 10,
+  "repos": {
+    "staking": {
+      "path": "/home/paul/go/src/gitlab.com/AccumulateNetwork/staking",
+      "platform": "gitlab",
+      "default_branch": "main",
+      "branch_prefix": "docs/issue-",
+      "worktree_base": "/home/paul/go/src/gitlab.com/AccumulateNetwork/staking-worktrees"
+    }
+  },
+  "pipeline": [
+    "research",
+    "draft",
+    "validate",
+    "review"
+  ],
+  "project_context": {
+    "language": "go",
+    "build_command": "go build ./...",
+    "test_command": "go test ./... -v -short -timeout 5m > /tmp/test.log 2>&1",
+    "safety_rules": [
+      "**NEVER modify staking.db** \u2014 it is the sole source of truth, read-only",
+      "**NEVER modify files in docs/** \u2014 use docs-dev/ for all output",
+      "**NEVER run commands that query the blockchain network**",
+      "**All documentation must include testable examples with real values**"
+    ],
+    "key_files": [
+      "CLAUDE.md",
+      "docs/reports/historical-format-evolution.md",
+      "docs/reports/reward-calculation-algorithm.md",
+      "docs/architecture/data-immutability-principles.md"
+    ]
+  },
+  "issues": [
+    {
+      "number": 1,
+      "title": "Document weighted balance truncation rules",
+      "priority": 1,
+      "wave": 1,
+      "description": "## Objective\n\nCreate precise, AI-followable documentation for the weighted balance truncation rules used in staking reward calculations.\n\n## Background\n\nThe staking system changed truncation behavior at period 45 (October 2023):\n- **Periods 1-44**: `trunc(balance, 4) * weight` (truncate first)\n- **Periods 45+**: `trunc(balance * weight, 4)` (multiply first)\n\nThis change is documented in `docs/reports/historical-format-evolution.md` lines 192-202, but there is no step-by-step specification that an AI can follow deterministically.\n\n## Acceptance Criteria\n\n1. Create specification with INPUT/OPERATION/OUTPUT format for each step\n2. Include at least 2 worked examples with real values from Excel reports\n3. Document the period 45 change explicitly with before/after examples\n4. Include code references to `internal/light.go` truncation functions\n5. Verify examples against `pastStakingReports/*.xlsx` data\n\n## Key Sources\n\n- `docs/reports/historical-format-evolution.md` - Primary reference\n- `docs/reports/reward-calculation-algorithm.md` - Algorithm overview\n- `internal/light.go` - Code implementation\n- `pastStakingReports/Staking_Report_2025-07-25.xlsx` - Example data",
+      "status": "completed",
+      "assigned_worker": 1,
+      "pipeline_stage": 3
+    },
+    {
+      "number": 2,
+      "title": "Document genesis transition block numbering",
+      "priority": 1,
+      "wave": 1,
+      "description": "## Objective\n\nCreate precise documentation for genesis transition block numbering (offset = 1863).\n\n## Background\n\nThe Accumulate blockchain had a genesis reset on July 14, 2025:\n- **Pre-genesis blocks**: 1-1863 (raw numbers)\n- **Post-genesis blocks**: raw + 1863 = absolute block number\n- Example: post-genesis block 1 \u2192 absolute block 1864\n\nThis affects all code that processes historical data spanning the genesis boundary.\n\n## Acceptance Criteria\n\n1. INPUT/OPERATION/OUTPUT specification for block conversion\n2. Worked examples with real block numbers from staking.db\n3. Document `OldChainLastBlock = 1863` constant location\n4. Document `ToAbsoluteBlock()` function behavior\n5. Explain per-entry offset detection in `LoadMajorBlockIndexDirect`\n\n## Key Sources\n\n- `internal/genesis_transition.go` - OldChainLastBlock constant\n- `internal/light_direct_chains.go` - LoadMajorBlockIndexDirect\n- `docs/architecture/genesis-transition-handling.md` - Existing docs\n- `docs/blocks/block-numbering-offset.md` - Block numbering",
+      "status": "completed",
+      "assigned_worker": 2,
+      "pipeline_stage": 3
+    },
+    {
+      "number": 3,
+      "title": "Document historical Excel format detection",
+      "priority": 2,
+      "wave": 1,
+      "description": "## Objective\n\nDocument the 8 distinct Excel column layouts and content-based format detection.\n\n## Background\n\nThere are 8 distinct Excel formats across ~147 weekly reports (Dec 2022 - Jan 2026). The `detectSheetFormat()` function uses content-based detection to route each sheet to the correct parser.\n\n## Acceptance Criteria\n\n1. Table of all 8 formats with period ranges and column layouts\n2. Decision tree for `detectSheetFormat()` logic\n3. Sample row from each format era with field mapping\n4. Document known parser bugs and their fixes\n5. Include code references to `pkg/mcpserver/historical_payout_parser.go`\n\n## Key Sources\n\n- `docs/reports/historical-format-evolution.md` - Format catalog\n- `pkg/mcpserver/historical_payout_parser.go` - Parser code\n- `pastStakingReports/*.xlsx` - Example files",
+      "status": "completed",
+      "assigned_worker": 3,
+      "pipeline_stage": 3
+    },
+    {
+      "number": 4,
+      "title": "Document staking reward budget calculation",
+      "priority": 2,
+      "wave": 1,
+      "description": "## Objective\n\nDocument the 16% annual staking reward budget calculation algorithm.\n\n## Background\n\nThe staking system distributes 16% of effective supply annually as rewards:\n- Weekly budget = (effective_supply * 0.16) / 52\n- Effective supply includes both real and virtual (generated but not executed) ACME\n\n## Acceptance Criteria\n\n1. INPUT/OPERATION/OUTPUT specification for budget calculation\n2. Worked example with real supply values\n3. Document `EffectiveSupplyTracker` for periods 140+\n4. Document virtual reward handling from `VirtualRewardLedger`\n5. Include code references to relevant functions\n\n## Key Sources\n\n- `docs/reports/staking-distribution-formula-history.md` - Formula history\n- `pkg/mcpserver/effective_supply_tracker.go` - Supply tracking\n- `pkg/mcpserver/virtual_reward_ledger.go` - Virtual rewards\n- `docs/reports/reward-calculation-algorithm.md` - Algorithm overview",
+      "status": "completed",
+      "assigned_worker": 1,
+      "pipeline_stage": 3
+    },
+    {
+      "number": 5,
+      "title": "Document ANAF withholding calculation",
+      "priority": 2,
+      "wave": 2,
+      "description": "## Objective\n\nDocument the ANAF 45% withholding redirect with 10M ACME cap.\n\n## Background\n\nPer governance motion, 45% of staking rewards are redirected to ANAF until a 10M ACME cap is reached. This affects per-account reward calculations.\n\n## Acceptance Criteria\n\n1. INPUT/OPERATION/OUTPUT specification for withholding calculation\n2. Worked example showing before/after withholding amounts\n3. Document the 10M cap tracking mechanism\n4. Document which periods this applies to\n5. Include code references and governance motion link\n\n## Key Sources\n\n- `docs/governance/anaf-withholding-redirect.md` - Governance details\n- `docs/governance/anaf-implementation-design.md` - Technical design\n- `internal/light.go` - Implementation\n- `pkg/types/payout.go` - ANAFWithheld field",
+      "status": "completed",
+      "assigned_worker": 2,
+      "pipeline_stage": 3
+    },
+    {
+      "number": 6,
+      "title": "Document transaction cache and period index",
+      "priority": 3,
+      "wave": 2,
+      "description": "## Objective\n\nDocument the TransactionCache and BuildPeriodIndex for O(1) balance lookups.\n\n## Background\n\nThe MCP server uses a pre-computed period index to achieve O(1) balance lookups instead of O(T) replay of all transactions.\n\n## Acceptance Criteria\n\n1. INPUT/OPERATION/OUTPUT specification for cache building\n2. Explain the optimization from O(T) to O(1)\n3. Worked example with timing comparison\n4. Document memory usage and limitations\n5. Include code references\n\n## Key Sources\n\n- `internal/transaction_cache.go` - Cache implementation\n- `pkg/mcpserver/webserver_generate.go` - Usage pattern\n- CLAUDE.md TransactionCache section",
+      "status": "completed",
+      "assigned_worker": 3,
+      "pipeline_stage": 3
+    }
+  ]
+}

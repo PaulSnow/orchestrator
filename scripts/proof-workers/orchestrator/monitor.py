@@ -111,8 +111,10 @@ def collect_worker_snapshot(
     # Git status in worktree — resolve repo from effective config
     git_status = ""
     new_commits = ""
+    worktree_mtime = None
     if worker.worktree:
         git_status = git.get_status(worker.worktree)
+        worktree_mtime = git.get_worktree_mtime(worker.worktree)
         # Try effective config first (cross-project), fall back to cfg
         eff_cfg = cfg
         if worker.source_config:
@@ -124,6 +126,30 @@ def collect_worker_snapshot(
         repo = eff_cfg.repo_for_issue_by_number(worker.issue_number) if worker.issue_number else None
         base_ref = f"origin/{repo.default_branch}" if repo else "origin/main"
         new_commits = git.get_recent_commits(worker.worktree, count=5, since_ref=base_ref)
+
+    # Compute elapsed_seconds from worker.started_at
+    elapsed_seconds = None
+    if worker.started_at:
+        try:
+            start = datetime.fromisoformat(worker.started_at)
+            if start.tzinfo is None:
+                start = start.replace(tzinfo=timezone.utc)
+            elapsed_seconds = time.time() - start.timestamp()
+        except Exception:
+            pass
+
+    # Auto-recover missing signal file from DEADMAN EXIT in log
+    if not signal_exists and not claude_running and log_tail:
+        import re
+        m = re.search(r'\[DEADMAN\] EXIT.*?code=(\d+)', log_tail)
+        if m:
+            recovered_code = int(m.group(1))
+            sig = state.signal_path(worker_id)
+            sig.parent.mkdir(parents=True, exist_ok=True)
+            sig.write_text(str(recovered_code))
+            signal_exists = True
+            exit_code = recovered_code
+            log_msg(f"[recover] Worker {worker_id}: recovered signal from DEADMAN EXIT (code={recovered_code})")
 
     return WorkerSnapshot(
         worker_id=worker_id,
@@ -138,6 +164,8 @@ def collect_worker_snapshot(
         git_status=git_status,
         new_commits=new_commits,
         retry_count=worker.retry_count,
+        elapsed_seconds=elapsed_seconds,
+        worktree_mtime=worktree_mtime,
     )
 
 

@@ -25,6 +25,7 @@ class RunConfig:
     cycle_interval: int = 60  # seconds
     max_retries: int = 10
     stall_timeout: int = 900  # seconds
+    wall_clock_timeout: int = 1800  # seconds (30 minutes)
     prompt_type: str = "implement"  # implement | review
     pipeline: list[str] = field(default_factory=lambda: ["implement"])
     project_context: ProjectContext = field(default_factory=ProjectContext)
@@ -93,6 +94,7 @@ def load_config(config_path: str | Path) -> RunConfig:
     cfg.cycle_interval = raw.get("cycle_interval", cfg.cycle_interval)
     cfg.max_retries = raw.get("max_retries", cfg.max_retries)
     cfg.stall_timeout = raw.get("stall_timeout", cfg.stall_timeout)
+    cfg.wall_clock_timeout = raw.get("wall_clock_timeout", cfg.wall_clock_timeout)
     cfg.prompt_type = raw.get("prompt_type", cfg.prompt_type)
     cfg.stagger_delay = raw.get("stagger_delay", cfg.stagger_delay)
 

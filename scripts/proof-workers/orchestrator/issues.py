@@ -11,7 +11,14 @@ from .state import StateManager
 
 
 def fetch_issue_body(issue: Issue, cfg: RunConfig, state: StateManager) -> str:
-    """Fetch an issue body from the remote platform, using cache if available."""
+    """Fetch an issue body from the remote platform, using cache if available.
+
+    If the issue has a local description, use that instead of fetching.
+    """
+    # If issue has local description, use it directly
+    if issue.description:
+        return issue.description
+
     cached = state.get_cached_issue(issue.number)
     if cached is not None:
         return cached

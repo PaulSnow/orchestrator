@@ -56,6 +56,7 @@ class Issue:
     repo: str = ""  # which repo (key into RunConfig.repos)
     task_type: str = "implement"  # implement | review | test
     pipeline_stage: int = 0  # index into the pipeline list (0 = first stage)
+    description: str = ""  # local description (used instead of fetching from platform)
 
     def to_dict(self) -> dict:
         d = {
@@ -88,6 +89,7 @@ class Issue:
             repo=data.get("repo", ""),
             task_type=data.get("task_type", "implement"),
             pipeline_stage=data.get("pipeline_stage", 0),
+            description=data.get("description", ""),
         )
 
 
@@ -188,3 +190,5 @@ class WorkerSnapshot:
     git_status: str
     new_commits: str
     retry_count: int
+    elapsed_seconds: Optional[float] = None  # seconds since worker.started_at
+    worktree_mtime: Optional[float] = None  # most recent file modification in worktree

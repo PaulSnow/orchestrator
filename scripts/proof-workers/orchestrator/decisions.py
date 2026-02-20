@@ -111,14 +111,23 @@ def compute_decision_global(
     # Not running, no signal: process crashed or was killed externally
     if snapshot.status == "running":
         has_progress = bool(snapshot.new_commits.strip())
-        if has_progress or snapshot.retry_count < cfg.max_retries:
+
+        # Work was done — push directly without re-running Claude
+        if has_progress:
+            return [Decision(
+                action="push",
+                worker=worker_id,
+                issue=snapshot.issue_number,
+                reason="process disappeared but commits exist — pushing",
+            )]
+
+        if snapshot.retry_count < cfg.max_retries:
             return [Decision(
                 action="restart",
                 worker=worker_id,
                 issue=snapshot.issue_number,
-                reason="process disappeared"
-                       + (", progress detected — retrying" if has_progress else ", retrying"),
-                continuation=True,
+                reason="process disappeared — retrying",
+                continuation=False,
             )]
         else:
             return [Decision(
@@ -352,14 +361,23 @@ def compute_decision(
     # Not running, no signal: process crashed or was killed externally
     if snapshot.status == "running":
         has_progress = bool(snapshot.new_commits.strip())
-        if has_progress or snapshot.retry_count < cfg.max_retries:
+
+        # Work was done — push directly without re-running Claude
+        if has_progress:
+            return [Decision(
+                action="push",
+                worker=worker_id,
+                issue=snapshot.issue_number,
+                reason="process disappeared but commits exist — pushing",
+            )]
+
+        if snapshot.retry_count < cfg.max_retries:
             return [Decision(
                 action="restart",
                 worker=worker_id,
                 issue=snapshot.issue_number,
-                reason="process disappeared"
-                       + (", progress detected — retrying" if has_progress else ", retrying"),
-                continuation=True,
+                reason="process disappeared — retrying",
+                continuation=False,
             )]
         else:
             return [Decision(
@@ -512,6 +530,44 @@ def _handle_running_worker(
     # API errors won't fix themselves — advance after 3 empty-log failures.
     MAX_EMPTY_RETRIES = 3
 
+    # Wall-clock timeout: worker has been running too long overall
+    if snapshot.elapsed_seconds is not None and snapshot.elapsed_seconds > cfg.wall_clock_timeout:
+        elapsed_min = int(snapshot.elapsed_seconds // 60)
+        has_commits = bool(snapshot.new_commits.strip())
+
+        # DEADMAN EXIT in log — signal recovery handled in monitor; wait for next cycle
+        if "[DEADMAN] EXIT" in snapshot.log_tail:
+            return [Decision(action="noop", worker=worker_id,
+                             reason="DEADMAN EXIT in log — signal recovery pending")]
+
+        # Work is done but signal was never written — push directly
+        if has_commits:
+            return [Decision(
+                action="push",
+                worker=worker_id,
+                issue=snapshot.issue_number,
+                reason=f"wall-clock timeout {elapsed_min}m: commits exist, pushing without restart",
+            )]
+
+        # Log is still being written (active within last 2 min) — give more time
+        if snapshot.log_mtime and (time.time() - snapshot.log_mtime) < 120:
+            return [Decision(action="noop", worker=worker_id,
+                             reason=f"wall-clock timeout {elapsed_min}m but log active — extending")]
+
+        # Worktree files being modified (active within last 5 min) — give more time
+        if snapshot.worktree_mtime and (time.time() - snapshot.worktree_mtime) < 300:
+            return [Decision(action="noop", worker=worker_id,
+                             reason=f"wall-clock timeout {elapsed_min}m but worktree active — extending")]
+
+        # Truly stuck: no commits, no recent log activity, no worktree activity
+        return [Decision(
+            action="restart",
+            worker=worker_id,
+            issue=snapshot.issue_number,
+            reason=f"wall-clock timeout {elapsed_min}m: no progress, restarting with diagnostic context",
+            continuation=True,
+        )]
+
     if snapshot.log_mtime is not None:
         age = time.time() - snapshot.log_mtime
 
@@ -529,13 +585,29 @@ def _handle_running_worker(
                 return _advance_or_skip(snapshot, cfg, state)
 
         # Non-empty log stale check (real stall, not API error)
+        # BUT: if worktree files are being modified, Claude is working
+        # (claude -p doesn't stream output, so log won't update)
         if snapshot.log_size > 0 and age > cfg.stall_timeout:
+            # Check if worktree has recent activity (last 5 min)
+            worktree_active = False
+            if snapshot.worktree_mtime is not None:
+                worktree_age = time.time() - snapshot.worktree_mtime
+                if worktree_age < 300:  # Active within last 5 minutes
+                    worktree_active = True
+
+            if worktree_active:
+                return [Decision(
+                    action="noop",
+                    worker=worker_id,
+                    reason=f"log stale {int(age)}s but worktree active — extending",
+                )]
+
             if snapshot.retry_count < cfg.max_retries:
                 return [Decision(
                     action="restart",
                     worker=worker_id,
                     issue=snapshot.issue_number,
-                    reason=f"stalled: log unchanged for {int(age)}s",
+                    reason=f"stalled: log unchanged for {int(age)}s, no worktree activity",
                     continuation=True,
                 )]
             else:

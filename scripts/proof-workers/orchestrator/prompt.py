@@ -8,7 +8,12 @@ from .state import StateManager
 
 
 # Valid pipeline stage names
-VALID_STAGES = {"implement", "optimize", "write_tests", "run_tests_fix", "document"}
+VALID_STAGES = {
+    # Code implementation stages
+    "implement", "optimize", "write_tests", "run_tests_fix", "document",
+    # Documentation research stages
+    "research", "draft", "validate", "review",
+}
 
 
 def generate_prompt(
@@ -31,11 +36,17 @@ def generate_prompt(
     injected so the worker knows what went wrong and how to fix it.
     """
     generators = {
+        # Code implementation stages
         "implement": _generate_implement,
         "optimize": _generate_optimize,
         "write_tests": _generate_write_tests,
         "run_tests_fix": _generate_run_tests_fix,
         "document": _generate_document,
+        # Documentation research stages
+        "research": _generate_research,
+        "draft": _generate_draft,
+        "validate": _generate_validate,
+        "review": _generate_review,
     }
 
     generator = generators.get(stage)
@@ -381,6 +392,252 @@ This code has been implemented, optimized, and all tests are passing. Your job i
    - Add boilerplate or filler — every line of documentation should be useful
 6. Verify the build still passes after your changes
 7. Commit your documentation and push
+"""
+
+
+# ── Documentation research stage generators ────────────────────────────────
+
+
+def _generate_research(issue: Issue, repo: RepoConfig, cfg: RunConfig) -> str:
+    """Generate the research stage body for documentation work."""
+    return f"""## Workflow — Research
+
+Your job is to extract precise, verifiable facts from the codebase. Every fact must have a source citation.
+
+### Required Reading Order
+
+1. **CLAUDE.md** — Read this FIRST for project-specific rules
+2. **docs/reports/historical-format-evolution.md** — Definitive format reference (if it exists)
+3. Any files mentioned in the issue description
+4. Source code implementing the functionality you're documenting
+
+### Output
+
+Create file: `docs-dev/research/issue-{issue.number}-research.md`
+
+Use this structure:
+```markdown
+# Research: {issue.title}
+
+## Summary
+One paragraph describing what was found.
+
+## Verified Facts
+
+### Fact 1: [Description]
+- **Source**: `filename.go:line` or `ExcelFile.xlsx > Sheet > Cell`
+- **Content**: Exact quote or formula
+- **Confidence**: HIGH | MEDIUM | LOW
+
+## Code References
+List primary implementation files and functions.
+
+## Open Questions
+Things that couldn't be determined.
+
+## Contradictions
+If sources disagree, document both positions.
+```
+
+### Rules
+
+1. **NEVER assume** — If you can't find a source, mark it as unknown
+2. **NEVER modify** production files
+3. **ALWAYS cite** file:line for every fact
+4. **Flag ambiguity** explicitly
+"""
+
+
+def _generate_draft(issue: Issue, repo: RepoConfig, cfg: RunConfig) -> str:
+    """Generate the draft stage body for documentation work."""
+    return f"""## Context — Draft
+
+The research phase has gathered facts. Your job is to write documentation that another AI can follow precisely.
+
+### Input
+
+Read the research file: `docs-dev/research/issue-{issue.number}-research.md`
+
+### Output
+
+Create file: `docs-dev/specifications/issue-{issue.number}-spec.md`
+
+### Required Format
+
+Every algorithm must use INPUT/OPERATION/OUTPUT structure:
+
+```markdown
+### Step N: [Action]
+
+**Purpose**: Why this step exists
+
+**Input**:
+| Name | Type | Source | Example |
+|------|------|--------|---------|
+| balance | *big.Rat | Account.Balance | 35040.611 |
+
+**Operation**:
+```
+weightedBalance = balance × weight
+```
+
+**Precision Rule**:
+- Multiply FIRST, then truncate to 4 decimals
+
+**Output**:
+| Name | Type | Precision | Example |
+|------|------|-----------|---------|
+| weightedBalance | *big.Rat | 4 decimals | 45552.7943 |
+
+**Code Reference**: `internal/light.go:480`
+```
+
+### Requirements
+
+- [ ] At least 2 worked examples with real values
+- [ ] All precision/truncation rules explicit
+- [ ] All code references provided
+- [ ] No ambiguous words (usually, typically, should)
+
+### Ambiguity Elimination
+
+Replace:
+- "usually" → "always" or "when [condition]"
+- "the balance" → "stakedBalance from Account.Balance"
+- "truncate" → "truncate to N decimals after [operation]"
+"""
+
+
+def _generate_validate(issue: Issue, repo: RepoConfig, cfg: RunConfig) -> str:
+    """Generate the validate stage body for documentation work."""
+    return f"""## Context — Validate
+
+Your job is to verify the specification is correct, complete, and testable.
+
+### Input
+
+- Specification: `docs-dev/specifications/issue-{issue.number}-spec.md`
+- Research: `docs-dev/research/issue-{issue.number}-research.md`
+
+### Output
+
+Create file: `docs-dev/validation/issue-{issue.number}-validation.md`
+
+### Validation Process
+
+1. **Algorithm Verification**
+   - For each worked example, calculate the result manually or using code
+   - Document any mismatches
+
+2. **Code Verification**
+   - Check each code reference still exists and is correct
+   - Run the code if possible
+
+3. **Completeness Checklist**
+   - [ ] All steps have INPUT section
+   - [ ] All steps have OPERATION section
+   - [ ] All steps have OUTPUT section
+   - [ ] All steps have precision rules
+   - [ ] At least 2 worked examples
+   - [ ] Edge cases documented
+
+4. **Ambiguity Scan**
+   - Search for: "usually", "typically", "should", "may"
+   - Flag any undefined terms
+
+### Output Format
+
+```markdown
+# Validation Report: {issue.title}
+
+## Overall Status: PASS | FAIL | NEEDS_REVISION
+
+## Algorithm Verification
+| Example | Spec Result | Calculated | Match? |
+|---------|-------------|------------|--------|
+
+## Code Reference Verification
+| Reference | Valid? | Notes |
+|-----------|--------|-------|
+
+## Completeness Score: X/6
+
+## Ambiguity Issues
+- [List any found]
+
+## Required Changes
+- [List must-fix items]
+```
+"""
+
+
+def _generate_review(issue: Issue, repo: RepoConfig, cfg: RunConfig) -> str:
+    """Generate the review stage body for documentation work."""
+    return f"""## Context — Review
+
+Final quality gate before human approval. Ensure another AI can follow this documentation exactly.
+
+### Input
+
+- Specification: `docs-dev/specifications/issue-{issue.number}-spec.md`
+- Validation: `docs-dev/validation/issue-{issue.number}-validation.md`
+
+### Output
+
+Create file: `docs-dev/reviews/issue-{issue.number}-review.md`
+
+### Review Process
+
+1. **Fresh Eyes Test**
+   - Read ONLY the specification (not research or code)
+   - Pretend you've never seen this codebase
+   - Can you follow every step without guessing?
+   - Document any confusion
+
+2. **Alternative Interpretation Test**
+   - For each step, try to find a wrong interpretation
+   - Could an AI misunderstand this?
+
+3. **Known Pitfalls Check**
+   - Cross-reference CLAUDE.md "Common Errors" section
+   - Check `docs-dev/errors/error-log.md` for related past errors
+   - Ensure known issues are addressed
+
+4. **Code Consistency**
+   - Does the spec match actual code behavior?
+
+### Output Format
+
+```markdown
+# Review Report: {issue.title}
+
+## Decision: APPROVED | CHANGES_NEEDED
+
+## Fresh Eyes Test
+- Points of confusion: [list]
+- Unstated assumptions: [list]
+
+## Alternative Interpretations
+| Step | Could Be Misread As | Clarification Needed |
+|------|---------------------|---------------------|
+
+## Known Pitfalls Coverage
+- [Which pitfalls are/aren't addressed]
+
+## Final Checklist
+- [ ] Self-contained (no external knowledge needed)
+- [ ] All examples verified
+- [ ] No high-risk ambiguities
+- [ ] Ready for human review
+
+## Required Changes Before Approval
+- [List]
+```
+
+### Decision Criteria
+
+**APPROVED**: All checks pass, no high-risk ambiguities, self-contained.
+**CHANGES_NEEDED**: Any validation failure, ambiguity, or missing pitfall coverage.
 """
 
 

@@ -25,6 +25,7 @@ def make_snapshot(
     git_status="",
     new_commits="abc123 feat: implement\n",
     retry_count=0,
+    elapsed_seconds=None,
 ):
     return WorkerSnapshot(
         worker_id=worker_id,
@@ -39,6 +40,7 @@ def make_snapshot(
         git_status=git_status,
         new_commits=new_commits,
         retry_count=retry_count,
+        elapsed_seconds=elapsed_seconds,
     )
 
 
@@ -265,3 +267,127 @@ class TestProgressTracking:
         count = get_completed_count(reloaded)
         # Started with 1 completed (issue 26), added 5 more
         assert count == 6, f"Expected 6 completed, got {count}"
+
+
+class TestWallClockTimeout:
+    """Tests for wall-clock timeout in _handle_running_worker."""
+
+    def test_timeout_with_commits_returns_push(self, loaded_config, state_manager):
+        """Wall-clock timeout fires push when commits exist."""
+        state_manager.init_worker(1, issue_number=1, branch="fix/issue-1", worktree="/tmp/wt/1")
+        snapshot = make_snapshot(
+            claude_running=True,
+            signal_exists=False,
+            log_size=500,
+            log_mtime=None,
+            new_commits="abc123 feat: implement\n",
+            elapsed_seconds=loaded_config.wall_clock_timeout + 60,
+        )
+        decisions = compute_decision(snapshot, loaded_config, state_manager, set())
+        actions = [d.action for d in decisions]
+        assert "push" in actions, f"Expected push on timeout with commits, got: {actions}"
+
+    def test_timeout_no_commits_no_recent_log_returns_restart(self, loaded_config, state_manager):
+        """Wall-clock timeout fires restart when no commits and log is stale."""
+        import time
+        state_manager.init_worker(1, issue_number=1, branch="fix/issue-1", worktree="/tmp/wt/1")
+        snapshot = make_snapshot(
+            claude_running=True,
+            signal_exists=False,
+            log_size=500,
+            log_mtime=time.time() - 300,  # 5 minutes ago (stale)
+            new_commits="",
+            elapsed_seconds=loaded_config.wall_clock_timeout + 60,
+        )
+        decisions = compute_decision(snapshot, loaded_config, state_manager, set())
+        actions = [d.action for d in decisions]
+        assert "restart" in actions, f"Expected restart on timeout with no commits, got: {actions}"
+
+    def test_timeout_but_log_active_returns_noop(self, loaded_config, state_manager):
+        """Wall-clock timeout does not fire restart when log was written recently."""
+        import time
+        state_manager.init_worker(1, issue_number=1, branch="fix/issue-1", worktree="/tmp/wt/1")
+        snapshot = make_snapshot(
+            claude_running=True,
+            signal_exists=False,
+            log_size=500,
+            log_mtime=time.time() - 30,  # 30 seconds ago (active)
+            new_commits="",
+            elapsed_seconds=loaded_config.wall_clock_timeout + 60,
+        )
+        decisions = compute_decision(snapshot, loaded_config, state_manager, set())
+        actions = [d.action for d in decisions]
+        assert "noop" in actions, f"Expected noop when log is active, got: {actions}"
+
+    def test_timeout_deadman_in_log_returns_noop(self, loaded_config, state_manager):
+        """When DEADMAN EXIT is in log, wait for signal recovery (noop)."""
+        state_manager.init_worker(1, issue_number=1, branch="fix/issue-1", worktree="/tmp/wt/1")
+        snapshot = make_snapshot(
+            claude_running=True,
+            signal_exists=False,
+            log_tail="[DEADMAN] EXIT worker=1 issue=#1 stage=implement code=0",
+            new_commits="abc123 feat: implement\n",
+            elapsed_seconds=loaded_config.wall_clock_timeout + 60,
+        )
+        decisions = compute_decision(snapshot, loaded_config, state_manager, set())
+        actions = [d.action for d in decisions]
+        assert "noop" in actions, f"Expected noop with DEADMAN EXIT in log, got: {actions}"
+
+    def test_no_timeout_below_threshold(self, loaded_config, state_manager):
+        """Below wall_clock_timeout, normal stall logic applies."""
+        state_manager.init_worker(1, issue_number=1, branch="fix/issue-1", worktree="/tmp/wt/1")
+        snapshot = make_snapshot(
+            claude_running=True,
+            signal_exists=False,
+            log_size=500,
+            new_commits="",
+            elapsed_seconds=60,  # only 1 minute
+        )
+        decisions = compute_decision(snapshot, loaded_config, state_manager, set())
+        actions = [d.action for d in decisions]
+        # Should be noop (still running normally, below any timeout threshold)
+        assert "noop" in actions, f"Expected noop below timeout threshold, got: {actions}"
+
+
+class TestCrashedWorkerWithCommits:
+    """Tests for crashed/killed worker with commits → push (not restart)."""
+
+    def test_crashed_with_commits_returns_push(self, loaded_config, state_manager):
+        """Process disappeared but commits exist → push directly."""
+        state_manager.init_worker(1, issue_number=1, branch="fix/issue-1", worktree="/tmp/wt/1")
+        snapshot = make_snapshot(
+            claude_running=False,
+            signal_exists=False,
+            new_commits="abc123 feat: implement\n",
+            retry_count=0,
+        )
+        decisions = compute_decision(snapshot, loaded_config, state_manager, set())
+        actions = [d.action for d in decisions]
+        assert "push" in actions, f"Expected push for crashed worker with commits, got: {actions}"
+        assert "restart" not in actions, f"Should not restart when commits exist, got: {actions}"
+
+    def test_crashed_no_commits_returns_restart(self, loaded_config, state_manager):
+        """Process disappeared with no commits → restart."""
+        state_manager.init_worker(1, issue_number=1, branch="fix/issue-1", worktree="/tmp/wt/1")
+        snapshot = make_snapshot(
+            claude_running=False,
+            signal_exists=False,
+            new_commits="",
+            retry_count=0,
+        )
+        decisions = compute_decision(snapshot, loaded_config, state_manager, set())
+        actions = [d.action for d in decisions]
+        assert "restart" in actions, f"Expected restart for crashed worker without commits, got: {actions}"
+
+    def test_crashed_no_commits_exceeds_retries_returns_skip(self, loaded_config, state_manager):
+        """Process disappeared, no commits, exceeded max retries → skip."""
+        state_manager.init_worker(1, issue_number=1, branch="fix/issue-1", worktree="/tmp/wt/1")
+        snapshot = make_snapshot(
+            claude_running=False,
+            signal_exists=False,
+            new_commits="",
+            retry_count=loaded_config.max_retries + 1,
+        )
+        decisions = compute_decision(snapshot, loaded_config, state_manager, set())
+        actions = [d.action for d in decisions]
+        assert "skip" in actions, f"Expected skip after max retries with no commits, got: {actions}"

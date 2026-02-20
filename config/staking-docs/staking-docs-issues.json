@@ -1,0 +1,54 @@
+{
+  "project": "staking-docs",
+  "tmux_session": "staking-docs",
+  "num_workers": 1,
+  "cycle_interval": 60,
+  "max_retries": 3,
+  "stall_timeout": 600,
+  "wall_clock_timeout": 1800,
+  "stagger_delay": 10,
+  "repos": {
+    "staking": {
+      "path": "/home/paul/go/src/gitlab.com/AccumulateNetwork/staking",
+      "platform": "gitlab",
+      "default_branch": "main",
+      "branch_prefix": "docs/issue-",
+      "worktree_base": "/home/paul/go/src/gitlab.com/AccumulateNetwork/staking-worktrees"
+    }
+  },
+  "pipeline": [
+    "research",
+    "draft",
+    "validate",
+    "review"
+  ],
+  "project_context": {
+    "language": "go",
+    "build_command": "go build ./...",
+    "test_command": "go test ./... -v -short -timeout 5m > /tmp/test.log 2>&1",
+    "safety_rules": [
+      "**NEVER modify staking.db** \u2014 it is the sole source of truth, read-only",
+      "**NEVER modify files in docs/** \u2014 use docs-dev/ for all output",
+      "**NEVER run commands that query the blockchain network**",
+      "**All documentation must include testable examples with real values**"
+    ],
+    "key_files": [
+      "CLAUDE.md",
+      "docs/reports/historical-format-evolution.md",
+      "docs/reports/reward-calculation-algorithm.md",
+      "docs/architecture/data-immutability-principles.md"
+    ]
+  },
+  "issues": [
+    {
+      "number": 1,
+      "title": "Document weighted balance truncation rules",
+      "priority": 1,
+      "wave": 1,
+      "description": "## Objective\n\nCreate precise, AI-followable documentation for the weighted balance truncation rules used in staking reward calculations.\n\n## Background\n\nThe staking system changed truncation behavior at period 45 (October 2023):\n- **Periods 1-44**: `trunc(balance, 4) * weight` (truncate first)\n- **Periods 45+**: `trunc(balance * weight, 4)` (multiply first)\n\nThis change is documented in `docs/reports/historical-format-evolution.md` lines 192-202, but there is no step-by-step specification that an AI can follow deterministically.\n\n## Acceptance Criteria\n\n1. Create specification with INPUT/OPERATION/OUTPUT format for each step\n2. Include at least 2 worked examples with real values from Excel reports\n3. Document the period 45 change explicitly with before/after examples\n4. Include code references to `internal/light.go` truncation functions\n5. Verify examples against `pastStakingReports/*.xlsx` data\n\n## Key Sources\n\n- `docs/reports/historical-format-evolution.md` - Primary reference\n- `docs/reports/reward-calculation-algorithm.md` - Algorithm overview\n- `internal/light.go` - Code implementation\n- `pastStakingReports/Staking_Report_2025-07-25.xlsx` - Example data",
+      "status": "completed",
+      "assigned_worker": 1,
+      "pipeline_stage": 3
+    }
+  ]
+}

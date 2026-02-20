@@ -195,3 +195,63 @@ def is_claude_running(pane_pid: Optional[int]) -> bool:
         return result.returncode == 0
     except subprocess.SubprocessError:
         return False
+
+
+def get_worktree_mtime(worktree_path: str) -> Optional[float]:
+    """Get the most recent file modification time in a worktree.
+
+    Scans common working directories (docs-dev/, docs/, internal/, pkg/, etc.)
+    to detect if Claude is actively writing files, even if the log isn't updating.
+    Returns Unix timestamp of most recent modification, or None if nothing found.
+    """
+    import os
+
+    if not worktree_path or not Path(worktree_path).is_dir():
+        return None
+
+    # Directories to check for recent activity
+    check_dirs = [
+        "docs-dev",  # Documentation output
+        "docs",      # Docs
+        "internal",  # Go internal packages
+        "pkg",       # Go packages
+        "cmd",       # Commands
+        "scripts",   # Scripts
+        ".",         # Root level files
+    ]
+
+    most_recent = 0.0
+    now = __import__("time").time()
+    max_age = 3600  # Only consider files modified in last hour
+
+    for check_dir in check_dirs:
+        dir_path = Path(worktree_path) / check_dir
+        if not dir_path.exists():
+            continue
+
+        try:
+            # Walk directory but limit depth to avoid expensive scans
+            for root, dirs, files in os.walk(dir_path):
+                # Skip .git and other hidden directories
+                dirs[:] = [d for d in dirs if not d.startswith('.')]
+
+                # Limit depth
+                depth = len(Path(root).relative_to(dir_path).parts)
+                if depth > 3:
+                    dirs.clear()
+                    continue
+
+                for f in files:
+                    if f.startswith('.'):
+                        continue
+                    fpath = Path(root) / f
+                    try:
+                        mtime = fpath.stat().st_mtime
+                        if now - mtime < max_age and mtime > most_recent:
+                            most_recent = mtime
+                    except OSError:
+                        continue
+        except OSError:
+            continue
+
+    return most_recent if most_recent > 0 else None

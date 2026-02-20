@@ -136,6 +136,136 @@ class TestMonitorCycleExecution:
             assert failed >= 2  # Issue 27 was already failed + issue 24
 
 
+class TestDeadmanRecovery:
+    """Tests for auto-recovery of missing signal file from DEADMAN EXIT in log."""
+
+    def test_deadman_exit_in_log_auto_recovers_signal(self, loaded_config, state_manager):
+        """If log contains [DEADMAN] EXIT but no signal file, signal is auto-created."""
+        state_manager.init_worker(1, issue_number=1, branch="fix/issue-1", worktree="/tmp/wt/1")
+
+        # Write log with DEADMAN EXIT but no signal file
+        log_path = state_manager.log_path(1)
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        log_path.write_text(
+            "Working on issue...\n"
+            "[DEADMAN] EXIT worker=1 issue=#1 stage=implement code=0 time=2024-01-01T12:00:00\n"
+        )
+
+        # Ensure no signal file exists
+        sig_path = state_manager.signal_path(1)
+        if sig_path.exists():
+            sig_path.unlink()
+
+        with patch("orchestrator.monitor.tmux") as mock_tmux, \
+             patch("orchestrator.monitor.git") as mock_git:
+            mock_tmux.get_pane_pid.return_value = None
+            mock_git.is_claude_running.return_value = False
+            mock_git.get_status.return_value = ""
+            mock_git.get_recent_commits.return_value = "abc123 feat: done\n"
+
+            snap = collect_worker_snapshot(1, loaded_config, state_manager, "test-session")
+
+        # Signal should be recovered
+        assert snap.signal_exists, "Signal should be recovered from DEADMAN EXIT in log"
+        assert snap.exit_code == 0, f"Exit code should be 0, got: {snap.exit_code}"
+        assert sig_path.exists(), "Signal file should be written to disk"
+        assert sig_path.read_text().strip() == "0"
+
+    def test_deadman_exit_nonzero_code_recovered(self, loaded_config, state_manager):
+        """DEADMAN EXIT with non-zero code is recovered correctly."""
+        state_manager.init_worker(1, issue_number=1, branch="fix/issue-1", worktree="/tmp/wt/1")
+
+        log_path = state_manager.log_path(1)
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        log_path.write_text(
+            "Working on issue...\n"
+            "[DEADMAN] EXIT worker=1 issue=#1 stage=implement code=1 time=2024-01-01T12:00:00\n"
+        )
+
+        sig_path = state_manager.signal_path(1)
+        if sig_path.exists():
+            sig_path.unlink()
+
+        with patch("orchestrator.monitor.tmux") as mock_tmux, \
+             patch("orchestrator.monitor.git") as mock_git:
+            mock_tmux.get_pane_pid.return_value = None
+            mock_git.is_claude_running.return_value = False
+            mock_git.get_status.return_value = ""
+            mock_git.get_recent_commits.return_value = ""
+
+            snap = collect_worker_snapshot(1, loaded_config, state_manager, "test-session")
+
+        assert snap.signal_exists, "Signal should be recovered"
+        assert snap.exit_code == 1, f"Exit code should be 1, got: {snap.exit_code}"
+
+    def test_no_deadman_no_recovery(self, loaded_config, state_manager):
+        """Without DEADMAN EXIT in log, no recovery happens."""
+        state_manager.init_worker(1, issue_number=1, branch="fix/issue-1", worktree="/tmp/wt/1")
+
+        log_path = state_manager.log_path(1)
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        log_path.write_text("Working on issue...\nSome output here.\n")
+
+        sig_path = state_manager.signal_path(1)
+        if sig_path.exists():
+            sig_path.unlink()
+
+        with patch("orchestrator.monitor.tmux") as mock_tmux, \
+             patch("orchestrator.monitor.git") as mock_git:
+            mock_tmux.get_pane_pid.return_value = None
+            mock_git.is_claude_running.return_value = False
+            mock_git.get_status.return_value = ""
+            mock_git.get_recent_commits.return_value = ""
+
+            snap = collect_worker_snapshot(1, loaded_config, state_manager, "test-session")
+
+        assert not snap.signal_exists, "Signal should NOT be recovered without DEADMAN EXIT"
+        assert snap.exit_code is None
+
+    def test_elapsed_seconds_computed_from_started_at(self, loaded_config, state_manager):
+        """elapsed_seconds should be computed from worker.started_at."""
+        from datetime import datetime, timezone, timedelta
+
+        state_manager.init_worker(1, issue_number=1, branch="fix/issue-1", worktree="/tmp/wt/1")
+        worker = state_manager.load_worker(1)
+        # Set started_at to 10 minutes ago
+        ten_min_ago = datetime.now(timezone.utc) - timedelta(minutes=10)
+        worker.started_at = ten_min_ago.strftime("%Y-%m-%dT%H:%M:%SZ")
+        state_manager.save_worker(worker)
+
+        with patch("orchestrator.monitor.tmux") as mock_tmux, \
+             patch("orchestrator.monitor.git") as mock_git:
+            mock_tmux.get_pane_pid.return_value = None
+            mock_git.is_claude_running.return_value = False
+            mock_git.get_status.return_value = ""
+            mock_git.get_recent_commits.return_value = ""
+
+            snap = collect_worker_snapshot(1, loaded_config, state_manager, "test-session")
+
+        assert snap.elapsed_seconds is not None, "elapsed_seconds should be set"
+        # Should be approximately 600 seconds (10 minutes), give some tolerance
+        assert 590 <= snap.elapsed_seconds <= 620, \
+            f"elapsed_seconds should be ~600, got: {snap.elapsed_seconds}"
+
+    def test_elapsed_seconds_none_when_no_started_at(self, loaded_config, state_manager):
+        """elapsed_seconds should be None when worker has no started_at."""
+        state_manager.init_worker(1, issue_number=1, branch="fix/issue-1", worktree="/tmp/wt/1")
+        worker = state_manager.load_worker(1)
+        worker.started_at = None
+        state_manager.save_worker(worker)
+
+        with patch("orchestrator.monitor.tmux") as mock_tmux, \
+             patch("orchestrator.monitor.git") as mock_git:
+            mock_tmux.get_pane_pid.return_value = None
+            mock_git.is_claude_running.return_value = False
+            mock_git.get_status.return_value = ""
+            mock_git.get_recent_commits.return_value = ""
+
+            snap = collect_worker_snapshot(1, loaded_config, state_manager, "test-session")
+
+        assert snap.elapsed_seconds is None, "elapsed_seconds should be None with no started_at"
+
+
 class TestPipelineStageAdvancement:
 
     def test_advance_stage_increments_pipeline_stage(self, loaded_config, state_manager):
