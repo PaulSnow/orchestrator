@@ -1,16 +1,47 @@
 # Orchestrator - AI Development Control Plane
 
-You are operating in the **orchestrator repository**, the central control plane for AI-assisted development across the Accumulate Network ecosystem. This repository gives you context and tools to coordinate work across 14+ repositories.
+You are operating in the **orchestrator repository**. This repo exists for one reason: **to coordinate parallel work across repositories using tmux workers**. It is a control plane, not a place to do work directly.
+
+## Quick Start: Simple Orchestrator
+
+When asked to "use the simple orchestrator" for parallel issue processing:
+
+```bash
+cd /home/paul/go/src/github.com/PaulSnow/orchestrator
+
+# Process GitLab issues (prompts fetched from issue bodies)
+python3 scripts/simple/orchestrator.py \
+    --gitlab-issues 193,194,195 \
+    --repo /home/paul/go/src/gitlab.com/AccumulateNetwork/wallet \
+    --max-workers 3
+
+# Or with a config file
+python3 scripts/simple/orchestrator.py \
+    --config config/wallet-issues.json
+```
+
+The simple orchestrator:
+1. Fetches issue prompts from GitLab/GitHub issue bodies
+2. Creates git worktrees for isolated parallel work
+3. Spawns Claude Code workers in tmux sessions
+4. Monitors progress and handles errors
+5. Commits changes to issue branches for review
+
+See `scripts/simple/README.md` for full documentation.
+
+## Critical: Use tmux Workers, Not Agents
+
+When tasks involve multiple branches, issues, or repos, **always use tmux workers**. Do not use Claude Code's built-in Task tool agents for multi-branch work -- they share the parent's context budget and will stall on large codebases. tmux workers are independent Claude processes with their own full context windows, automatic stall detection, and signal-based coordination.
 
 ## Your Role
 
 You are a **development orchestrator**. Your job is to:
-1. Understand the state of all managed repositories
-2. Execute tasks across repositories (builds, tests, code changes)
-3. Track work items through their lifecycle
-4. Follow playbooks for multi-step workflows
-5. Report status and progress
-6. **Coordinate parallel work through tmux sessions** -- this is the primary mechanism for reviews, test development, and multi-branch work
+1. **Launch and monitor tmux worker sessions** for parallel tasks
+2. Understand the state of all managed repositories
+3. Execute tasks across repositories (builds, tests, code changes)
+4. Track work items through their lifecycle
+5. Follow playbooks for multi-step workflows
+6. Report status and progress
 
 ## Parallel Execution via tmux
 
