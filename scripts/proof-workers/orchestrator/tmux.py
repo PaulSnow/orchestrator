@@ -100,3 +100,73 @@ def list_windows(session: str) -> list[str]:
     except subprocess.SubprocessError:
         pass
     return []
+
+
+def create_session_with_command(
+    session: str,
+    command: str,
+    working_dir: str = "",
+    shell: str = "bash",
+) -> bool:
+    """
+    Create a new tmux session that runs a shell command.
+
+    IMPORTANT: When commands contain shell features like command substitution
+    ($(cmd)), pipes, redirects, or variable expansion, they must be wrapped
+    in a shell invocation. This function handles that automatically.
+
+    Args:
+        session: Name for the tmux session
+        command: Shell command to run (can include $(substitution), pipes, etc.)
+        working_dir: Optional working directory for the session
+        shell: Shell to use (default: bash)
+
+    Returns:
+        True if session was created successfully
+
+    Example:
+        # This handles command substitution correctly:
+        create_session_with_command(
+            "my-session",
+            'claude -p "$(cat prompt.txt)" > output.log 2>&1'
+        )
+    """
+    # Wrap command in shell -c to ensure shell features work
+    # Escape single quotes in command for the wrapper
+    escaped_command = command.replace("'", "'\\''")
+    wrapped_command = f"{shell} -c '{escaped_command}'"
+
+    cmd = ["tmux", "new-session", "-d", "-s", session]
+    if working_dir:
+        cmd.extend(["-c", working_dir])
+    cmd.append(wrapped_command)
+
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=TMUX_TIMEOUT)
+        return result.returncode == 0
+    except (subprocess.TimeoutExpired, subprocess.SubprocessError):
+        return False
+
+
+def run_shell_command(
+    session: str,
+    window: str,
+    command: str,
+    shell: str = "bash",
+) -> None:
+    """
+    Run a shell command in an existing tmux window.
+
+    Unlike send_command which sends keystrokes, this ensures proper shell
+    interpretation of the command including substitution, pipes, etc.
+
+    Args:
+        session: tmux session name
+        window: Window name within the session
+        command: Shell command to run
+        shell: Shell to use (default: bash)
+    """
+    # Wrap in shell -c for proper interpretation
+    escaped_command = command.replace("'", "'\\''")
+    wrapped_command = f"{shell} -c '{escaped_command}'"
+    send_command(session, window, wrapped_command)
