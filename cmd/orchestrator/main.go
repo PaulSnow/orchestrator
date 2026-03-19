@@ -52,36 +52,170 @@ func main() {
 }
 
 func printUsage() {
-	fmt.Println(`orchestrator - General-purpose parallel Claude Code worker orchestration via tmux
+	fmt.Println(`orchestrator - Parallel Claude Code worker orchestration via tmux
 
-Commands:
-  launch     Launch unified parallel workers (with optional review gate)
-  review     Run review gate without launching workers
-  monitor    Run the monitor loop
-  watchdog   Run monitor under watchdog supervisor
-  cleanup    Clean up tmux session and worktrees
-  status     Display one-shot status
-  dashboard  Live terminal dashboard
-  add-issue  Add an issue mid-run
+OVERVIEW
+  Orchestrates multiple Claude Code sessions working on GitHub/GitLab issues
+  in parallel. Each worker gets its own git worktree and tmux window.
 
-Use "orchestrator <command> -h" for more information about a command.`)
+WORKFLOW
+  1. Load issues from config file OR GitHub epic issue
+  2. Run review gate (optional) - validates issues are well-specified
+  3. Create git worktrees for each assigned issue
+  4. Launch Claude workers in tmux windows with issue-specific prompts
+  5. Monitor progress, reassign completed workers to next issues
+
+CONFIGURATION
+
+  Option A: JSON Config File
+    Create a JSON file with issues array:
+    {
+      "project": "my-project",
+      "repos": {
+        "default": {
+          "path": "/path/to/repo",
+          "worktree_base": "/path/to/worktrees",
+          "branch_prefix": "feature/issue-"
+        }
+      },
+      "issues": [
+        {"number": 1, "title": "First issue", "priority": 1, "wave": 1},
+        {"number": 2, "title": "Second issue", "depends_on": [1]}
+      ]
+    }
+
+  Option B: GitHub Epic Issue
+    Use a GitHub issue as the config source. The epic body contains a task
+    list with issue references:
+
+    - [ ] #101 - Add authentication module
+    - [ ] #102 - Create user schema (blocked by #101)
+    - [x] #103 - Already completed (skipped)
+
+COMMANDS
+  launch     Start workers on issues (main command)
+  review     Run review gate only, don't launch workers
+  monitor    Run the monitor loop (reassigns workers, handles failures)
+  watchdog   Run monitor under watchdog supervisor (auto-restart)
+  cleanup    Kill tmux session and optionally remove worktrees
+  status     Show current progress (one-shot)
+  dashboard  Live terminal dashboard with auto-refresh
+  add-issue  Add an issue to config mid-run
+
+EXAMPLES
+
+  # Launch with config file (most common)
+  orchestrator launch --config config/my-issues.json
+
+  # Launch from GitHub epic issue
+  orchestrator launch --epic https://github.com/owner/repo/issues/42 \
+    --repo /path/to/repo --worktrees /tmp/worktrees
+
+  # Review issues without launching (check if issues are well-specified)
+  orchestrator launch --config config/issues.json --review-only
+
+  # Skip review gate (for re-runs after issues already reviewed)
+  orchestrator launch --config config/issues.json --skip-review
+
+  # Run with 3 parallel workers instead of default 5
+  orchestrator launch --config config/issues.json --workers 3
+
+  # Dry run - validate config without making changes
+  orchestrator launch --config config/issues.json --dry-run
+
+  # Check status of running orchestration
+  orchestrator status --config config/issues.json
+
+  # Clean up after run
+  orchestrator cleanup --config config/issues.json
+
+WEB DASHBOARD
+  By default, a web dashboard runs at http://localhost:8123 showing:
+  - Issue status (pending, in_progress, completed, failed)
+  - Active worker assignments
+  - Real-time progress updates via SSE
+
+  Disable with --web-port 0
+
+TMUX SESSION
+  Workers run in tmux windows. Attach to monitor:
+    tmux attach -t <session-name>
+
+  Session name defaults to project name from config.
+
+Use "orchestrator <command> -h" for command-specific options.`)
 }
 
 func cmdLaunch(args []string) {
 	fs := flag.NewFlagSet("launch", flag.ExitOnError)
-	dryRun := fs.Bool("dry-run", false, "Validate without making changes")
-	workers := fs.Int("workers", defaultNumWorkers, "Override number of workers")
-	session := fs.String("session", "", "Tmux session name (default: project name)")
-	configDir := fs.String("config-dir", "", "Directory with *-issues.json configs")
-	config := fs.String("config", "", "Single config file")
-	epic := fs.String("epic", "", "GitHub epic issue URL (e.g., https://github.com/owner/repo/issues/123)")
+	fs.Usage = func() {
+		fmt.Println(`orchestrator launch - Start parallel Claude workers on issues
+
+USAGE
+  orchestrator launch --config <file>
+  orchestrator launch --epic <url> --repo <path> --worktrees <path>
+
+DESCRIPTION
+  Launches Claude Code workers in parallel tmux windows. Each worker gets
+  an isolated git worktree and works on one issue at a time. When a worker
+  completes, it's automatically assigned the next available issue.
+
+INPUT SOURCES (pick one)
+
+  --config <file>       JSON config file with issues array
+  --config-dir <dir>    Directory containing *-issues.json files (merges all)
+  --epic <url>          GitHub epic issue URL - parses task list from body
+
+  Epic URL formats supported:
+    https://github.com/owner/repo/issues/123
+    owner/repo#123
+
+EPIC MODE REQUIREMENTS
+  When using --epic, you must also specify:
+    --repo <path>        Path to the git repository
+    --worktrees <path>   Directory for creating worktrees
+
+REVIEW GATE
+  By default, issues are reviewed before work begins to ensure they are
+  well-specified. Use --skip-review for re-runs or --review-only to check
+  issues without launching workers.
+
+EXAMPLES
+
+  # Standard launch with config file
+  orchestrator launch --config config/my-issues.json
+
+  # Launch from GitHub epic
+  orchestrator launch \
+    --epic https://github.com/PaulSnow/myrepo/issues/42 \
+    --repo /home/paul/go/src/github.com/PaulSnow/myrepo \
+    --worktrees /tmp/myrepo-worktrees
+
+  # Review only - validate issues are ready
+  orchestrator launch --config issues.json --review-only
+
+  # Quick re-run, skip review
+  orchestrator launch --config issues.json --skip-review
+
+  # Custom worker count and session name
+  orchestrator launch --config issues.json --workers 3 --session mywork
+
+OPTIONS`)
+		fs.PrintDefaults()
+	}
+	dryRun := fs.Bool("dry-run", false, "Validate config and show plan without making changes")
+	workers := fs.Int("workers", defaultNumWorkers, "Number of parallel Claude workers")
+	session := fs.String("session", "", "Tmux session name (default: project name from config)")
+	configDir := fs.String("config-dir", "", "Directory with *-issues.json configs (merges all)")
+	config := fs.String("config", "", "JSON config file with issues array")
+	epic := fs.String("epic", "", "GitHub epic issue URL to use as config source")
 	repoPath := fs.String("repo", "", "Repository path (required with --epic)")
 	worktreeBase := fs.String("worktrees", "", "Worktree base directory (required with --epic)")
-	branchPrefix := fs.String("branch-prefix", "feature/issue-", "Branch prefix for worktrees")
-	skipReview := fs.Bool("skip-review", false, "Skip the review gate")
-	reviewOnly := fs.Bool("review-only", false, "Run review gate only, don't launch workers")
-	postComments := fs.Bool("post-comments", false, "Post comments to failing issues")
-	webPort := fs.Int("web-port", 8080, "Web dashboard port (0 to disable)")
+	branchPrefix := fs.String("branch-prefix", "feature/issue-", "Git branch prefix for issue branches")
+	skipReview := fs.Bool("skip-review", false, "Skip the review gate (for re-runs)")
+	reviewOnly := fs.Bool("review-only", false, "Run review gate only, exit before launching workers")
+	postComments := fs.Bool("post-comments", false, "Post review findings as comments on failing issues")
+	webPort := fs.Int("web-port", 8123, "Web dashboard port (0 to disable)")
 	fs.Parse(args)
 
 	var configs []*orchestrator.RunConfig
@@ -389,7 +523,7 @@ func cmdReview(args []string) {
 	configDir := fs.String("config-dir", "", "Directory with *-issues.json configs")
 	config := fs.String("config", "", "Single config file")
 	postComments := fs.Bool("post-comments", false, "Post comments to failing issues")
-	webPort := fs.Int("web-port", 8080, "Web dashboard port (0 to disable)")
+	webPort := fs.Int("web-port", 8123, "Web dashboard port (0 to disable)")
 	keepServer := fs.Bool("keep-server", false, "Keep web server running after review")
 	fs.Parse(args)
 
@@ -459,12 +593,33 @@ func cmdReview(args []string) {
 
 func cmdMonitor(args []string) {
 	fs := flag.NewFlagSet("monitor", flag.ExitOnError)
-	cycle := fs.Int("cycle", 0, "Cycle interval in seconds")
-	noDelay := fs.Bool("no-delay", false, "Skip initial 60s delay")
-	workers := fs.Int("workers", defaultNumWorkers, "Override number of workers")
+	fs.Usage = func() {
+		fmt.Println(`orchestrator monitor - Run the worker monitoring loop
+
+DESCRIPTION
+  Monitors running Claude workers and handles:
+  - Detecting completed workers (via signal files)
+  - Reassigning workers to next available issues
+  - Detecting failed/stalled workers
+  - Updating issue status in config
+
+  The monitor runs continuously until all issues are complete or it's killed.
+
+USAGE
+  orchestrator monitor --config <file>
+
+  Typically launched automatically by 'orchestrator launch' in a tmux window.
+  Can also be run manually to resume monitoring after restart.
+
+OPTIONS`)
+		fs.PrintDefaults()
+	}
+	cycle := fs.Int("cycle", 60, "Check interval in seconds")
+	noDelay := fs.Bool("no-delay", false, "Skip initial 60s delay before first check")
+	workers := fs.Int("workers", defaultNumWorkers, "Number of workers to monitor")
 	session := fs.String("session", "orchestrator", "Tmux session name")
 	configDir := fs.String("config-dir", "", "Directory with *-issues.json configs")
-	config := fs.String("config", "", "Single config file")
+	config := fs.String("config", "", "Config file")
 	fs.Parse(args)
 
 	if *configDir != "" {
@@ -536,7 +691,23 @@ func cmdWatchdog(args []string) {
 
 func cmdCleanup(args []string) {
 	fs := flag.NewFlagSet("cleanup", flag.ExitOnError)
-	keepWorktrees := fs.Bool("keep-worktrees", false, "Keep worktrees")
+	fs.Usage = func() {
+		fmt.Println(`orchestrator cleanup - Clean up tmux session and worktrees
+
+DESCRIPTION
+  Stops all workers and cleans up resources:
+  - Kills the tmux session
+  - Removes git worktrees (unless --keep-worktrees)
+  - Clears state files
+
+USAGE
+  orchestrator cleanup --config <file>
+  orchestrator cleanup --config <file> --keep-worktrees
+
+OPTIONS`)
+		fs.PrintDefaults()
+	}
+	keepWorktrees := fs.Bool("keep-worktrees", false, "Keep worktrees (don't delete)")
 	config := fs.String("config", defaultConfigPath(), "Config file")
 	fs.Parse(args)
 
@@ -546,6 +717,20 @@ func cmdCleanup(args []string) {
 
 func cmdStatus(args []string) {
 	fs := flag.NewFlagSet("status", flag.ExitOnError)
+	fs.Usage = func() {
+		fmt.Println(`orchestrator status - Show current orchestration progress
+
+DESCRIPTION
+  Displays a snapshot of:
+  - Issues completed/pending/failed per project
+  - Current worker assignments and status
+
+USAGE
+  orchestrator status --config <file>
+
+OPTIONS`)
+		fs.PrintDefaults()
+	}
 	workers := fs.Int("workers", defaultNumWorkers, "Number of workers")
 	configDir := fs.String("config-dir", "", "Config directory")
 	config := fs.String("config", "", "Config file")
