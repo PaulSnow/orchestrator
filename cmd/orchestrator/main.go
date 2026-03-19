@@ -71,18 +71,48 @@ func cmdLaunch(args []string) {
 	fs := flag.NewFlagSet("launch", flag.ExitOnError)
 	dryRun := fs.Bool("dry-run", false, "Validate without making changes")
 	workers := fs.Int("workers", defaultNumWorkers, "Override number of workers")
-	session := fs.String("session", "orchestrator", "Tmux session name")
+	session := fs.String("session", "", "Tmux session name (default: project name)")
 	configDir := fs.String("config-dir", "", "Directory with *-issues.json configs")
 	config := fs.String("config", "", "Single config file")
+	epic := fs.String("epic", "", "GitHub epic issue URL (e.g., https://github.com/owner/repo/issues/123)")
+	repoPath := fs.String("repo", "", "Repository path (required with --epic)")
+	worktreeBase := fs.String("worktrees", "", "Worktree base directory (required with --epic)")
+	branchPrefix := fs.String("branch-prefix", "feature/issue-", "Branch prefix for worktrees")
 	skipReview := fs.Bool("skip-review", false, "Skip the review gate")
 	reviewOnly := fs.Bool("review-only", false, "Run review gate only, don't launch workers")
 	postComments := fs.Bool("post-comments", false, "Post comments to failing issues")
 	webPort := fs.Int("web-port", 8080, "Web dashboard port (0 to disable)")
 	fs.Parse(args)
 
-	configs := resolveConfigs(*configDir, *config)
+	var configs []*orchestrator.RunConfig
+
+	// Load config from epic or traditional config file
+	if *epic != "" {
+		if *repoPath == "" || *worktreeBase == "" {
+			fmt.Fprintln(os.Stderr, "Error: --repo and --worktrees are required when using --epic")
+			os.Exit(1)
+		}
+		cfg, err := orchestrator.LoadConfigFromEpic(*epic, *repoPath, *worktreeBase, *branchPrefix, *workers)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error loading epic: %v\n", err)
+			os.Exit(1)
+		}
+		// Store epic URL for checkbox updates
+		cfg.ConfigPath = *epic
+		configs = append(configs, cfg)
+		fmt.Printf("Loaded %d issues from epic: %s\n", len(cfg.Issues), *epic)
+	} else {
+		configs = resolveConfigs(*configDir, *config)
+	}
 	numWorkers := *workers
+	// Default session name to project name
 	tmuxSession := *session
+	if tmuxSession == "" && len(configs) > 0 {
+		tmuxSession = configs[0].Project
+		if tmuxSession == "" {
+			tmuxSession = "orchestrator"
+		}
+	}
 	staggerDelay := 30
 	for _, c := range configs {
 		if c.StaggerDelay > staggerDelay {
