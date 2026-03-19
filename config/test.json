@@ -1,0 +1,48 @@
+{
+  "project": "test-project",
+  "repo_path": "/tmp/test-repo",
+  "worktree_base": "/tmp/test-worktrees",
+  "branch_prefix": "feature/test-",
+  "default_branch": "main",
+  "platform": "github",
+  "pipeline": ["implement"],
+  "project_context": {
+    "language": "go",
+    "build_command": "go build ./...",
+    "test_command": "go test ./...",
+    "commit_prefix": "test",
+    "key_files": ["README.md"]
+  },
+  "review": {
+    "enabled": true,
+    "parallel_workers": 2,
+    "session_timeout": 1800,
+    "post_comments": true,
+    "strict_mode": false
+  },
+  "web": {
+    "enabled": true,
+    "port": 8080,
+    "host": "localhost"
+  },
+  "issues": [
+    {
+      "number": 1,
+      "title": "Test issue 1",
+      "priority": 1,
+      "depends_on": [],
+      "wave": 1,
+      "status": "pending",
+      "description": "A test issue for validation"
+    },
+    {
+      "number": 2,
+      "title": "Test issue 2",
+      "priority": 2,
+      "depends_on": [1],
+      "wave": 2,
+      "status": "pending",
+      "description": "Another test issue that depends on issue 1"
+    }
+  ]
+}

@@ -16,6 +16,12 @@ import (
 
 const defaultNumWorkers = 5
 
+// Version information (set at build time)
+var (
+	Version   = "0.1.0"
+	BuildTime = "unknown"
+)
+
 func main() {
 	if len(os.Args) < 2 {
 		printUsage()
@@ -40,6 +46,8 @@ func main() {
 		cmdDashboard(args)
 	case "add-issue":
 		cmdAddIssue(args)
+	case "version":
+		cmdVersion()
 	case "help", "-h", "--help":
 		printUsage()
 	default:
@@ -60,8 +68,14 @@ Commands:
   status     Display one-shot status
   dashboard  Live terminal dashboard
   add-issue  Add an issue mid-run
+  version    Show version information
+  help       Show this help message
 
 Use "orchestrator <command> -h" for more information about a command.`)
+}
+
+func cmdVersion() {
+	fmt.Printf("orchestrator version %s (built %s)\n", Version, BuildTime)
 }
 
 func cmdLaunch(args []string) {
@@ -71,7 +85,19 @@ func cmdLaunch(args []string) {
 	session := fs.String("session", "orchestrator", "Tmux session name")
 	configDir := fs.String("config-dir", "", "Directory with *-issues.json configs")
 	config := fs.String("config", "", "Single config file")
+	port := fs.Int("port", 8080, "Web dashboard port")
+	noWeb := fs.Bool("no-web", false, "Disable web dashboard")
+	skipReview := fs.Bool("skip-review", false, "Skip review stage in pipeline")
+	reviewOnly := fs.Bool("review-only", false, "Only run review stage")
+	verbose := fs.Bool("verbose", false, "Enable verbose output")
 	fs.Parse(args)
+
+	// Store flags in a local options struct for later use
+	_ = port      // Web port (used when web dashboard is enabled)
+	_ = noWeb     // Disable web dashboard
+	_ = skipReview // Skip review stage
+	_ = reviewOnly // Only run reviews
+	_ = verbose   // Verbose logging
 
 	configs := resolveConfigs(*configDir, *config)
 	numWorkers := *workers

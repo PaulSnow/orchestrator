@@ -25,6 +25,8 @@ type RunConfig struct {
 	PromptType         string                 `json:"prompt_type,omitempty"`
 	Pipeline           []string               `json:"pipeline,omitempty"`
 	ProjectContext     *ProjectContext        `json:"project_context,omitempty"`
+	Review             *ReviewConfig          `json:"review,omitempty"`
+	Web                *WebConfig             `json:"web,omitempty"`
 	TmuxSession        string                 `json:"tmux_session,omitempty"`
 	StaggerDelay       int                    `json:"stagger_delay,omitempty"`
 
@@ -47,6 +49,8 @@ func NewRunConfig() *RunConfig {
 		WallClockTimeout:   1800,
 		PromptType:         "implement",
 		Pipeline:           []string{"implement"},
+		Review:             NewReviewConfig(),
+		Web:                NewWebConfig(),
 		TmuxSession:        "proof-orchestrator",
 		StaggerDelay:       30,
 	}
@@ -156,6 +160,16 @@ func LoadConfig(configPath string) (*RunConfig, error) {
 	// Load project context
 	if v, ok := raw["project_context"].(map[string]any); ok {
 		cfg.ProjectContext = projectContextFromMap(v)
+	}
+
+	// Load review config
+	if v, ok := raw["review"].(map[string]any); ok {
+		cfg.Review = reviewConfigFromMap(v)
+	}
+
+	// Load web config
+	if v, ok := raw["web"].(map[string]any); ok {
+		cfg.Web = webConfigFromMap(v)
 	}
 
 	// Set state directory
@@ -275,6 +289,40 @@ func projectContextFromMap(m map[string]any) *ProjectContext {
 		}
 	}
 	return pc
+}
+
+func reviewConfigFromMap(m map[string]any) *ReviewConfig {
+	rc := NewReviewConfig()
+	if v, ok := m["enabled"].(bool); ok {
+		rc.Enabled = v
+	}
+	if v, ok := m["parallel_workers"].(float64); ok {
+		rc.ParallelWorkers = int(v)
+	}
+	if v, ok := m["session_timeout"].(float64); ok {
+		rc.SessionTimeout = int(v)
+	}
+	if v, ok := m["post_comments"].(bool); ok {
+		rc.PostComments = v
+	}
+	if v, ok := m["strict_mode"].(bool); ok {
+		rc.StrictMode = v
+	}
+	return rc
+}
+
+func webConfigFromMap(m map[string]any) *WebConfig {
+	wc := NewWebConfig()
+	if v, ok := m["enabled"].(bool); ok {
+		wc.Enabled = v
+	}
+	if v, ok := m["port"].(float64); ok {
+		wc.Port = int(v)
+	}
+	if v, ok := m["host"].(string); ok {
+		wc.Host = v
+	}
+	return wc
 }
 
 func issueFromMap(m map[string]any) *Issue {

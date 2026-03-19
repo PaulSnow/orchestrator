@@ -10,6 +10,42 @@ type ProjectContext struct {
 	KeyFiles     []string `json:"key_files,omitempty"`
 }
 
+// ReviewConfig holds configuration for the review stage.
+type ReviewConfig struct {
+	Enabled         bool `json:"enabled"`
+	ParallelWorkers int  `json:"parallel_workers,omitempty"`
+	SessionTimeout  int  `json:"session_timeout,omitempty"`
+	PostComments    bool `json:"post_comments,omitempty"`
+	StrictMode      bool `json:"strict_mode,omitempty"`
+}
+
+// NewReviewConfig creates a ReviewConfig with sensible defaults.
+func NewReviewConfig() *ReviewConfig {
+	return &ReviewConfig{
+		Enabled:         true,
+		ParallelWorkers: 2,
+		SessionTimeout:  1800,
+		PostComments:    true,
+		StrictMode:      false,
+	}
+}
+
+// WebConfig holds configuration for the web dashboard.
+type WebConfig struct {
+	Enabled bool   `json:"enabled"`
+	Port    int    `json:"port,omitempty"`
+	Host    string `json:"host,omitempty"`
+}
+
+// NewWebConfig creates a WebConfig with sensible defaults.
+func NewWebConfig() *WebConfig {
+	return &WebConfig{
+		Enabled: true,
+		Port:    8080,
+		Host:    "localhost",
+	}
+}
+
 // RepoConfig is the configuration for a single repository used by the orchestrator.
 type RepoConfig struct {
 	Name          string `json:"name"`
