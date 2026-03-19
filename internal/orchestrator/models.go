@@ -114,3 +114,71 @@ type WorkerSnapshot struct {
 	ElapsedSeconds *float64
 	WorktreeMtime  *float64
 }
+
+// ReviewGate states
+const (
+	GateStateInit         = "INIT"
+	GateStateCompleteness = "COMPLETENESS"
+	GateStateSuitability  = "SUITABILITY"
+	GateStateDependency   = "DEPENDENCY"
+	GateStateDecision     = "DECISION"
+	GateStateDone         = "DONE"
+)
+
+// IssueReview holds review results for a single issue.
+type IssueReview struct {
+	IssueNumber    int                `json:"issue_number"`
+	Title          string             `json:"title,omitempty"`
+	Completeness   *CompletenessCheck `json:"completeness,omitempty"`
+	Suitability    *SuitabilityCheck  `json:"suitability,omitempty"`
+	Error          string             `json:"error,omitempty"`
+}
+
+// CompletenessCheck holds completeness review findings.
+type CompletenessCheck struct {
+	IsComplete        bool     `json:"is_complete"`
+	MissingItems      []string `json:"missing_items,omitempty"`
+	AcceptanceCriteria []string `json:"acceptance_criteria,omitempty"`
+	Findings          string   `json:"findings,omitempty"`
+}
+
+// SuitabilityCheck holds suitability review findings.
+type SuitabilityCheck struct {
+	IsSuitable      bool     `json:"is_suitable"`
+	Concerns        []string `json:"concerns,omitempty"`
+	Recommendations []string `json:"recommendations,omitempty"`
+	Findings        string   `json:"findings,omitempty"`
+}
+
+// DependencyAnalysis holds cross-issue dependency findings.
+type DependencyAnalysis struct {
+	HasConflicts     bool                `json:"has_conflicts"`
+	Conflicts        []DependencyConflict `json:"conflicts,omitempty"`
+	OrderSuggestions []string            `json:"order_suggestions,omitempty"`
+	Findings         string              `json:"findings,omitempty"`
+}
+
+// DependencyConflict describes a conflict between issues.
+type DependencyConflict struct {
+	IssueA      int    `json:"issue_a"`
+	IssueB      int    `json:"issue_b"`
+	Description string `json:"description"`
+	Severity    string `json:"severity"` // high, medium, low
+}
+
+// GateDecision is the overall gate decision.
+type GateDecision struct {
+	Pass          bool   `json:"pass"`
+	Recommendation string `json:"recommendation"` // approve, reject, needs_revision
+	Reason        string `json:"reason,omitempty"`
+}
+
+// GateResult holds the complete review gate results.
+type GateResult struct {
+	Pass               bool                `json:"pass"`
+	Decision           *GateDecision       `json:"decision"`
+	IssueReviews       []*IssueReview      `json:"issue_reviews"`
+	DependencyAnalysis *DependencyAnalysis `json:"dependency_analysis,omitempty"`
+	Summary            string              `json:"summary,omitempty"`
+	Error              string              `json:"error,omitempty"`
+}
