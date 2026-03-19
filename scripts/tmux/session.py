@@ -169,9 +169,6 @@ def get_session_pid(name: str) -> Optional[int]:
     Returns:
         PID of the shell process, or None if not found
     """
-    if not session_exists(name):
-        return None
-
     try:
         result = _run(
             ["tmux", "list-panes", "-t", name, "-F", "#{pane_pid}"]
@@ -183,72 +180,107 @@ def get_session_pid(name: str) -> Optional[int]:
     return None
 
 
-def is_session_running(name: str) -> bool:
-    """Check if a session has an active process running.
+# Alias for tests that use get_pane_pid
+get_pane_pid = get_session_pid
 
-    This checks if there are child processes under the session's shell,
-    which indicates an active command is running.
+
+def is_session_running(name: str) -> bool:
+    """Check if a session exists and has panes.
 
     Args:
         name: Session name
 
     Returns:
-        True if session has active processes, False otherwise
+        True if session exists and has panes, False otherwise
     """
-    pid = get_session_pid(name)
-    if pid is None:
+    if not session_exists(name):
         return False
 
     try:
-        # Check for child processes of the shell
-        result = subprocess.run(
-            ["pgrep", "-P", str(pid)],
-            capture_output=True,
-            text=True,
-            timeout=TMUX_TIMEOUT,
+        result = _run(
+            ["tmux", "list-panes", "-t", name, "-F", "#{pane_pid}"]
         )
         return result.returncode == 0 and result.stdout.strip() != ""
     except (subprocess.TimeoutExpired, subprocess.SubprocessError):
         return False
 
 
-def capture_pane(name: str, lines: int = 100) -> str:
-    """Capture recent output from a tmux session's pane.
+def capture_pane(
+    name: str,
+    lines: int = 100,
+    start_line: Optional[int] = None,
+    end_line: Optional[int] = None,
+) -> str:
+    """Capture output from a tmux session's pane.
 
     Args:
         name: Session name
-        lines: Number of lines to capture (default: 100)
+        lines: Number of lines to capture (default: 100, used if start_line not set)
+        start_line: Starting line number (negative for history)
+        end_line: Ending line number
 
     Returns:
         Captured output as string, empty string on error
     """
-    if not session_exists(name):
-        return ""
-
     try:
-        result = _run(
-            ["tmux", "capture-pane", "-t", name, "-p", "-S", f"-{lines}"]
-        )
+        cmd = ["tmux", "capture-pane", "-t", name, "-p"]
+
+        if start_line is not None:
+            cmd.extend(["-S", str(start_line)])
+        else:
+            cmd.extend(["-S", f"-{lines}"])
+
+        if end_line is not None:
+            cmd.extend(["-E", str(end_line)])
+
+        result = _run(cmd)
         if result.returncode == 0:
             return result.stdout
     except (subprocess.TimeoutExpired, subprocess.SubprocessError):
         pass
     return ""
 
-# Alias for backward compatibility
-capture_pane_history = capture_pane
+
+def capture_pane_history(name: str, lines: int = 5000) -> str:
+    """Capture pane history with extended line range.
+
+    Args:
+        name: Session name
+        lines: Number of history lines to capture (default: 5000)
+
+    Returns:
+        Captured history as string
+    """
+    return capture_pane(name, start_line=-lines, end_line=None)
 
 
-# Alias for get_session_pid (tests use get_pane_pid)
-get_pane_pid = get_session_pid
+def is_process_running(pid: Optional[int], process_name: str = "") -> bool:
+    """Check if a process with given PID is running.
 
-def is_process_running(pid: int) -> bool:
-    """Check if a process with given PID is running."""
+    Args:
+        pid: Process ID to check
+        process_name: Optional process name to match (uses pgrep if provided)
+
+    Returns:
+        True if process is running, False otherwise
+    """
     if pid is None:
         return False
+
     try:
-        import os
-        os.kill(pid, 0)
-        return True
-    except (OSError, ProcessLookupError):
+        if process_name:
+            # Use pgrep to check for process by name under parent PID
+            result = subprocess.run(
+                ["pgrep", "-P", str(pid), process_name],
+                capture_output=True,
+                text=True,
+                timeout=TMUX_TIMEOUT,
+            )
+            return result.returncode == 0
+        else:
+            # Just check if PID exists
+            import os
+            os.kill(pid, 0)
+            return True
+    except (subprocess.TimeoutExpired, subprocess.SubprocessError, OSError, ProcessLookupError):
         return False
