@@ -14,6 +14,13 @@ import (
 	"github.com/PaulSnow/orchestrator/internal/orchestrator"
 )
 
+// Version info - set via ldflags at build time
+var (
+	Version   = "dev"
+	GitCommit = "unknown"
+	BuildDate = "unknown"
+)
+
 const defaultNumWorkers = 5
 
 func main() {
@@ -42,6 +49,8 @@ func main() {
 		cmdDashboard(args)
 	case "add-issue":
 		cmdAddIssue(args)
+	case "version", "-v", "--version":
+		printVersion()
 	case "help", "-h", "--help":
 		printUsage()
 	default:
@@ -101,6 +110,7 @@ COMMANDS
   status     Show current progress (one-shot)
   dashboard  Live terminal dashboard with auto-refresh
   add-issue  Add an issue to config mid-run
+  version    Show version information
 
 EXAMPLES
 
@@ -144,6 +154,16 @@ TMUX SESSION
   Session name defaults to project name from config.
 
 Use "orchestrator <command> -h" for command-specific options.`)
+}
+
+func printVersion() {
+	fmt.Printf("orchestrator %s\n", Version)
+	if GitCommit != "unknown" {
+		fmt.Printf("  commit: %s\n", GitCommit)
+	}
+	if BuildDate != "unknown" {
+		fmt.Printf("  built:  %s\n", BuildDate)
+	}
 }
 
 func cmdLaunch(args []string) {
