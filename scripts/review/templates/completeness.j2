@@ -1,0 +1,87 @@
+You are reviewing issue #{{ issue.number }} for completeness before it is assigned to a Claude Code worker.
+
+## Issue Information
+
+**Number**: #{{ issue.number }}
+**Title**: {{ issue.title }}
+
+### Description
+{% if issue.description %}
+{{ issue.description }}
+{% else %}
+(No description provided)
+{% endif %}
+
+{% if project_context %}
+## Project Context
+
+{% if project_context.language %}
+**Language**: {{ project_context.language }}
+{% endif %}
+{% if project_context.build_command %}
+**Build Command**: `{{ project_context.build_command }}`
+{% endif %}
+{% if project_context.test_command %}
+**Test Command**: `{{ project_context.test_command }}`
+{% endif %}
+{% endif %}
+
+## Your Task
+
+Evaluate whether this issue is complete enough for a Claude Code worker to implement. Check the following criteria:
+
+### 1. Title Clarity
+- Is the title descriptive and actionable?
+- Does it clearly indicate what needs to be done?
+
+### 2. Description Quality
+- Is there enough detail to understand the problem or feature?
+- Are the requirements clearly stated?
+- Can an AI understand what to implement without guessing?
+
+### 3. Acceptance Criteria
+- Are there clear acceptance criteria or success conditions?
+- How will we know when this issue is "done"?
+
+### 4. Scope Definition
+- Is the scope well-defined?
+- Are there clear boundaries on what's in/out of scope?
+- Is the issue appropriately sized (not too large, not too vague)?
+
+### 5. Technical Context
+- Are relevant files, modules, or components mentioned?
+- Are there any specific implementation hints or constraints?
+
+## Required Output
+
+You MUST output your analysis as JSON between the following markers:
+
+[ORCHESTRATOR_JSON_START]
+{
+  "issue_number": {{ issue.number }},
+  "has_clear_title": <boolean>,
+  "has_detailed_description": <boolean>,
+  "has_acceptance_criteria": <boolean>,
+  "has_scope_definition": <boolean>,
+  "clarity_score": <integer 1-10>,
+  "missing_elements": [<list of strings describing what's missing>],
+  "improvement_suggestions": [<list of strings with specific suggestions>],
+  "ready_for_implementation": <boolean>,
+  "summary": "<one sentence summary of your assessment>"
+}
+[ORCHESTRATOR_JSON_END]
+
+### Scoring Guide
+
+- **1-3**: Issue is too vague or incomplete to implement. Missing critical information.
+- **4-5**: Issue has gaps but might be workable with assumptions. Risky.
+- **6-7**: Issue is reasonably complete but could be clearer.
+- **8-9**: Issue is well-defined with clear requirements.
+- **10**: Issue is perfectly specified with all needed context.
+
+### ready_for_implementation
+
+Set to `true` only if:
+- clarity_score >= 6
+- has_clear_title is true
+- has_detailed_description is true OR the title is self-explanatory for a trivial task
