@@ -1,0 +1,2 @@
+This file exists to ensure the static directory is embeddable.
+Additional static assets (JS, CSS, images) can be placed here.
