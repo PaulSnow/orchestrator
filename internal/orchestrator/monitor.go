@@ -6,8 +6,29 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
+
+// globalEventBroadcaster is the shared event broadcaster for the monitor loop.
+var (
+	globalEventBroadcaster   *EventBroadcaster
+	globalEventBroadcasterMu sync.RWMutex
+)
+
+// SetGlobalEventBroadcaster sets the global event broadcaster.
+func SetGlobalEventBroadcaster(eb *EventBroadcaster) {
+	globalEventBroadcasterMu.Lock()
+	defer globalEventBroadcasterMu.Unlock()
+	globalEventBroadcaster = eb
+}
+
+// GetGlobalEventBroadcaster returns the global event broadcaster.
+func GetGlobalEventBroadcaster() *EventBroadcaster {
+	globalEventBroadcasterMu.RLock()
+	defer globalEventBroadcasterMu.RUnlock()
+	return globalEventBroadcaster
+}
 
 // LogMsg prints a timestamped log message.
 func LogMsg(msg string) {
@@ -181,18 +202,25 @@ func ExecuteDecision(decision *Decision, cfg *RunConfig, state *StateManager) {
 
 	case "mark_complete":
 		issueNum := decision.Issue
+		var issueTitle string
 		if decision.SourceConfig != "" {
 			srcCfg, err := LoadConfig(decision.SourceConfig)
 			if err == nil {
 				srcState := NewStateManager(srcCfg)
 				LogMsg(fmt.Sprintf("Marking issue #%d as completed (in %s)", *issueNum, srcCfg.Project))
 				srcState.UpdateIssueStatus(*issueNum, "completed", nil)
+				if issue := srcCfg.GetIssue(*issueNum); issue != nil {
+					issueTitle = issue.Title
+				}
 			} else {
 				LogMsg(fmt.Sprintf("WARNING: failed to update source config: %v", err))
 			}
 		} else {
 			LogMsg(fmt.Sprintf("Marking issue #%d as completed", *issueNum))
 			state.UpdateIssueStatus(*issueNum, "completed", nil)
+			if issue := cfg.GetIssue(*issueNum); issue != nil {
+				issueTitle = issue.Title
+			}
 		}
 		state.ClearSignal(workerID)
 		worker := state.LoadWorker(workerID)
@@ -201,6 +229,11 @@ func ExecuteDecision(decision *Decision, cfg *RunConfig, state *StateManager) {
 			state.SaveWorker(worker)
 		}
 		state.LogEvent(map[string]any{"action": "mark_complete", "issue": issueNum})
+		// Emit worker completed event
+		if globalEventBroadcaster != nil {
+			globalEventBroadcaster.EmitWorkerCompleted(workerID, *issueNum, issueTitle)
+			globalEventBroadcaster.EmitIssueStatus(*issueNum, issueTitle, "completed", nil)
+		}
 
 	case "reassign":
 		newIssueNum := decision.NewIssue
@@ -269,6 +302,11 @@ func ExecuteDecision(decision *Decision, cfg *RunConfig, state *StateManager) {
 			BuildClaudeCmd(newWt, promptPath, logFile, signalFile, workerID, *newIssueNum, stageName, false))
 
 		state.LogEvent(map[string]any{"action": "reassign", "worker": workerID, "new_issue": newIssueNum})
+		// Emit worker assigned event
+		if globalEventBroadcaster != nil {
+			globalEventBroadcaster.EmitWorkerAssigned(workerID, *newIssueNum, newIssue.Title, stageName)
+			globalEventBroadcaster.EmitIssueStatus(*newIssueNum, newIssue.Title, "in_progress", &workerID)
+		}
 
 	case "restart":
 		LogMsg(fmt.Sprintf("Worker %d: restarting — %s", workerID, decision.Reason))
@@ -390,6 +428,10 @@ func ExecuteDecision(decision *Decision, cfg *RunConfig, state *StateManager) {
 			"action": "advance_stage", "worker": workerID,
 			"issue": issueNum, "stage": nextStage,
 		})
+		// Emit stage changed event
+		if globalEventBroadcaster != nil {
+			globalEventBroadcaster.EmitStageChanged(workerID, *issueNum, oldStage, nextStage)
+		}
 
 	case "skip":
 		issueNum := decision.Issue
@@ -418,6 +460,11 @@ func ExecuteDecision(decision *Decision, cfg *RunConfig, state *StateManager) {
 		}
 
 		state.LogEvent(map[string]any{"action": "skip", "worker": workerID, "issue": issueNum})
+		// Emit worker failed event
+		if globalEventBroadcaster != nil {
+			globalEventBroadcaster.EmitWorkerFailed(workerID, *issueNum, "exceeded retries")
+			globalEventBroadcaster.EmitIssueStatus(*issueNum, "", "failed", nil)
+		}
 
 	case "reassign_cross":
 		newIssueNum := decision.NewIssue
@@ -491,6 +538,11 @@ func ExecuteDecision(decision *Decision, cfg *RunConfig, state *StateManager) {
 			"action": "reassign_cross", "worker": workerID,
 			"new_issue": newIssueNum, "source_project": otherCfg.Project,
 		})
+		// Emit worker assigned event for cross-project
+		if globalEventBroadcaster != nil {
+			globalEventBroadcaster.EmitWorkerAssigned(workerID, *newIssueNum, newIssue.Title, stageName)
+			globalEventBroadcaster.EmitIssueStatus(*newIssueNum, newIssue.Title, "in_progress", &workerID)
+		}
 
 	case "defer":
 		issueNum := decision.Issue
@@ -598,6 +650,10 @@ func ExecuteDecision(decision *Decision, cfg *RunConfig, state *StateManager) {
 			worker.Stage = ""
 			worker.SourceConfig = ""
 			state.SaveWorker(worker)
+		}
+		// Emit worker idle event
+		if globalEventBroadcaster != nil {
+			globalEventBroadcaster.EmitWorkerIdle(workerID)
 		}
 
 	default:
@@ -800,9 +856,18 @@ func RunMonitorLoop(cfg *RunConfig, state *StateManager, noDelay bool) {
 		LogMsg(fmt.Sprintf("==== Cycle %d complete. Sleeping %ds ====", cycle, cfg.CycleInterval))
 		LogMsg("")
 
+		// Emit progress update
+		if globalEventBroadcaster != nil {
+			globalEventBroadcaster.EmitProgressUpdate(cfg)
+		}
+
 		time.Sleep(time.Duration(cfg.CycleInterval) * time.Second)
 	}
 
+	// Emit completion phase
+	if globalEventBroadcaster != nil {
+		globalEventBroadcaster.SetPhase(PhaseCompleted, "all issues done")
+	}
 	LogMsg("Orchestrator monitor exited.")
 }
 
@@ -928,9 +993,18 @@ func RunMonitorLoopGlobal(
 		LogMsg(fmt.Sprintf("==== Cycle %d complete. Sleeping %ds ====", cycle, cycleInterval))
 		LogMsg("")
 
+		// Emit progress update for primary config
+		if globalEventBroadcaster != nil && len(configs) > 0 {
+			globalEventBroadcaster.EmitProgressUpdate(configs[0])
+		}
+
 		time.Sleep(time.Duration(cycleInterval) * time.Second)
 	}
 
+	// Emit completion phase
+	if globalEventBroadcaster != nil {
+		globalEventBroadcaster.SetPhase(PhaseCompleted, "all issues done")
+	}
 	LogMsg("Unified orchestrator monitor exited.")
 }
 

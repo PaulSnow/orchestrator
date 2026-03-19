@@ -37,10 +37,6 @@ func main() {
 		cmdLaunch(args)
 	case "review":
 		cmdReview(args)
-	case "monitor":
-		cmdMonitor(args)
-	case "watchdog":
-		cmdWatchdog(args)
 	case "cleanup":
 		cmdCleanup(args)
 	case "status":
@@ -102,10 +98,8 @@ CONFIGURATION
     - [x] #103 - Already completed (skipped)
 
 COMMANDS
-  launch     Start workers on issues (main command)
+  launch     Start workers and monitor until completion (main command)
   review     Run review gate only, don't launch workers
-  monitor    Run the monitor loop (reassigns workers, handles failures)
-  watchdog   Run monitor under watchdog supervisor (auto-restart)
   cleanup    Kill tmux session and optionally remove worktrees
   status     Show current progress (one-shot)
   dashboard  Live terminal dashboard with auto-refresh
@@ -295,6 +289,13 @@ OPTIONS`)
 	primaryCfg.TmuxSession = tmuxSession
 	state := orchestrator.NewStateManager(primaryCfg)
 
+	// Create shared event broadcaster
+	events := orchestrator.NewEventBroadcaster(primaryCfg.Project)
+	orchestrator.SetGlobalEventBroadcaster(events)
+
+	// Set version for dashboard
+	orchestrator.Version = Version
+
 	fmt.Println("+" + strings.Repeat("=", 58) + "+")
 	fmt.Println("|  Unified Orchestrator — Multi-Project                    |")
 	fmt.Println("+" + strings.Repeat("=", 58) + "+")
@@ -305,18 +306,26 @@ OPTIONS`)
 		fmt.Println()
 	}
 
+	// Create dashboard server (runs throughout entire lifecycle)
+	var dashboardServer *orchestrator.DashboardServer
+	if *webPort > 0 {
+		dashboardServer = orchestrator.NewDashboardServer(primaryCfg, state, events, *webPort)
+		dashboardServer.Start()
+		fmt.Printf("  Dashboard: http://localhost:%d\n", *webPort)
+		defer dashboardServer.Stop()
+	}
+
 	// Run review gate unless skipped
 	if !*skipReview {
 		fmt.Println("-- Running Review Gate --")
+		events.SetPhase(orchestrator.PhaseReview, "starting review gate")
+
 		reviewGate := orchestrator.NewReviewGate(primaryCfg, state)
 		reviewGate.EnsureReviewDirs()
 
-		// Start web server if enabled
-		var webServer *orchestrator.WebServer
-		if *webPort > 0 {
-			webServer = orchestrator.NewWebServer(reviewGate, primaryCfg, state, *webPort)
-			webServer.Start()
-			fmt.Printf("  Web dashboard: http://localhost:%d\n", *webPort)
+		// Connect dashboard to review gate
+		if dashboardServer != nil {
+			dashboardServer.SetReviewGate(reviewGate)
 		}
 
 		// Run review
@@ -337,11 +346,10 @@ OPTIONS`)
 			if gateResult.Passed {
 				reviewGate.PrintSuccessReport(gateResult)
 				fmt.Println("\nReview-only mode: exiting without launching workers.")
+				events.SetPhase(orchestrator.PhaseCompleted, "review only")
 			} else {
 				reviewGate.PrintFailureReport(gateResult)
-			}
-			if webServer != nil {
-				webServer.Stop()
+				events.SetPhase(orchestrator.PhaseFailed, "review gate failed")
 			}
 			if gateResult.Passed {
 				os.Exit(0)
@@ -352,20 +360,16 @@ OPTIONS`)
 
 		if !gateResult.Passed {
 			reviewGate.PrintFailureReport(gateResult)
-			if webServer != nil {
-				webServer.Stop()
-			}
+			events.SetPhase(orchestrator.PhaseFailed, "review gate failed")
 			os.Exit(1)
 		}
 
 		reviewGate.PrintSuccessReport(gateResult)
 		fmt.Println()
-
-		// Keep web server running in background
-		if webServer != nil {
-			defer webServer.Stop()
-		}
 	}
+
+	// Transition to implementing phase
+	events.SetPhase(orchestrator.PhaseImplementing, "starting workers")
 
 	// Check prerequisites
 	fmt.Println("Checking prerequisites...")
@@ -524,6 +528,10 @@ OPTIONS`)
 			issueState.UpdateIssueStatus(a.issue.Number, "in_progress", &a.workerID)
 			orchestrator.SendCommand(tmuxSession, fmt.Sprintf("worker-%d", a.workerID),
 				orchestrator.BuildClaudeCmd(wtPath, promptPath, logFile, signalFile, a.workerID, a.issue.Number, stageName, false))
+
+			// Emit worker assigned event
+			events.EmitWorkerAssigned(a.workerID, a.issue.Number, a.issue.Title, stageName)
+			events.EmitIssueStatus(a.issue.Number, a.issue.Title, "in_progress", &a.workerID)
 		}
 
 		if idx < len(assignments)-1 && !*dryRun {
@@ -536,6 +544,31 @@ OPTIONS`)
 	fmt.Println("  All workers launched.")
 	fmt.Printf("  Attach: tmux attach -t %s\n", tmuxSession)
 	fmt.Println(strings.Repeat("=", 60))
+
+	// Run monitor loop in-process (blocks until all issues complete)
+	if !*dryRun {
+		fmt.Println()
+		fmt.Println("-- Starting Monitor Loop --")
+
+		// Set all configs to use this tmux session and worker count
+		for _, cfg := range configs {
+			cfg.TmuxSession = tmuxSession
+			cfg.NumWorkers = numWorkers
+		}
+
+		if len(configs) > 1 {
+			// Multi-project mode
+			orchestrator.RunMonitorLoopGlobal(configs, state, numWorkers, tmuxSession, false)
+		} else {
+			// Single project mode
+			orchestrator.RunMonitorLoop(primaryCfg, state, false)
+		}
+
+		// Orchestration complete
+		events.SetPhase(orchestrator.PhaseCompleted, "all work done")
+		fmt.Println()
+		fmt.Println("Orchestration complete.")
+	}
 }
 
 func cmdReview(args []string) {
@@ -556,20 +589,28 @@ func cmdReview(args []string) {
 	primaryCfg := configs[0]
 	state := orchestrator.NewStateManager(primaryCfg)
 
+	// Create event broadcaster
+	events := orchestrator.NewEventBroadcaster(primaryCfg.Project)
+	orchestrator.SetGlobalEventBroadcaster(events)
+	orchestrator.Version = Version
+
 	fmt.Println("+" + strings.Repeat("=", 58) + "+")
 	fmt.Println("|  Orchestrator Review Gate                                |")
 	fmt.Println("+" + strings.Repeat("=", 58) + "+")
 	fmt.Println()
 
+	events.SetPhase(orchestrator.PhaseReview, "starting review gate")
+
 	reviewGate := orchestrator.NewReviewGate(primaryCfg, state)
 	reviewGate.EnsureReviewDirs()
 
-	// Start web server if enabled
-	var webServer *orchestrator.WebServer
+	// Start dashboard server if enabled
+	var dashboardServer *orchestrator.DashboardServer
 	if *webPort > 0 {
-		webServer = orchestrator.NewWebServer(reviewGate, primaryCfg, state, *webPort)
-		webServer.Start()
-		fmt.Printf("Web dashboard: http://localhost:%d\n", *webPort)
+		dashboardServer = orchestrator.NewDashboardServer(primaryCfg, state, events, *webPort)
+		dashboardServer.SetReviewGate(reviewGate)
+		dashboardServer.Start()
+		fmt.Printf("Dashboard: http://localhost:%d\n", *webPort)
 		fmt.Println()
 	}
 
@@ -589,19 +630,21 @@ func cmdReview(args []string) {
 	// Print result
 	if gateResult.Passed {
 		reviewGate.PrintSuccessReport(gateResult)
+		events.SetPhase(orchestrator.PhaseCompleted, "review passed")
 	} else {
 		reviewGate.PrintFailureReport(gateResult)
+		events.SetPhase(orchestrator.PhaseFailed, "review failed")
 	}
 
-	// Handle web server
-	if webServer != nil {
+	// Handle dashboard server
+	if dashboardServer != nil {
 		if *keepServer {
-			fmt.Printf("\nWeb server running at http://localhost:%d\n", *webPort)
+			fmt.Printf("\nDashboard running at http://localhost:%d\n", *webPort)
 			fmt.Println("Press Ctrl+C to exit...")
 			// Block forever (user will Ctrl+C)
 			select {}
 		}
-		webServer.Stop()
+		dashboardServer.Stop()
 	}
 
 	if gateResult.Passed {
@@ -609,104 +652,6 @@ func cmdReview(args []string) {
 	} else {
 		os.Exit(1)
 	}
-}
-
-func cmdMonitor(args []string) {
-	fs := flag.NewFlagSet("monitor", flag.ExitOnError)
-	fs.Usage = func() {
-		fmt.Println(`orchestrator monitor - Run the worker monitoring loop
-
-DESCRIPTION
-  Monitors running Claude workers and handles:
-  - Detecting completed workers (via signal files)
-  - Reassigning workers to next available issues
-  - Detecting failed/stalled workers
-  - Updating issue status in config
-
-  The monitor runs continuously until all issues are complete or it's killed.
-
-USAGE
-  orchestrator monitor --config <file>
-
-  Typically launched automatically by 'orchestrator launch' in a tmux window.
-  Can also be run manually to resume monitoring after restart.
-
-OPTIONS`)
-		fs.PrintDefaults()
-	}
-	cycle := fs.Int("cycle", 60, "Check interval in seconds")
-	noDelay := fs.Bool("no-delay", false, "Skip initial 60s delay before first check")
-	workers := fs.Int("workers", defaultNumWorkers, "Number of workers to monitor")
-	session := fs.String("session", "orchestrator", "Tmux session name")
-	configDir := fs.String("config-dir", "", "Directory with *-issues.json configs")
-	config := fs.String("config", "", "Config file")
-	fs.Parse(args)
-
-	if *configDir != "" {
-		configs := resolveConfigs(*configDir, "")
-		primaryCfg := configs[0]
-		primaryCfg.NumWorkers = *workers
-		primaryCfg.TmuxSession = *session
-		state := orchestrator.NewStateManager(primaryCfg)
-		if *cycle > 0 {
-			for _, cfg := range configs {
-				cfg.CycleInterval = *cycle
-			}
-		}
-		orchestrator.RunMonitorLoopGlobal(configs, state, *workers, *session, *noDelay)
-	} else {
-		configFile := *config
-		if configFile == "" {
-			configFile = defaultConfigPath()
-		}
-		cfg, _ := orchestrator.LoadConfig(configFile)
-		if *cycle > 0 {
-			cfg.CycleInterval = *cycle
-		}
-		state := orchestrator.NewStateManager(cfg)
-		orchestrator.RunMonitorLoop(cfg, state, *noDelay)
-	}
-}
-
-func cmdWatchdog(args []string) {
-	fs := flag.NewFlagSet("watchdog", flag.ExitOnError)
-	stallTimeout := fs.Int("stall-timeout", 600, "Seconds of log inactivity")
-	maxRapidFailures := fs.Int("max-rapid-failures", 5, "Max restarts in 5 min")
-	watchdogLog := fs.String("watchdog-log", "/tmp/orchestrator-watchdog.log", "Watchdog log")
-	cycle := fs.Int("cycle", 0, "Cycle interval in seconds")
-	noDelay := fs.Bool("no-delay", false, "Skip initial delay")
-	workers := fs.Int("workers", 0, "Number of workers")
-	session := fs.String("session", "orchestrator", "Tmux session")
-	configDir := fs.String("config-dir", "", "Config directory")
-	config := fs.String("config", "", "Config file")
-	fs.Parse(args)
-
-	var monitorArgs []string
-	if *configDir != "" {
-		monitorArgs = append(monitorArgs, "--config-dir", *configDir)
-	}
-	if *config != "" {
-		monitorArgs = append(monitorArgs, "--config", *config)
-	}
-	if *session != "" {
-		monitorArgs = append(monitorArgs, "--session", *session)
-	}
-	if *workers > 0 {
-		monitorArgs = append(monitorArgs, "--workers", strconv.Itoa(*workers))
-	}
-	if *cycle > 0 {
-		monitorArgs = append(monitorArgs, "--cycle", strconv.Itoa(*cycle))
-	}
-	if *noDelay {
-		monitorArgs = append(monitorArgs, "--no-delay")
-	}
-
-	wcfg := orchestrator.WatchdogConfig{
-		StallTimeout:     *stallTimeout,
-		MaxRapidFailures: *maxRapidFailures,
-		WatchdogLogPath:  *watchdogLog,
-	}
-	orchestrator.RunWatchdog(monitorArgs, wcfg)
 }
 
 func cmdCleanup(args []string) {

@@ -10,6 +10,7 @@ import (
 )
 
 // WebServer provides HTTP endpoints for the review gate dashboard.
+// Deprecated: Use DashboardServer for new implementations.
 type WebServer struct {
 	reviewGate *ReviewGate
 	cfg        *RunConfig
@@ -17,9 +18,11 @@ type WebServer struct {
 	server     *http.Server
 	port       int
 	mu         sync.Mutex
+	events     *EventBroadcaster
 }
 
 // NewWebServer creates a new web server instance.
+// Deprecated: Use NewDashboardServer for new implementations.
 func NewWebServer(rg *ReviewGate, cfg *RunConfig, state *StateManager, port int) *WebServer {
 	if port == 0 {
 		port = 8080
@@ -29,7 +32,22 @@ func NewWebServer(rg *ReviewGate, cfg *RunConfig, state *StateManager, port int)
 		cfg:        cfg,
 		state:      state,
 		port:       port,
+		events:     NewEventBroadcaster(cfg.Project),
 	}
+}
+
+// SetEventBroadcaster sets a shared event broadcaster.
+func (ws *WebServer) SetEventBroadcaster(events *EventBroadcaster) {
+	ws.mu.Lock()
+	defer ws.mu.Unlock()
+	ws.events = events
+}
+
+// GetEventBroadcaster returns the event broadcaster.
+func (ws *WebServer) GetEventBroadcaster() *EventBroadcaster {
+	ws.mu.Lock()
+	defer ws.mu.Unlock()
+	return ws.events
 }
 
 // Start starts the web server in a background goroutine.
@@ -84,13 +102,28 @@ func (ws *WebServer) handleSSE(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Connection", "keep-alive")
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 
-	// Create client channel
-	clientCh := make(chan SSEEvent, 10)
-	ws.reviewGate.AddSSEClient(clientCh)
+	// Create client channels for both review gate and event broadcaster
+	reviewCh := make(chan SSEEvent, 10)
+	ws.reviewGate.AddSSEClient(reviewCh)
 	defer func() {
-		ws.reviewGate.RemoveSSEClient(clientCh)
-		close(clientCh)
+		ws.reviewGate.RemoveSSEClient(reviewCh)
+		close(reviewCh)
 	}()
+
+	// Also register with event broadcaster if available
+	ws.mu.Lock()
+	events := ws.events
+	ws.mu.Unlock()
+
+	var eventCh chan DashboardEvent
+	if events != nil {
+		eventCh = make(chan DashboardEvent, 10)
+		events.AddClient(eventCh)
+		defer func() {
+			events.RemoveClient(eventCh)
+			close(eventCh)
+		}()
+	}
 
 	// Get flush support
 	flusher, ok := w.(http.Flusher)
@@ -110,12 +143,25 @@ func (ws *WebServer) handleSSE(w http.ResponseWriter, r *http.Request) {
 		flusher.Flush()
 	}
 
-	// Listen for events
+	// Listen for events from both channels
 	for {
 		select {
 		case <-r.Context().Done():
 			return
-		case event, ok := <-clientCh:
+		case event, ok := <-reviewCh:
+			if !ok {
+				return
+			}
+			data, err := json.Marshal(event.Data)
+			if err != nil {
+				continue
+			}
+			fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event.Type, string(data))
+			flusher.Flush()
+		case event, ok := <-eventCh:
+			if eventCh == nil {
+				continue
+			}
 			if !ok {
 				return
 			}
