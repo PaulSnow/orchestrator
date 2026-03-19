@@ -1,1 +1,1 @@
-# tmux session management library
+"""Tmux session management and monitoring utilities."""
