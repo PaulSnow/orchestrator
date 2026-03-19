@@ -1,0 +1,90 @@
+You are analyzing a failed worker log to understand what went wrong and suggest recovery steps.
+
+## Expected Step
+
+The worker was expected to complete: **{{ expected_step }}**
+
+## Worker Log Content
+
+```
+{{ log_content }}
+```
+
+## Your Task
+
+Analyze the log content above to understand:
+
+1. **What happened**: What did the worker actually do?
+2. **Where it failed**: At what point did progress stop?
+3. **Why it failed**: What was the root cause?
+4. **Recovery path**: How can we recover and continue?
+
+### Common Failure Patterns
+
+Look for these common issues:
+
+1. **Compilation Errors**: Missing imports, type errors, syntax errors
+2. **Test Failures**: Failed assertions, missing test fixtures
+3. **Git Conflicts**: Merge conflicts, push rejections
+4. **API Errors**: Rate limits, authentication failures, timeouts
+5. **Stalls**: Worker stopped making progress without explicit error
+6. **Context Exhaustion**: "Prompt is too long" or similar errors
+7. **Missing Dependencies**: Module not found, package install failures
+
+### Recovery Strategies
+
+Based on the failure type, suggest one of:
+
+- **retry**: Same approach, transient error (API timeout, rate limit)
+- **fix_and_retry**: Specific code fix needed, then retry
+- **simplify**: Break into smaller steps
+- **escalate**: Needs human intervention (credentials, access, decisions)
+- **skip**: Issue cannot be completed, mark as blocked
+
+## Required Output
+
+You MUST output your analysis as JSON between the following markers:
+
+[ORCHESTRATOR_JSON_START]
+{
+  "expected_step": "{{ expected_step }}",
+  "actual_progress": "<what the worker accomplished before failure>",
+  "failure_point": "<exact point where progress stopped>",
+  "failure_type": "<compilation|test|git|api|stall|context|dependency|unknown>",
+  "root_cause": "<explanation of why the failure occurred>",
+  "error_messages": [<list of key error messages from the log>],
+  "files_affected": [<list of files that were being modified>],
+  "recovery_strategy": "<retry|fix_and_retry|simplify|escalate|skip>",
+  "recovery_steps": [
+    "<step 1 to recover>",
+    "<step 2 to recover>"
+  ],
+  "code_fixes": [
+    {
+      "file": "<file path>",
+      "description": "<what needs to change>",
+      "suggested_fix": "<code snippet or approach>"
+    }
+  ],
+  "should_continue_from_checkpoint": <boolean>,
+  "checkpoint_description": "<if continuing, describe where to resume>",
+  "confidence": <float 0.0-1.0>,
+  "needs_human_review": <boolean>,
+  "human_review_reason": "<why human review is needed, or null>",
+  "summary": "<one sentence summary of failure and recommended action>"
+}
+[ORCHESTRATOR_JSON_END]
+
+### Confidence Guide
+
+- **0.9-1.0**: Clear failure with obvious fix
+- **0.7-0.8**: Likely understood the issue
+- **0.5-0.6**: Uncertain, multiple possible causes
+- **< 0.5**: Log is unclear, recommend human review
+
+### Important Notes
+
+- If the log is truncated or incomplete, note this in your analysis
+- If multiple issues are present, prioritize the root cause
+- Be specific about code fixes - include file paths and line numbers if visible
+- Consider whether the worker made partial progress that can be preserved

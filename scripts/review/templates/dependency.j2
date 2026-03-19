@@ -1,0 +1,126 @@
+You are analyzing dependencies between a set of issues to determine their execution order for parallel AI workers.
+
+## Issues to Analyze
+
+{% for issue in issues %}
+### Issue #{{ issue.number }}: {{ issue.title }}
+{% if issue.description %}
+{{ issue.description }}
+{% else %}
+(No description provided)
+{% endif %}
+{% if issue.depends_on %}
+**Explicit dependencies**: {{ issue.depends_on | join(', ') }}
+{% endif %}
+
+---
+{% endfor %}
+
+{% if project_context %}
+## Project Context
+
+{% if project_context.language %}
+**Language**: {{ project_context.language }}
+{% endif %}
+{% if project_context.key_files %}
+**Key Files**:
+{% for file in project_context.key_files %}
+- `{{ file }}`
+{% endfor %}
+{% endif %}
+{% endif %}
+
+## Your Task
+
+Analyze ALL issues above for dependencies, both explicit and implicit. Build a dependency graph and assign wave numbers.
+
+### Types of Dependencies to Detect
+
+1. **Explicit Dependencies**: Issues that reference other issue numbers
+2. **Code Dependencies**: Issue A creates a function/type that Issue B uses
+3. **File Dependencies**: Issue A modifies a file that Issue B also needs to modify
+4. **Feature Dependencies**: Issue A implements core functionality that Issue B extends
+5. **Infrastructure Dependencies**: Issue A sets up config/tooling that Issue B requires
+
+### Wave Assignment Rules
+
+- **Wave 1**: Issues with no dependencies (can run immediately)
+- **Wave 2**: Issues that depend only on Wave 1 issues
+- **Wave N**: Issues that depend on Wave N-1 or earlier issues
+- Issues in the same wave can run in parallel
+
+### Circular Dependency Handling
+
+If you detect circular dependencies:
+1. Identify the cycle
+2. Suggest which dependency could be broken
+3. Mark affected issues as needing human review
+
+## Required Output
+
+You MUST output your analysis as JSON between the following markers:
+
+[ORCHESTRATOR_JSON_START]
+{
+  "analysis_summary": "<brief overview of dependency structure>",
+  "dependency_graph": {
+    {% for issue in issues %}
+    "{{ issue.number }}": {
+      "depends_on": [<list of issue numbers this depends on>],
+      "depended_by": [<list of issue numbers that depend on this>],
+      "dependency_reasons": [
+        {
+          "target_issue": <issue number>,
+          "type": "<explicit|code|file|feature|infrastructure>",
+          "reason": "<why this dependency exists>"
+        }
+      ]
+    }{% if not loop.last %},{% endif %}
+    {% endfor %}
+  },
+  "waves": {
+    "1": [<list of issue numbers in wave 1>],
+    "2": [<list of issue numbers in wave 2>]
+  },
+  "issue_waves": {
+    {% for issue in issues %}
+    "{{ issue.number }}": <wave number>{% if not loop.last %},{% endif %}
+    {% endfor %}
+  },
+  "circular_dependencies": [
+    {
+      "cycle": [<list of issue numbers in the cycle>],
+      "suggested_break": <issue number where dependency could be removed>,
+      "reason": "<why breaking here makes sense>"
+    }
+  ],
+  "parallel_opportunities": [
+    {
+      "issues": [<list of issue numbers that can run together>],
+      "wave": <wave number>,
+      "reason": "<why these can safely run in parallel>"
+    }
+  ],
+  "execution_order": [
+    {
+      "wave": <wave number>,
+      "issues": [<list of issue numbers>],
+      "notes": "<any special considerations for this wave>"
+    }
+  ],
+  "risks": [
+    {
+      "description": "<potential issue with the dependency structure>",
+      "affected_issues": [<list of issue numbers>],
+      "mitigation": "<how to address>"
+    }
+  ]
+}
+[ORCHESTRATOR_JSON_END]
+
+### Important Notes
+
+- Be conservative: if unsure about a dependency, assume it exists
+- Consider file-level conflicts even if issues seem unrelated
+- Flag any issues that modify the same files as potential conflicts
+- Issues with no dependencies AND no dependents are ideal for parallel execution

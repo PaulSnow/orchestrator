@@ -1,0 +1,122 @@
+You are evaluating whether issue #{{ issue.number }} is suitable for implementation by a Claude Code AI worker.
+
+## Issue Information
+
+**Number**: #{{ issue.number }}
+**Title**: {{ issue.title }}
+
+### Description
+{% if issue.description %}
+{{ issue.description }}
+{% else %}
+(No description provided)
+{% endif %}
+
+{% if project_context %}
+## Project Context
+
+{% if project_context.language %}
+**Language**: {{ project_context.language }}
+{% endif %}
+{% if project_context.build_command %}
+**Build Command**: `{{ project_context.build_command }}`
+{% endif %}
+{% if project_context.test_command %}
+**Test Command**: `{{ project_context.test_command }}`
+{% endif %}
+{% if project_context.safety_rules %}
+**Safety Rules**:
+{% for rule in project_context.safety_rules %}
+- {{ rule }}
+{% endfor %}
+{% endif %}
+{% endif %}
+
+## Completeness Review Results
+
+The completeness review found:
+- **Clarity Score**: {{ completeness_result.clarity_score }}/10
+- **Ready for Implementation**: {{ completeness_result.ready_for_implementation }}
+{% if completeness_result.missing_elements %}
+- **Missing Elements**:
+{% for element in completeness_result.missing_elements %}
+  - {{ element }}
+{% endfor %}
+{% endif %}
+{% if completeness_result.summary %}
+- **Summary**: {{ completeness_result.summary }}
+{% endif %}
+
+## Your Task
+
+Evaluate whether this issue is SUITABLE for a Claude Code AI worker to implement autonomously. Consider:
+
+### 1. External Dependencies
+- Does this require API keys, credentials, or secrets?
+- Does it need access to external services that Claude Code can't reach?
+- Does it require human interaction (approvals, design decisions)?
+- Does it need access to production data or systems?
+
+### 2. Ambiguity Risks
+- Are there decisions that require human judgment?
+- Are there multiple valid interpretations that could lead to wrong implementations?
+- Is there risk of scope creep or misinterpretation?
+
+### 3. Technical Feasibility
+- Can this be implemented with standard coding operations?
+- Does it require specialized tools or environments Claude Code doesn't have?
+- Is the codebase well-structured enough for AI navigation?
+
+### 4. Safety Concerns
+- Could incorrect implementation cause data loss or corruption?
+- Are there security implications that need human review first?
+- Does this touch critical infrastructure?
+
+### 5. Scope Appropriateness
+- Is this appropriately sized for a single AI session?
+- Can this be done in isolation without breaking other features?
+
+## Required Output
+
+You MUST output your analysis as JSON between the following markers:
+
+[ORCHESTRATOR_JSON_START]
+{
+  "issue_number": {{ issue.number }},
+  "recommendation": "<proceed|needs_work|reject>",
+  "confidence": <float 0.0-1.0>,
+  "external_dependencies": [
+    {
+      "type": "<api|credential|service|human_input|other>",
+      "description": "<what is needed>",
+      "blocking": <boolean>
+    }
+  ],
+  "ambiguity_risks": [
+    {
+      "description": "<what could be misinterpreted>",
+      "severity": "<low|medium|high>",
+      "mitigation": "<how to address or null if blocking>"
+    }
+  ],
+  "safety_concerns": [<list of safety concern strings>],
+  "scope_assessment": "<appropriate|too_large|too_vague|needs_splitting>",
+  "estimated_complexity": "<trivial|simple|moderate|complex|very_complex>",
+  "blockers": [<list of blocking issues that must be resolved>],
+  "suggestions": [<list of suggestions to improve suitability>],
+  "summary": "<one sentence recommendation>"
+}
+[ORCHESTRATOR_JSON_END]
+
+### Recommendation Criteria
+
+- **proceed**: Issue is suitable for Claude Code. No blocking dependencies, acceptable risk level.
+- **needs_work**: Issue could work but has gaps. Return to human for clarification or scope adjustment.
+- **reject**: Issue is not suitable for AI implementation. Requires human work or has blocking dependencies.
+
+### Confidence Guide
+
+- **0.9-1.0**: Very confident in recommendation
+- **0.7-0.8**: Confident but some uncertainty
+- **0.5-0.6**: Uncertain, could go either way
+- **< 0.5**: Low confidence, recommend human review
