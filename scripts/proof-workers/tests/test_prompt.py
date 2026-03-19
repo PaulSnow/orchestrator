@@ -40,12 +40,15 @@ class TestValidStages:
         assert "test" not in VALID_STAGES, \
             "'test' should not be a valid stage - use 'write_tests' or 'run_tests_fix'"
 
-    def test_review_is_not_valid(self):
-        """'review' is NOT a valid stage."""
-        assert "review" not in VALID_STAGES
+    def test_review_is_valid(self):
+        """'review' IS a valid stage (for documentation review)."""
+        assert "review" in VALID_STAGES
 
     def test_all_expected_stages_present(self):
-        expected = {"implement", "optimize", "write_tests", "run_tests_fix", "document"}
+        expected = {
+            "implement", "optimize", "write_tests", "run_tests_fix", "document",
+            "research", "draft", "validate", "review",
+        }
         assert expected == VALID_STAGES
 
 
@@ -72,15 +75,16 @@ class TestGeneratePrompt:
                 repo=repo, cfg=loaded_config, state=state_manager,
             )
 
-    def test_review_stage_raises_value_error(self, loaded_config, state_manager):
-        """'review' stage should raise ValueError immediately."""
+    def test_review_stage_generates_prompt(self, loaded_config, state_manager):
+        """'review' stage should generate a valid prompt."""
         issue = make_issue()
         repo = make_repo()
-        with pytest.raises(ValueError, match="Unknown pipeline stage"):
-            generate_prompt(
-                "review", issue, worker_id=1, worktree="/tmp/wt",
-                repo=repo, cfg=loaded_config, state=state_manager,
-            )
+        prompt = generate_prompt(
+            "review", issue, worker_id=1, worktree="/tmp/wt",
+            repo=repo, cfg=loaded_config, state=state_manager,
+        )
+        assert isinstance(prompt, str)
+        assert len(prompt) > 0
 
     def test_all_valid_stages_generate_prompts(self, loaded_config, state_manager):
         issue = make_issue()
