@@ -234,3 +234,21 @@ def capture_pane(name: str, lines: int = 100) -> str:
     except (subprocess.TimeoutExpired, subprocess.SubprocessError):
         pass
     return ""
+
+# Alias for backward compatibility
+capture_pane_history = capture_pane
+
+
+# Alias for get_session_pid (tests use get_pane_pid)
+get_pane_pid = get_session_pid
+
+def is_process_running(pid: int) -> bool:
+    """Check if a process with given PID is running."""
+    if pid is None:
+        return False
+    try:
+        import os
+        os.kill(pid, 0)
+        return True
+    except (OSError, ProcessLookupError):
+        return False
