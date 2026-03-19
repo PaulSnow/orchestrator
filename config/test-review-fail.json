@@ -1,0 +1,70 @@
+{
+  "project": "test-review-fail",
+  "repos": {
+    "test": {
+      "path": "/tmp/test-repo",
+      "default_branch": "main",
+      "worktree_base": "/tmp/test-worktrees",
+      "branch_prefix": "test/issue-",
+      "platform": "github"
+    }
+  },
+  "pipeline": ["implement"],
+  "project_context": {
+    "language": "go",
+    "build_command": "go build ./...",
+    "test_command": "go test ./..."
+  },
+  "issues": [
+    {
+      "number": 10,
+      "title": "",
+      "description": "",
+      "priority": 1,
+      "wave": 1,
+      "status": "pending"
+    },
+    {
+      "number": 11,
+      "title": "Fix something",
+      "description": "TBD - need to discuss with team",
+      "priority": 1,
+      "wave": 1,
+      "status": "pending"
+    },
+    {
+      "number": 12,
+      "title": "Manual testing task",
+      "description": "This task requires manual testing on production servers.\n\nManual testing required before deployment.",
+      "priority": 1,
+      "wave": 1,
+      "status": "pending"
+    },
+    {
+      "number": 13,
+      "title": "Depends on non-existent issue",
+      "description": "This issue has invalid dependencies.",
+      "priority": 1,
+      "wave": 2,
+      "status": "pending",
+      "depends_on": [999]
+    },
+    {
+      "number": 14,
+      "title": "Depends on pending issue",
+      "description": "This issue depends on issue 11 which is still pending.",
+      "priority": 1,
+      "wave": 2,
+      "status": "pending",
+      "depends_on": [11]
+    },
+    {
+      "number": 15,
+      "title": "Good issue mixed with bad",
+      "description": "This is actually a well-defined issue with clear requirements.\n\n## Requirements\n- Implement feature X\n- Add tests for feature X\n\n## Acceptance Criteria\n- [ ] Feature X works as expected\n- [ ] Tests pass",
+      "priority": 2,
+      "wave": 1,
+      "status": "pending"
+    }
+  ]
+}

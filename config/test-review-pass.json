@@ -1,0 +1,44 @@
+{
+  "project": "test-review-pass",
+  "repos": {
+    "test": {
+      "path": "/tmp/test-repo",
+      "default_branch": "main",
+      "worktree_base": "/tmp/test-worktrees",
+      "branch_prefix": "test/issue-",
+      "platform": "github"
+    }
+  },
+  "pipeline": ["implement"],
+  "project_context": {
+    "language": "go",
+    "build_command": "go build ./...",
+    "test_command": "go test ./..."
+  },
+  "issues": [
+    {
+      "number": 1,
+      "title": "Add user authentication module",
+      "description": "Implement a user authentication module with login/logout functionality.\n\n## Requirements\n- Support username/password authentication\n- Generate JWT tokens on successful login\n- Provide logout endpoint to invalidate tokens\n\n## Acceptance Criteria\n- [ ] POST /auth/login accepts username and password\n- [ ] Returns JWT token on success\n- [ ] POST /auth/logout invalidates the token",
+      "priority": 1,
+      "wave": 1,
+      "status": "pending"
+    },
+    {
+      "number": 2,
+      "title": "Create database connection pool",
+      "description": "Set up a connection pool for PostgreSQL database.\n\n## Requirements\n- Use pgx driver\n- Configure pool size via environment variable\n- Implement health check endpoint\n\n## Acceptance Criteria\n- [ ] Connection pool initialized on startup\n- [ ] Configurable via DB_POOL_SIZE env var\n- [ ] /health endpoint returns pool status",
+      "priority": 1,
+      "wave": 1,
+      "status": "pending"
+    },
+    {
+      "number": 3,
+      "title": "Add API rate limiting",
+      "description": "Implement rate limiting middleware for the API.\n\n## Requirements\n- Use sliding window algorithm\n- Configure rate per IP address\n- Return 429 Too Many Requests when exceeded\n\n## Acceptance Criteria\n- [ ] Middleware applied to all API routes\n- [ ] Configurable rate limit (default 100/min)\n- [ ] Proper 429 response with Retry-After header",
+      "priority": 2,
+      "wave": 1,
+      "status": "pending"
+    }
+  ]
+}

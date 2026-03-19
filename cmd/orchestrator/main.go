@@ -16,12 +16,6 @@ import (
 
 const defaultNumWorkers = 5
 
-// Version information (set at build time)
-var (
-	Version   = "0.1.0"
-	BuildTime = "unknown"
-)
-
 func main() {
 	if len(os.Args) < 2 {
 		printUsage()
@@ -34,6 +28,8 @@ func main() {
 	switch command {
 	case "launch":
 		cmdLaunch(args)
+	case "review":
+		cmdReview(args)
 	case "monitor":
 		cmdMonitor(args)
 	case "watchdog":
@@ -46,8 +42,6 @@ func main() {
 		cmdDashboard(args)
 	case "add-issue":
 		cmdAddIssue(args)
-	case "version":
-		cmdVersion()
 	case "help", "-h", "--help":
 		printUsage()
 	default:
@@ -61,21 +55,16 @@ func printUsage() {
 	fmt.Println(`orchestrator - General-purpose parallel Claude Code worker orchestration via tmux
 
 Commands:
-  launch     Launch unified parallel workers
+  launch     Launch unified parallel workers (with optional review gate)
+  review     Run review gate without launching workers
   monitor    Run the monitor loop
   watchdog   Run monitor under watchdog supervisor
   cleanup    Clean up tmux session and worktrees
   status     Display one-shot status
   dashboard  Live terminal dashboard
   add-issue  Add an issue mid-run
-  version    Show version information
-  help       Show this help message
 
 Use "orchestrator <command> -h" for more information about a command.`)
-}
-
-func cmdVersion() {
-	fmt.Printf("orchestrator version %s (built %s)\n", Version, BuildTime)
 }
 
 func cmdLaunch(args []string) {
@@ -85,19 +74,11 @@ func cmdLaunch(args []string) {
 	session := fs.String("session", "orchestrator", "Tmux session name")
 	configDir := fs.String("config-dir", "", "Directory with *-issues.json configs")
 	config := fs.String("config", "", "Single config file")
-	port := fs.Int("port", 8080, "Web dashboard port")
-	noWeb := fs.Bool("no-web", false, "Disable web dashboard")
-	skipReview := fs.Bool("skip-review", false, "Skip review stage in pipeline")
-	reviewOnly := fs.Bool("review-only", false, "Only run review stage")
-	verbose := fs.Bool("verbose", false, "Enable verbose output")
+	skipReview := fs.Bool("skip-review", false, "Skip the review gate")
+	reviewOnly := fs.Bool("review-only", false, "Run review gate only, don't launch workers")
+	postComments := fs.Bool("post-comments", false, "Post comments to failing issues")
+	webPort := fs.Int("web-port", 8080, "Web dashboard port (0 to disable)")
 	fs.Parse(args)
-
-	// Store flags in a local options struct for later use
-	_ = port      // Web port (used when web dashboard is enabled)
-	_ = noWeb     // Disable web dashboard
-	_ = skipReview // Skip review stage
-	_ = reviewOnly // Only run reviews
-	_ = verbose   // Verbose logging
 
 	configs := resolveConfigs(*configDir, *config)
 	numWorkers := *workers
@@ -138,6 +119,68 @@ func cmdLaunch(args []string) {
 	if *dryRun {
 		fmt.Println("*** DRY RUN MODE -- no changes will be made ***")
 		fmt.Println()
+	}
+
+	// Run review gate unless skipped
+	if !*skipReview {
+		fmt.Println("-- Running Review Gate --")
+		reviewGate := orchestrator.NewReviewGate(primaryCfg, state)
+		reviewGate.EnsureReviewDirs()
+
+		// Start web server if enabled
+		var webServer *orchestrator.WebServer
+		if *webPort > 0 {
+			webServer = orchestrator.NewWebServer(reviewGate, primaryCfg, state, *webPort)
+			webServer.Start()
+			fmt.Printf("  Web dashboard: http://localhost:%d\n", *webPort)
+		}
+
+		// Run review
+		gateResult := reviewGate.ReviewAllIssues()
+
+		// Post comments if enabled
+		if *postComments {
+			commentPoster := orchestrator.NewCommentPoster(primaryCfg, true)
+			for _, result := range gateResult.Results {
+				if !result.Passed {
+					commentPoster.PostReviewFailure(result)
+				}
+			}
+		}
+
+		// Handle review-only mode or failure
+		if *reviewOnly {
+			if gateResult.Passed {
+				reviewGate.PrintSuccessReport(gateResult)
+				fmt.Println("\nReview-only mode: exiting without launching workers.")
+			} else {
+				reviewGate.PrintFailureReport(gateResult)
+			}
+			if webServer != nil {
+				webServer.Stop()
+			}
+			if gateResult.Passed {
+				os.Exit(0)
+			} else {
+				os.Exit(1)
+			}
+		}
+
+		if !gateResult.Passed {
+			reviewGate.PrintFailureReport(gateResult)
+			if webServer != nil {
+				webServer.Stop()
+			}
+			os.Exit(1)
+		}
+
+		reviewGate.PrintSuccessReport(gateResult)
+		fmt.Println()
+
+		// Keep web server running in background
+		if webServer != nil {
+			defer webServer.Stop()
+		}
 	}
 
 	// Check prerequisites
@@ -309,6 +352,79 @@ func cmdLaunch(args []string) {
 	fmt.Println("  All workers launched.")
 	fmt.Printf("  Attach: tmux attach -t %s\n", tmuxSession)
 	fmt.Println(strings.Repeat("=", 60))
+}
+
+func cmdReview(args []string) {
+	fs := flag.NewFlagSet("review", flag.ExitOnError)
+	configDir := fs.String("config-dir", "", "Directory with *-issues.json configs")
+	config := fs.String("config", "", "Single config file")
+	postComments := fs.Bool("post-comments", false, "Post comments to failing issues")
+	webPort := fs.Int("web-port", 8080, "Web dashboard port (0 to disable)")
+	keepServer := fs.Bool("keep-server", false, "Keep web server running after review")
+	fs.Parse(args)
+
+	configs := resolveConfigs(*configDir, *config)
+	if len(configs) == 0 {
+		fmt.Fprintln(os.Stderr, "ERROR: No configs found")
+		os.Exit(1)
+	}
+
+	primaryCfg := configs[0]
+	state := orchestrator.NewStateManager(primaryCfg)
+
+	fmt.Println("+" + strings.Repeat("=", 58) + "+")
+	fmt.Println("|  Orchestrator Review Gate                                |")
+	fmt.Println("+" + strings.Repeat("=", 58) + "+")
+	fmt.Println()
+
+	reviewGate := orchestrator.NewReviewGate(primaryCfg, state)
+	reviewGate.EnsureReviewDirs()
+
+	// Start web server if enabled
+	var webServer *orchestrator.WebServer
+	if *webPort > 0 {
+		webServer = orchestrator.NewWebServer(reviewGate, primaryCfg, state, *webPort)
+		webServer.Start()
+		fmt.Printf("Web dashboard: http://localhost:%d\n", *webPort)
+		fmt.Println()
+	}
+
+	// Run review
+	gateResult := reviewGate.ReviewAllIssues()
+
+	// Post comments if enabled
+	if *postComments {
+		commentPoster := orchestrator.NewCommentPoster(primaryCfg, true)
+		for _, result := range gateResult.Results {
+			if !result.Passed {
+				commentPoster.PostReviewFailure(result)
+			}
+		}
+	}
+
+	// Print result
+	if gateResult.Passed {
+		reviewGate.PrintSuccessReport(gateResult)
+	} else {
+		reviewGate.PrintFailureReport(gateResult)
+	}
+
+	// Handle web server
+	if webServer != nil {
+		if *keepServer {
+			fmt.Printf("\nWeb server running at http://localhost:%d\n", *webPort)
+			fmt.Println("Press Ctrl+C to exit...")
+			// Block forever (user will Ctrl+C)
+			select {}
+		}
+		webServer.Stop()
+	}
+
+	if gateResult.Passed {
+		os.Exit(0)
+	} else {
+		os.Exit(1)
+	}
 }
 
 func cmdMonitor(args []string) {

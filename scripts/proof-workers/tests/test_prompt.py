@@ -41,14 +41,12 @@ class TestValidStages:
             "'test' should not be a valid stage - use 'write_tests' or 'run_tests_fix'"
 
     def test_review_is_valid(self):
-        """'review' is a valid stage for documentation review."""
+        """'review' IS a valid stage (for documentation review)."""
         assert "review" in VALID_STAGES
 
     def test_all_expected_stages_present(self):
         expected = {
-            # Code implementation stages
             "implement", "optimize", "write_tests", "run_tests_fix", "document",
-            # Documentation research stages
             "research", "draft", "validate", "review",
         }
         assert expected == VALID_STAGES
@@ -78,7 +76,7 @@ class TestGeneratePrompt:
             )
 
     def test_review_stage_generates_prompt(self, loaded_config, state_manager):
-        """'review' stage should generate a prompt for documentation review."""
+        """'review' stage should generate a valid prompt."""
         issue = make_issue()
         repo = make_repo()
         prompt = generate_prompt(
