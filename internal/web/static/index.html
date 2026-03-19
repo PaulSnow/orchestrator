@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Orchestrator Dashboard</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <header class="header">
+        <div class="header-left">
+            <h1 class="title">Orchestrator Dashboard</h1>
+            <span id="connection-status" class="status-indicator disconnected">Disconnected</span>
+        </div>
+        <div class="header-right">
+            <span id="port-display" class="port-display"></span>
+            <button id="abort-btn" class="abort-btn">Abort</button>
+        </div>
+    </header>
+
+    <main class="main-content">
+        <section class="section issues-section">
+            <h2>Issues</h2>
+            <div class="table-wrapper">
+                <table id="issues-table" class="data-table">
+                    <thead>
+                        <tr>
+                            <th>#</th>
+                            <th>Title</th>
+                            <th>Completeness</th>
+                            <th>Suitability</th>
+                            <th>Dependencies</th>
+                            <th>Status</th>
+                        </tr>
+                    </thead>
+                    <tbody id="issues-body">
+                        <tr class="empty-row">
+                            <td colspan="6">No issues loaded</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </section>
+
+        <section class="section sessions-section">
+            <h2>Active Sessions</h2>
+            <div id="sessions-list" class="sessions-list">
+                <div class="empty-message">No active sessions</div>
+            </div>
+        </section>
+
+        <section class="section log-section">
+            <h2>Event Log</h2>
+            <div id="event-log" class="event-log">
+                <div class="empty-message">No events yet</div>
+            </div>
+        </section>
+    </main>
+
+    <div id="confirm-modal" class="modal hidden">
+        <div class="modal-content">
+            <h3>Confirm Abort</h3>
+            <p>Are you sure you want to abort the orchestrator? This will stop all workers.</p>
+            <div class="modal-actions">
+                <button id="confirm-cancel" class="btn btn-secondary">Cancel</button>
+                <button id="confirm-abort" class="btn btn-danger">Abort</button>
+            </div>
+        </div>
+    </div>
+
+    <script src="app.js"></script>
+</body>
+</html>
