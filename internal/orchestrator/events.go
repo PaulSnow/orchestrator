@@ -43,6 +43,12 @@ const (
 	EventReviewingIssue = "reviewing_issue"
 	EventIssueReview    = "issue_review"
 	EventGateResult     = "gate_result"
+
+	// Issue management events
+	EventIssueCreated    = "issue_created"
+	EventIssueUpdated    = "issue_updated"
+	EventIssueDeleted    = "issue_deleted"
+	EventIssueDepsChange = "issue_deps_change"
 )
 
 // DashboardEvent represents a server-sent event for the dashboard.

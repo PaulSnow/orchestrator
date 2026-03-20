@@ -55,7 +55,8 @@ func (ds *DashboardServer) Start() error {
 	mux.HandleFunc("/api/state", ds.handleState)
 	mux.HandleFunc("/api/workers", ds.handleWorkers)
 	mux.HandleFunc("/api/progress", ds.handleProgress)
-	mux.HandleFunc("/api/issues", ds.handleIssues)
+	mux.HandleFunc("/api/issues", ds.handleIssuesRouter)
+	mux.HandleFunc("/api/issues/", ds.handleIssueByID)
 	mux.HandleFunc("/api/event-log", ds.handleEventLog)
 
 	// Worker log endpoint
@@ -316,44 +317,540 @@ func (ds *DashboardServer) buildProgressResponse() map[string]any {
 	}
 }
 
-// handleIssues returns all issues with their status.
-func (ds *DashboardServer) handleIssues(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
+// handleIssuesRouter routes /api/issues requests based on method.
+func (ds *DashboardServer) handleIssuesRouter(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
 
+	if r.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+
+	switch r.Method {
+	case http.MethodGet:
+		ds.handleGetIssues(w, r)
+	case http.MethodPost:
+		ds.handleCreateIssue(w, r)
+	default:
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+// handleGetIssues returns all issues with their status (GET /api/issues).
+func (ds *DashboardServer) handleGetIssues(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+
+	ds.mu.Lock()
 	issues := make([]map[string]any, 0, len(ds.cfg.Issues))
 	for _, issue := range ds.cfg.Issues {
-		issueData := map[string]any{
-			"number":         issue.Number,
-			"title":          issue.Title,
-			"status":         issue.Status,
-			"priority":       issue.Priority,
-			"wave":           issue.Wave,
-			"pipeline_stage": issue.PipelineStage,
-		}
+		issueData := ds.buildIssueResponse(issue)
+		issues = append(issues, issueData)
+	}
+	rg := ds.reviewGate
+	ds.mu.Unlock()
 
-		if issue.AssignedWorker != nil {
-			issueData["assigned_worker"] = *issue.AssignedWorker
-		}
-
-		if len(issue.DependsOn) > 0 {
-			issueData["depends_on"] = issue.DependsOn
-		}
-
-		// Try to load review result if review gate is set
-		ds.mu.Lock()
-		rg := ds.reviewGate
-		ds.mu.Unlock()
-		if rg != nil {
-			if review, err := rg.LoadIssueReview(issue.Number); err == nil {
-				issueData["review"] = review
+	// Try to load review results
+	if rg != nil {
+		for i, issueData := range issues {
+			num := issueData["number"].(int)
+			if review, err := rg.LoadIssueReview(num); err == nil {
+				issues[i]["review"] = review
 			}
 		}
-
-		issues = append(issues, issueData)
 	}
 
 	json.NewEncoder(w).Encode(issues)
+}
+
+// buildIssueResponse builds a response map for an issue.
+func (ds *DashboardServer) buildIssueResponse(issue *Issue) map[string]any {
+	issueData := map[string]any{
+		"number":         issue.Number,
+		"title":          issue.Title,
+		"status":         issue.Status,
+		"priority":       issue.Priority,
+		"wave":           issue.Wave,
+		"pipeline_stage": issue.PipelineStage,
+		"description":    issue.Description,
+	}
+
+	if issue.AssignedWorker != nil {
+		issueData["assigned_worker"] = *issue.AssignedWorker
+	}
+
+	if len(issue.DependsOn) > 0 {
+		issueData["depends_on"] = issue.DependsOn
+	}
+
+	if issue.Repo != "" {
+		issueData["repo"] = issue.Repo
+	}
+
+	if issue.TaskType != "" {
+		issueData["task_type"] = issue.TaskType
+	}
+
+	return issueData
+}
+
+// handleCreateIssue creates a new issue (POST /api/issues).
+func (ds *DashboardServer) handleCreateIssue(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+
+	var req struct {
+		Number      int    `json:"number"`
+		Title       string `json:"title"`
+		Description string `json:"description"`
+		Priority    int    `json:"priority"`
+		Wave        int    `json:"wave"`
+		DependsOn   []int  `json:"depends_on"`
+		Repo        string `json:"repo"`
+		TaskType    string `json:"task_type"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, `{"error":"invalid JSON"}`, http.StatusBadRequest)
+		return
+	}
+
+	if req.Number <= 0 {
+		http.Error(w, `{"error":"number is required and must be positive"}`, http.StatusBadRequest)
+		return
+	}
+
+	ds.mu.Lock()
+	// Check for duplicate issue number
+	for _, issue := range ds.cfg.Issues {
+		if issue.Number == req.Number {
+			ds.mu.Unlock()
+			http.Error(w, `{"error":"issue number already exists"}`, http.StatusConflict)
+			return
+		}
+	}
+
+	// Create new issue
+	issue := &Issue{
+		Number:      req.Number,
+		Title:       req.Title,
+		Description: req.Description,
+		Priority:    req.Priority,
+		Wave:        req.Wave,
+		DependsOn:   req.DependsOn,
+		Repo:        req.Repo,
+		TaskType:    req.TaskType,
+	}
+	issue.Init()
+
+	// Validate dependencies exist
+	issueNumbers := make(map[int]bool)
+	for _, i := range ds.cfg.Issues {
+		issueNumbers[i.Number] = true
+	}
+	for _, dep := range issue.DependsOn {
+		if !issueNumbers[dep] {
+			ds.mu.Unlock()
+			http.Error(w, fmt.Sprintf(`{"error":"dependency #%d does not exist"}`, dep), http.StatusBadRequest)
+			return
+		}
+	}
+
+	ds.cfg.Issues = append(ds.cfg.Issues, issue)
+
+	// Save config atomically
+	if err := SaveConfig(ds.cfg); err != nil {
+		// Rollback
+		ds.cfg.Issues = ds.cfg.Issues[:len(ds.cfg.Issues)-1]
+		ds.mu.Unlock()
+		http.Error(w, `{"error":"failed to save config"}`, http.StatusInternalServerError)
+		return
+	}
+	ds.mu.Unlock()
+
+	// Broadcast event
+	ds.events.BroadcastType(EventIssueCreated, map[string]any{
+		"issue_number": issue.Number,
+		"title":        issue.Title,
+	})
+
+	w.WriteHeader(http.StatusCreated)
+	json.NewEncoder(w).Encode(ds.buildIssueResponse(issue))
+}
+
+// handleIssueByID routes /api/issues/:id requests based on method.
+func (ds *DashboardServer) handleIssueByID(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Control-Allow-Methods", "GET, PUT, DELETE, POST, OPTIONS")
+	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+
+	if r.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+
+	// Parse path: /api/issues/:id or /api/issues/:id/dependencies or /api/issues/:id/dependencies/:dep_id
+	path := strings.TrimPrefix(r.URL.Path, "/api/issues/")
+	parts := strings.Split(path, "/")
+
+	if len(parts) == 0 || parts[0] == "" {
+		http.Error(w, `{"error":"issue ID required"}`, http.StatusBadRequest)
+		return
+	}
+
+	issueID, err := strconv.Atoi(parts[0])
+	if err != nil {
+		http.Error(w, `{"error":"invalid issue ID"}`, http.StatusBadRequest)
+		return
+	}
+
+	// Handle dependencies routes
+	if len(parts) >= 2 && parts[1] == "dependencies" {
+		if len(parts) == 2 {
+			// /api/issues/:id/dependencies
+			ds.handleIssueDependencies(w, r, issueID)
+		} else if len(parts) == 3 {
+			// /api/issues/:id/dependencies/:dep_id
+			depID, err := strconv.Atoi(parts[2])
+			if err != nil {
+				http.Error(w, `{"error":"invalid dependency ID"}`, http.StatusBadRequest)
+				return
+			}
+			ds.handleRemoveDependency(w, r, issueID, depID)
+		}
+		return
+	}
+
+	// Handle single issue routes
+	switch r.Method {
+	case http.MethodGet:
+		ds.handleGetIssue(w, r, issueID)
+	case http.MethodPut:
+		ds.handleUpdateIssue(w, r, issueID)
+	case http.MethodDelete:
+		ds.handleDeleteIssue(w, r, issueID)
+	default:
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+// handleGetIssue returns a single issue by ID (GET /api/issues/:id).
+func (ds *DashboardServer) handleGetIssue(w http.ResponseWriter, r *http.Request, issueID int) {
+	w.Header().Set("Content-Type", "application/json")
+
+	ds.mu.Lock()
+	var issue *Issue
+	for _, i := range ds.cfg.Issues {
+		if i.Number == issueID {
+			issue = i
+			break
+		}
+	}
+	rg := ds.reviewGate
+	ds.mu.Unlock()
+
+	if issue == nil {
+		http.Error(w, `{"error":"issue not found"}`, http.StatusNotFound)
+		return
+	}
+
+	response := ds.buildIssueResponse(issue)
+
+	// Try to load review result
+	if rg != nil {
+		if review, err := rg.LoadIssueReview(issueID); err == nil {
+			response["review"] = review
+		}
+	}
+
+	json.NewEncoder(w).Encode(response)
+}
+
+// handleUpdateIssue updates an issue (PUT /api/issues/:id).
+func (ds *DashboardServer) handleUpdateIssue(w http.ResponseWriter, r *http.Request, issueID int) {
+	w.Header().Set("Content-Type", "application/json")
+
+	var req struct {
+		Title       *string `json:"title"`
+		Description *string `json:"description"`
+		Priority    *int    `json:"priority"`
+		Wave        *int    `json:"wave"`
+		Status      *string `json:"status"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, `{"error":"invalid JSON"}`, http.StatusBadRequest)
+		return
+	}
+
+	ds.mu.Lock()
+	var issue *Issue
+	for _, i := range ds.cfg.Issues {
+		if i.Number == issueID {
+			issue = i
+			break
+		}
+	}
+
+	if issue == nil {
+		ds.mu.Unlock()
+		http.Error(w, `{"error":"issue not found"}`, http.StatusNotFound)
+		return
+	}
+
+	// Validate status if provided
+	if req.Status != nil {
+		validStatuses := map[string]bool{
+			"pending":     true,
+			"in_progress": true,
+			"completed":   true,
+			"failed":      true,
+		}
+		if !validStatuses[*req.Status] {
+			ds.mu.Unlock()
+			http.Error(w, `{"error":"invalid status"}`, http.StatusBadRequest)
+			return
+		}
+	}
+
+	// Apply updates
+	if req.Title != nil {
+		issue.Title = *req.Title
+	}
+	if req.Description != nil {
+		issue.Description = *req.Description
+	}
+	if req.Priority != nil {
+		issue.Priority = *req.Priority
+	}
+	if req.Wave != nil {
+		issue.Wave = *req.Wave
+	}
+	if req.Status != nil {
+		issue.Status = *req.Status
+	}
+
+	// Save config atomically
+	if err := SaveConfig(ds.cfg); err != nil {
+		ds.mu.Unlock()
+		http.Error(w, `{"error":"failed to save config"}`, http.StatusInternalServerError)
+		return
+	}
+	ds.mu.Unlock()
+
+	// Broadcast event
+	ds.events.BroadcastType(EventIssueUpdated, map[string]any{
+		"issue_number": issueID,
+		"title":        issue.Title,
+		"status":       issue.Status,
+	})
+
+	json.NewEncoder(w).Encode(ds.buildIssueResponse(issue))
+}
+
+// handleDeleteIssue deletes an issue (DELETE /api/issues/:id).
+func (ds *DashboardServer) handleDeleteIssue(w http.ResponseWriter, r *http.Request, issueID int) {
+	w.Header().Set("Content-Type", "application/json")
+
+	ds.mu.Lock()
+	var issueIdx = -1
+	var issue *Issue
+	for i, iss := range ds.cfg.Issues {
+		if iss.Number == issueID {
+			issueIdx = i
+			issue = iss
+			break
+		}
+	}
+
+	if issueIdx == -1 {
+		ds.mu.Unlock()
+		http.Error(w, `{"error":"issue not found"}`, http.StatusNotFound)
+		return
+	}
+
+	// Only allow deletion of pending issues
+	if issue.Status != "pending" {
+		ds.mu.Unlock()
+		http.Error(w, `{"error":"can only delete pending issues"}`, http.StatusBadRequest)
+		return
+	}
+
+	// Check if any other issue depends on this one
+	for _, iss := range ds.cfg.Issues {
+		for _, dep := range iss.DependsOn {
+			if dep == issueID {
+				ds.mu.Unlock()
+				http.Error(w, fmt.Sprintf(`{"error":"issue #%d depends on this issue"}`, iss.Number), http.StatusBadRequest)
+				return
+			}
+		}
+	}
+
+	// Remove the issue
+	ds.cfg.Issues = append(ds.cfg.Issues[:issueIdx], ds.cfg.Issues[issueIdx+1:]...)
+
+	// Save config atomically
+	if err := SaveConfig(ds.cfg); err != nil {
+		// Rollback is complex here, just fail
+		ds.mu.Unlock()
+		http.Error(w, `{"error":"failed to save config"}`, http.StatusInternalServerError)
+		return
+	}
+	ds.mu.Unlock()
+
+	// Broadcast event
+	ds.events.BroadcastType(EventIssueDeleted, map[string]any{
+		"issue_number": issueID,
+	})
+
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// handleIssueDependencies handles POST /api/issues/:id/dependencies.
+func (ds *DashboardServer) handleIssueDependencies(w http.ResponseWriter, r *http.Request, issueID int) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+
+	var req struct {
+		DependsOn int `json:"depends_on"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, `{"error":"invalid JSON"}`, http.StatusBadRequest)
+		return
+	}
+
+	if req.DependsOn <= 0 {
+		http.Error(w, `{"error":"depends_on is required and must be positive"}`, http.StatusBadRequest)
+		return
+	}
+
+	ds.mu.Lock()
+	var issue *Issue
+	var depExists bool
+	for _, i := range ds.cfg.Issues {
+		if i.Number == issueID {
+			issue = i
+		}
+		if i.Number == req.DependsOn {
+			depExists = true
+		}
+	}
+
+	if issue == nil {
+		ds.mu.Unlock()
+		http.Error(w, `{"error":"issue not found"}`, http.StatusNotFound)
+		return
+	}
+
+	if !depExists {
+		ds.mu.Unlock()
+		http.Error(w, `{"error":"dependency issue not found"}`, http.StatusNotFound)
+		return
+	}
+
+	// Check for self-dependency
+	if issueID == req.DependsOn {
+		ds.mu.Unlock()
+		http.Error(w, `{"error":"cannot depend on self"}`, http.StatusBadRequest)
+		return
+	}
+
+	// Check if dependency already exists
+	for _, dep := range issue.DependsOn {
+		if dep == req.DependsOn {
+			ds.mu.Unlock()
+			http.Error(w, `{"error":"dependency already exists"}`, http.StatusConflict)
+			return
+		}
+	}
+
+	// Add dependency
+	issue.DependsOn = append(issue.DependsOn, req.DependsOn)
+
+	// Save config atomically
+	if err := SaveConfig(ds.cfg); err != nil {
+		// Rollback
+		issue.DependsOn = issue.DependsOn[:len(issue.DependsOn)-1]
+		ds.mu.Unlock()
+		http.Error(w, `{"error":"failed to save config"}`, http.StatusInternalServerError)
+		return
+	}
+	ds.mu.Unlock()
+
+	// Broadcast event
+	ds.events.BroadcastType(EventIssueDepsChange, map[string]any{
+		"issue_number": issueID,
+		"action":       "added",
+		"depends_on":   req.DependsOn,
+	})
+
+	w.WriteHeader(http.StatusCreated)
+	json.NewEncoder(w).Encode(ds.buildIssueResponse(issue))
+}
+
+// handleRemoveDependency handles DELETE /api/issues/:id/dependencies/:dep_id.
+func (ds *DashboardServer) handleRemoveDependency(w http.ResponseWriter, r *http.Request, issueID, depID int) {
+	if r.Method != http.MethodDelete {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+
+	ds.mu.Lock()
+	var issue *Issue
+	for _, i := range ds.cfg.Issues {
+		if i.Number == issueID {
+			issue = i
+			break
+		}
+	}
+
+	if issue == nil {
+		ds.mu.Unlock()
+		http.Error(w, `{"error":"issue not found"}`, http.StatusNotFound)
+		return
+	}
+
+	// Find and remove dependency
+	depIdx := -1
+	for i, dep := range issue.DependsOn {
+		if dep == depID {
+			depIdx = i
+			break
+		}
+	}
+
+	if depIdx == -1 {
+		ds.mu.Unlock()
+		http.Error(w, `{"error":"dependency not found"}`, http.StatusNotFound)
+		return
+	}
+
+	issue.DependsOn = append(issue.DependsOn[:depIdx], issue.DependsOn[depIdx+1:]...)
+
+	// Save config atomically
+	if err := SaveConfig(ds.cfg); err != nil {
+		ds.mu.Unlock()
+		http.Error(w, `{"error":"failed to save config"}`, http.StatusInternalServerError)
+		return
+	}
+	ds.mu.Unlock()
+
+	// Broadcast event
+	ds.events.BroadcastType(EventIssueDepsChange, map[string]any{
+		"issue_number": issueID,
+		"action":       "removed",
+		"depends_on":   depID,
+	})
+
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // handleEventLog returns recent events.

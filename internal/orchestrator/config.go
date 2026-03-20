@@ -515,3 +515,197 @@ func LoadAllConfigs(configDir string) ([]*RunConfig, error) {
 
 	return configs, nil
 }
+
+// SaveConfig atomically saves the configuration to a JSON file.
+func SaveConfig(cfg *RunConfig) error {
+	if cfg.ConfigPath == "" {
+		return fmt.Errorf("config path not set")
+	}
+
+	// Marshal configuration to JSON with indentation
+	data, err := json.MarshalIndent(buildConfigMap(cfg), "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshaling config: %w", err)
+	}
+
+	// Write atomically: write to temp file, then rename
+	tempPath := cfg.ConfigPath + ".tmp"
+	if err := os.WriteFile(tempPath, data, 0644); err != nil {
+		return fmt.Errorf("writing temp config: %w", err)
+	}
+
+	if err := os.Rename(tempPath, cfg.ConfigPath); err != nil {
+		os.Remove(tempPath) // Clean up temp file on rename failure
+		return fmt.Errorf("renaming config: %w", err)
+	}
+
+	return nil
+}
+
+// buildConfigMap creates a map representation of RunConfig for JSON serialization.
+func buildConfigMap(cfg *RunConfig) map[string]any {
+	result := make(map[string]any)
+
+	if cfg.Project != "" {
+		result["project"] = cfg.Project
+	}
+	if cfg.TmuxSession != "" {
+		result["tmux_session"] = cfg.TmuxSession
+	}
+	if cfg.NumWorkers > 0 {
+		result["num_workers"] = cfg.NumWorkers
+	}
+	if cfg.CycleInterval > 0 {
+		result["cycle_interval"] = cfg.CycleInterval
+	}
+	if cfg.MaxRetries > 0 {
+		result["max_retries"] = cfg.MaxRetries
+	}
+	if cfg.StallTimeout > 0 {
+		result["stall_timeout"] = cfg.StallTimeout
+	}
+	if cfg.WallClockTimeout > 0 {
+		result["wall_clock_timeout"] = cfg.WallClockTimeout
+	}
+	if cfg.PromptType != "" {
+		result["prompt_type"] = cfg.PromptType
+	}
+	if cfg.StaggerDelay > 0 {
+		result["stagger_delay"] = cfg.StaggerDelay
+	}
+	if len(cfg.Pipeline) > 0 {
+		result["pipeline"] = cfg.Pipeline
+	}
+
+	// Build repos map
+	if len(cfg.Repos) > 0 {
+		repos := make(map[string]any)
+		for name, repo := range cfg.Repos {
+			repoMap := make(map[string]any)
+			if repo.Path != "" {
+				repoMap["path"] = repo.Path
+			}
+			if repo.DefaultBranch != "" {
+				repoMap["default_branch"] = repo.DefaultBranch
+			}
+			if repo.WorktreeBase != "" {
+				repoMap["worktree_base"] = repo.WorktreeBase
+			}
+			if repo.BranchPrefix != "" {
+				repoMap["branch_prefix"] = repo.BranchPrefix
+			}
+			if repo.Platform != "" {
+				repoMap["platform"] = repo.Platform
+			}
+			repos[name] = repoMap
+		}
+		result["repos"] = repos
+	}
+
+	// Build issues array
+	if len(cfg.Issues) > 0 {
+		issues := make([]map[string]any, 0, len(cfg.Issues))
+		for _, issue := range cfg.Issues {
+			issueMap := map[string]any{
+				"number": issue.Number,
+			}
+			if issue.Title != "" {
+				issueMap["title"] = issue.Title
+			}
+			if issue.Priority > 0 {
+				issueMap["priority"] = issue.Priority
+			}
+			if issue.Wave > 0 {
+				issueMap["wave"] = issue.Wave
+			}
+			if issue.Status != "" {
+				issueMap["status"] = issue.Status
+			}
+			if issue.AssignedWorker != nil {
+				issueMap["assigned_worker"] = *issue.AssignedWorker
+			}
+			if issue.Repo != "" {
+				issueMap["repo"] = issue.Repo
+			}
+			if issue.TaskType != "" {
+				issueMap["task_type"] = issue.TaskType
+			}
+			if issue.PipelineStage > 0 {
+				issueMap["pipeline_stage"] = issue.PipelineStage
+			}
+			if issue.Description != "" {
+				issueMap["description"] = issue.Description
+			}
+			if len(issue.DependsOn) > 0 {
+				issueMap["depends_on"] = issue.DependsOn
+			}
+			issues = append(issues, issueMap)
+		}
+		result["issues"] = issues
+	}
+
+	// Build initial assignments
+	if len(cfg.InitialAssignments) > 0 {
+		assignments := make(map[string]any)
+		for k, v := range cfg.InitialAssignments {
+			assignments[fmt.Sprintf("%d", k)] = v
+		}
+		result["initial_assignments"] = assignments
+	}
+
+	// Project context
+	if cfg.ProjectContext != nil {
+		pc := make(map[string]any)
+		if cfg.ProjectContext.Language != "" {
+			pc["language"] = cfg.ProjectContext.Language
+		}
+		if cfg.ProjectContext.BuildCommand != "" {
+			pc["build_command"] = cfg.ProjectContext.BuildCommand
+		}
+		if cfg.ProjectContext.TestCommand != "" {
+			pc["test_command"] = cfg.ProjectContext.TestCommand
+		}
+		if cfg.ProjectContext.CommitPrefix != "" {
+			pc["commit_prefix"] = cfg.ProjectContext.CommitPrefix
+		}
+		if len(cfg.ProjectContext.SafetyRules) > 0 {
+			pc["safety_rules"] = cfg.ProjectContext.SafetyRules
+		}
+		if len(cfg.ProjectContext.KeyFiles) > 0 {
+			pc["key_files"] = cfg.ProjectContext.KeyFiles
+		}
+		if len(pc) > 0 {
+			result["project_context"] = pc
+		}
+	}
+
+	// Review config
+	if cfg.Review != nil {
+		rc := make(map[string]any)
+		rc["enabled"] = cfg.Review.Enabled
+		if cfg.Review.ParallelWorkers > 0 {
+			rc["parallel_workers"] = cfg.Review.ParallelWorkers
+		}
+		if cfg.Review.SessionTimeout > 0 {
+			rc["session_timeout"] = cfg.Review.SessionTimeout
+		}
+		rc["post_comments"] = cfg.Review.PostComments
+		rc["strict_mode"] = cfg.Review.StrictMode
+		result["review"] = rc
+	}
+
+	// Web config
+	if cfg.Web != nil {
+		wc := make(map[string]any)
+		wc["enabled"] = cfg.Web.Enabled
+		if cfg.Web.Port > 0 {
+			wc["port"] = cfg.Web.Port
+		}
+		if cfg.Web.Host != "" {
+			wc["host"] = cfg.Web.Host
+		}
+		result["web"] = wc
+	}
+
+	return result
+}
