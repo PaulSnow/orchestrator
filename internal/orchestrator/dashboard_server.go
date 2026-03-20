@@ -602,6 +602,126 @@ const dashboardHTML = `<!DOCTYPE html>
         .event-time { color: #666; margin-right: 10px; }
         .event-type { color: #00d9ff; margin-right: 10px; }
 
+        /* View toggle */
+        .view-toggle {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 10px;
+        }
+        .view-btn {
+            padding: 8px 16px;
+            background: #16213e;
+            color: #888;
+            border: 1px solid #333;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 14px;
+        }
+        .view-btn:hover { background: #1a2540; }
+        .view-btn.active {
+            background: #00d9ff;
+            color: #000;
+            border-color: #00d9ff;
+        }
+
+        /* Graph view */
+        .graph-section {
+            background: #16213e;
+            border-radius: 8px;
+            margin-bottom: 20px;
+            padding: 10px;
+            min-height: 400px;
+            overflow: auto;
+        }
+        #dependency-graph {
+            width: 100%;
+            min-height: 380px;
+        }
+        .graph-section .node rect {
+            stroke-width: 2px;
+            cursor: pointer;
+            transition: stroke-width 0.2s;
+        }
+        .graph-section .node rect:hover {
+            stroke-width: 4px;
+        }
+        .graph-section .node text {
+            fill: #fff;
+            font-size: 12px;
+            pointer-events: none;
+        }
+        .graph-section .edgePath path {
+            stroke: #666;
+            stroke-width: 1.5px;
+            fill: none;
+        }
+        .graph-section .edgePath marker path {
+            fill: #666;
+        }
+
+        /* Issue detail panel */
+        .issue-detail-panel {
+            position: fixed;
+            right: 0;
+            top: 0;
+            width: 400px;
+            height: 100vh;
+            background: #16213e;
+            border-left: 2px solid #00d9ff;
+            z-index: 1000;
+            overflow-y: auto;
+            box-shadow: -5px 0 20px rgba(0,0,0,0.5);
+        }
+        .detail-header {
+            display: flex;
+            align-items: center;
+            padding: 15px;
+            border-bottom: 1px solid #0a0a0a;
+            background: #0f1a2e;
+        }
+        .detail-close {
+            font-size: 24px;
+            cursor: pointer;
+            margin-right: 15px;
+            color: #888;
+        }
+        .detail-close:hover { color: #fff; }
+        .detail-header h3 {
+            margin: 0;
+            color: #00d9ff;
+        }
+        .detail-content {
+            padding: 15px;
+        }
+        .detail-row {
+            margin-bottom: 15px;
+        }
+        .detail-label {
+            color: #888;
+            font-size: 12px;
+            text-transform: uppercase;
+            margin-bottom: 4px;
+        }
+        .detail-value {
+            color: #eee;
+        }
+        .dependency-list {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 5px;
+        }
+        .dependency-tag {
+            background: #0a0a0a;
+            padding: 4px 8px;
+            border-radius: 4px;
+            font-size: 12px;
+            color: #00d9ff;
+            cursor: pointer;
+        }
+        .dependency-tag:hover {
+            background: #1a2540;
+        }
+
         /* Gate result */
         .gate-result {
             padding: 20px;
@@ -688,9 +808,26 @@ const dashboardHTML = `<!DOCTYPE html>
             </table>
         </div>
 
+        <div class="view-toggle">
+            <button id="list-view-btn" class="view-btn active" onclick="showListView()">List View</button>
+            <button id="graph-view-btn" class="view-btn" onclick="showGraphView()">Graph View</button>
+        </div>
+
         <h2>Issues</h2>
         <div class="issues-section" id="issues-list">
             Loading...
+        </div>
+
+        <div class="graph-section" id="graph-view" style="display: none;">
+            <svg id="dependency-graph"></svg>
+        </div>
+
+        <div class="issue-detail-panel" id="issue-detail" style="display: none;">
+            <div class="detail-header">
+                <span class="detail-close" onclick="closeDetailPanel()">&times;</span>
+                <h3 id="detail-title">Issue Details</h3>
+            </div>
+            <div class="detail-content" id="detail-content"></div>
         </div>
 
         <h2>Event Log</h2>
@@ -939,6 +1076,310 @@ const dashboardHTML = `<!DOCTYPE html>
                 document.getElementById('runtime').textContent = 'Running ' + formatElapsed(elapsed);
             }
         }, 1000);
+
+        // View toggle functions
+        let currentView = 'list';
+
+        function showListView() {
+            currentView = 'list';
+            document.getElementById('issues-list').style.display = '';
+            document.getElementById('graph-view').style.display = 'none';
+            document.getElementById('list-view-btn').classList.add('active');
+            document.getElementById('graph-view-btn').classList.remove('active');
+        }
+
+        function showGraphView() {
+            currentView = 'graph';
+            document.getElementById('issues-list').style.display = 'none';
+            document.getElementById('graph-view').style.display = '';
+            document.getElementById('list-view-btn').classList.remove('active');
+            document.getElementById('graph-view-btn').classList.add('active');
+            renderDependencyGraph();
+        }
+
+        // Status color mapping (same scheme as issue list)
+        function getStatusColor(status) {
+            switch (status) {
+                case 'completed': return '#00ff88';
+                case 'in_progress': return '#00d9ff';
+                case 'failed': return '#ff4444';
+                case 'pending': return '#ffaa00';
+                case 'blocked': return '#ff8800';
+                default: return '#666666';
+            }
+        }
+
+        function getStatusFill(status) {
+            switch (status) {
+                case 'completed': return '#0a3d1a';
+                case 'in_progress': return '#0a2d3d';
+                case 'failed': return '#3d0a0a';
+                case 'pending': return '#3d3d0a';
+                case 'blocked': return '#3d1a0a';
+                default: return '#1a1a2e';
+            }
+        }
+
+        // Abbreviate title for graph display
+        function abbreviateTitle(title, maxLen) {
+            if (!title) return '';
+            if (title.length <= maxLen) return title;
+            return title.substring(0, maxLen - 3) + '...';
+        }
+
+        // Issue detail panel functions
+        function showIssueDetail(issueNumber) {
+            const issue = issues.find(i => i.number === issueNumber);
+            if (!issue) return;
+
+            document.getElementById('detail-title').textContent = '#' + issue.number + ': ' + (issue.title || 'Untitled');
+
+            let html = '';
+            html += '<div class="detail-row"><div class="detail-label">Status</div>';
+            html += '<div class="detail-value"><span class="status-badge status-' + issue.status + '">' + issue.status + '</span></div></div>';
+
+            if (issue.priority) {
+                html += '<div class="detail-row"><div class="detail-label">Priority</div>';
+                html += '<div class="detail-value">' + issue.priority + '</div></div>';
+            }
+
+            if (issue.wave) {
+                html += '<div class="detail-row"><div class="detail-label">Wave</div>';
+                html += '<div class="detail-value">' + issue.wave + '</div></div>';
+            }
+
+            if (issue.pipeline_stage) {
+                html += '<div class="detail-row"><div class="detail-label">Pipeline Stage</div>';
+                html += '<div class="detail-value">' + issue.pipeline_stage + '</div></div>';
+            }
+
+            if (issue.assigned_worker) {
+                html += '<div class="detail-row"><div class="detail-label">Assigned Worker</div>';
+                html += '<div class="detail-value">Worker ' + issue.assigned_worker + '</div></div>';
+            }
+
+            if (issue.depends_on && issue.depends_on.length > 0) {
+                html += '<div class="detail-row"><div class="detail-label">Dependencies</div>';
+                html += '<div class="detail-value dependency-list">';
+                issue.depends_on.forEach(dep => {
+                    html += '<span class="dependency-tag" onclick="showIssueDetail(' + dep + ')">#' + dep + '</span>';
+                });
+                html += '</div></div>';
+            }
+
+            // Find issues that depend on this one
+            const dependents = issues.filter(i => i.depends_on && i.depends_on.includes(issue.number));
+            if (dependents.length > 0) {
+                html += '<div class="detail-row"><div class="detail-label">Dependents (issues that depend on this)</div>';
+                html += '<div class="detail-value dependency-list">';
+                dependents.forEach(dep => {
+                    html += '<span class="dependency-tag" onclick="showIssueDetail(' + dep.number + ')">#' + dep.number + '</span>';
+                });
+                html += '</div></div>';
+            }
+
+            document.getElementById('detail-content').innerHTML = html;
+            document.getElementById('issue-detail').style.display = 'block';
+        }
+
+        function closeDetailPanel() {
+            document.getElementById('issue-detail').style.display = 'none';
+        }
+
+        // Render dependency graph using simple SVG (no external library needed)
+        function renderDependencyGraph() {
+            const svg = document.getElementById('dependency-graph');
+            const container = document.getElementById('graph-view');
+
+            if (issues.length === 0) {
+                svg.innerHTML = '<text x="50%" y="50%" text-anchor="middle" fill="#888">No issues to display</text>';
+                return;
+            }
+
+            // Clear previous content
+            svg.innerHTML = '';
+
+            // Create issue map for quick lookup
+            const issueMap = new Map();
+            issues.forEach(issue => issueMap.set(issue.number, issue));
+
+            // Calculate node positions using simple layered layout
+            const nodeWidth = 160;
+            const nodeHeight = 50;
+            const horizontalGap = 40;
+            const verticalGap = 60;
+
+            // Assign layers based on dependencies (topological sort)
+            const layers = assignLayers(issues);
+            const maxLayer = Math.max(...Array.from(layers.values()));
+
+            // Group nodes by layer
+            const nodesByLayer = new Map();
+            layers.forEach((layer, issueNum) => {
+                if (!nodesByLayer.has(layer)) nodesByLayer.set(layer, []);
+                nodesByLayer.get(layer).push(issueNum);
+            });
+
+            // Calculate positions
+            const positions = new Map();
+            const svgWidth = (maxLayer + 1) * (nodeWidth + horizontalGap) + horizontalGap;
+            let maxHeight = 0;
+
+            nodesByLayer.forEach((nodes, layer) => {
+                const layerHeight = nodes.length * (nodeHeight + verticalGap);
+                maxHeight = Math.max(maxHeight, layerHeight);
+            });
+
+            nodesByLayer.forEach((nodes, layer) => {
+                const x = horizontalGap + layer * (nodeWidth + horizontalGap);
+                const totalHeight = nodes.length * nodeHeight + (nodes.length - 1) * verticalGap;
+                const startY = (maxHeight - totalHeight) / 2 + 30;
+
+                nodes.forEach((issueNum, idx) => {
+                    const y = startY + idx * (nodeHeight + verticalGap);
+                    positions.set(issueNum, { x, y });
+                });
+            });
+
+            // Set SVG dimensions
+            svg.setAttribute('width', svgWidth);
+            svg.setAttribute('height', maxHeight + 60);
+            container.style.minHeight = (maxHeight + 80) + 'px';
+
+            // Create defs for arrow markers
+            const defs = document.createElementNS('http://www.w3.org/2000/svg', 'defs');
+            const marker = document.createElementNS('http://www.w3.org/2000/svg', 'marker');
+            marker.setAttribute('id', 'arrowhead');
+            marker.setAttribute('markerWidth', '10');
+            marker.setAttribute('markerHeight', '7');
+            marker.setAttribute('refX', '9');
+            marker.setAttribute('refY', '3.5');
+            marker.setAttribute('orient', 'auto');
+            const polygon = document.createElementNS('http://www.w3.org/2000/svg', 'polygon');
+            polygon.setAttribute('points', '0 0, 10 3.5, 0 7');
+            polygon.setAttribute('fill', '#666');
+            marker.appendChild(polygon);
+            defs.appendChild(marker);
+            svg.appendChild(defs);
+
+            // Draw edges first (so they appear behind nodes)
+            issues.forEach(issue => {
+                if (issue.depends_on && issue.depends_on.length > 0) {
+                    issue.depends_on.forEach(depNum => {
+                        if (positions.has(issue.number) && positions.has(depNum)) {
+                            const fromPos = positions.get(issue.number);
+                            const toPos = positions.get(depNum);
+
+                            // Draw line from dependent to dependency (A depends on B: arrow from A to B)
+                            const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+                            const startX = fromPos.x;
+                            const startY = fromPos.y + nodeHeight / 2;
+                            const endX = toPos.x + nodeWidth;
+                            const endY = toPos.y + nodeHeight / 2;
+
+                            // Curved path
+                            const midX = (startX + endX) / 2;
+                            path.setAttribute('d', 'M ' + startX + ' ' + startY + ' C ' + midX + ' ' + startY + ', ' + midX + ' ' + endY + ', ' + endX + ' ' + endY);
+                            path.setAttribute('fill', 'none');
+                            path.setAttribute('stroke', '#666');
+                            path.setAttribute('stroke-width', '2');
+                            path.setAttribute('marker-end', 'url(#arrowhead)');
+                            svg.appendChild(path);
+                        }
+                    });
+                }
+            });
+
+            // Draw nodes
+            issues.forEach(issue => {
+                if (!positions.has(issue.number)) return;
+                const pos = positions.get(issue.number);
+
+                // Node group
+                const g = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+                g.setAttribute('class', 'node');
+                g.setAttribute('transform', 'translate(' + pos.x + ',' + pos.y + ')');
+                g.style.cursor = 'pointer';
+                g.onclick = () => showIssueDetail(issue.number);
+
+                // Rectangle
+                const rect = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+                rect.setAttribute('width', nodeWidth);
+                rect.setAttribute('height', nodeHeight);
+                rect.setAttribute('rx', '6');
+                rect.setAttribute('fill', getStatusFill(issue.status));
+                rect.setAttribute('stroke', getStatusColor(issue.status));
+                rect.setAttribute('stroke-width', '2');
+                g.appendChild(rect);
+
+                // Issue number
+                const numText = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+                numText.setAttribute('x', '10');
+                numText.setAttribute('y', '18');
+                numText.setAttribute('fill', getStatusColor(issue.status));
+                numText.setAttribute('font-weight', 'bold');
+                numText.setAttribute('font-size', '12');
+                numText.textContent = '#' + issue.number;
+                g.appendChild(numText);
+
+                // Abbreviated title
+                const titleText = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+                titleText.setAttribute('x', '10');
+                titleText.setAttribute('y', '36');
+                titleText.setAttribute('fill', '#ccc');
+                titleText.setAttribute('font-size', '11');
+                titleText.textContent = abbreviateTitle(issue.title, 20);
+                g.appendChild(titleText);
+
+                svg.appendChild(g);
+            });
+        }
+
+        // Assign layers using topological sort (dependencies first)
+        function assignLayers(issues) {
+            const layers = new Map();
+            const issueMap = new Map();
+            issues.forEach(i => issueMap.set(i.number, i));
+
+            function getLayer(issueNum, visited) {
+                if (layers.has(issueNum)) return layers.get(issueNum);
+                if (visited.has(issueNum)) return 0; // Cycle detected
+
+                visited.add(issueNum);
+                const issue = issueMap.get(issueNum);
+                if (!issue) return 0;
+
+                let maxDepLayer = -1;
+                if (issue.depends_on && issue.depends_on.length > 0) {
+                    issue.depends_on.forEach(depNum => {
+                        if (issueMap.has(depNum)) {
+                            maxDepLayer = Math.max(maxDepLayer, getLayer(depNum, visited));
+                        }
+                    });
+                }
+
+                const layer = maxDepLayer + 1;
+                layers.set(issueNum, layer);
+                return layer;
+            }
+
+            issues.forEach(issue => {
+                if (!layers.has(issue.number)) {
+                    getLayer(issue.number, new Set());
+                }
+            });
+
+            return layers;
+        }
+
+        // Re-render graph when issues update if graph view is active
+        const originalUpdateIssues = updateIssues;
+        updateIssues = function(data) {
+            originalUpdateIssues(data);
+            if (currentView === 'graph') {
+                renderDependencyGraph();
+            }
+        };
     </script>
 </body>
 </html>`
