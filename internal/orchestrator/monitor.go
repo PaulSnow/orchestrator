@@ -778,6 +778,125 @@ func AllDoneGlobal(configs []*RunConfig, state *StateManager, numWorkers int) bo
 	return true
 }
 
+// detectConfigChanges compares old and new config, logging any changes.
+// Returns lists of added, modified, and removed issue numbers.
+func detectConfigChanges(oldCfg, newCfg *RunConfig) (added, modified, removed []int) {
+	oldIssues := make(map[int]*Issue)
+	for _, issue := range oldCfg.Issues {
+		oldIssues[issue.Number] = issue
+	}
+
+	newIssues := make(map[int]*Issue)
+	for _, issue := range newCfg.Issues {
+		newIssues[issue.Number] = issue
+	}
+
+	// Find added and modified issues
+	for num, newIssue := range newIssues {
+		oldIssue, exists := oldIssues[num]
+		if !exists {
+			added = append(added, num)
+		} else if issueChanged(oldIssue, newIssue) {
+			modified = append(modified, num)
+		}
+	}
+
+	// Find removed issues
+	for num := range oldIssues {
+		if _, exists := newIssues[num]; !exists {
+			removed = append(removed, num)
+		}
+	}
+
+	return added, modified, removed
+}
+
+// issueChanged checks if an issue has been modified (comparing relevant fields).
+func issueChanged(old, new *Issue) bool {
+	if old.Title != new.Title {
+		return true
+	}
+	if old.Priority != new.Priority {
+		return true
+	}
+	if old.Status != new.Status {
+		return true
+	}
+	if old.Wave != new.Wave {
+		return true
+	}
+	if old.Repo != new.Repo {
+		return true
+	}
+	if old.TaskType != new.TaskType {
+		return true
+	}
+	if old.PipelineStage != new.PipelineStage {
+		return true
+	}
+	if old.Description != new.Description {
+		return true
+	}
+	// Compare depends_on
+	if len(old.DependsOn) != len(new.DependsOn) {
+		return true
+	}
+	oldDeps := make(map[int]bool)
+	for _, d := range old.DependsOn {
+		oldDeps[d] = true
+	}
+	for _, d := range new.DependsOn {
+		if !oldDeps[d] {
+			return true
+		}
+	}
+	return false
+}
+
+// logConfigChanges logs detected config changes.
+func logConfigChanges(added, modified, removed []int) {
+	if len(added) > 0 {
+		LogMsg(fmt.Sprintf("[config] New issues detected: %v", added))
+	}
+	if len(modified) > 0 {
+		LogMsg(fmt.Sprintf("[config] Modified issues detected: %v", modified))
+	}
+	if len(removed) > 0 {
+		LogMsg(fmt.Sprintf("[config] Removed issues detected: %v", removed))
+	}
+}
+
+// mergeConfigState merges state from old config issues into new config.
+// This preserves status and assigned_worker for issues that were in progress.
+func mergeConfigState(oldCfg, newCfg *RunConfig, removed []int, state *StateManager) {
+	oldIssues := make(map[int]*Issue)
+	for _, issue := range oldCfg.Issues {
+		oldIssues[issue.Number] = issue
+	}
+
+	// For issues that exist in both configs, preserve runtime state if not explicitly changed
+	for _, newIssue := range newCfg.Issues {
+		oldIssue, exists := oldIssues[newIssue.Number]
+		if exists {
+			// Preserve in_progress status and worker assignment from old config
+			// unless the new config explicitly sets a different status
+			if oldIssue.Status == "in_progress" && newIssue.Status == "pending" {
+				newIssue.Status = oldIssue.Status
+				newIssue.AssignedWorker = oldIssue.AssignedWorker
+			}
+		}
+	}
+
+	// Handle removed issues gracefully - if a worker is working on a removed issue,
+	// we don't forcibly stop it, but log a warning
+	for _, num := range removed {
+		oldIssue := oldIssues[num]
+		if oldIssue != nil && oldIssue.Status == "in_progress" && oldIssue.AssignedWorker != nil {
+			LogMsg(fmt.Sprintf("[config] WARNING: Issue #%d removed but worker %d is still working on it", num, *oldIssue.AssignedWorker))
+		}
+	}
+}
+
 // RunMonitorLoop runs the main monitor loop.
 func RunMonitorLoop(cfg *RunConfig, state *StateManager, noDelay bool) {
 	LogMsg("+" + strings.Repeat("=", 40) + "+")
@@ -801,6 +920,37 @@ func RunMonitorLoop(cfg *RunConfig, state *StateManager, noDelay bool) {
 	for {
 		cycle++
 		LogMsg(fmt.Sprintf("==== Cycle %d starting ====", cycle))
+
+		// Hot-reload config at start of each cycle
+		freshCfg, err := LoadConfig(cfg.ConfigPath)
+		if err != nil {
+			LogMsg(fmt.Sprintf("[config] WARNING: Failed to reload config: %v (using previous config)", err))
+		} else {
+			// Validate the new config before using it
+			validStages := []string{"implement", "review", "test", "deploy"}
+			validationErrors := ValidateConfig(freshCfg, validStages)
+			if len(validationErrors) > 0 {
+				LogMsg(fmt.Sprintf("[config] WARNING: Config validation failed, using previous config:"))
+				for _, e := range validationErrors {
+					LogMsg(fmt.Sprintf("[config]   - %s", e))
+				}
+			} else {
+				// Detect and log changes
+				added, modified, removed := detectConfigChanges(cfg, freshCfg)
+				if len(added) > 0 || len(modified) > 0 || len(removed) > 0 {
+					logConfigChanges(added, modified, removed)
+					// Merge state for in-progress issues
+					mergeConfigState(cfg, freshCfg, removed, state)
+				}
+
+				// Preserve runtime settings that aren't in the config file
+				freshCfg.TmuxSession = cfg.TmuxSession
+				freshCfg.NumWorkers = cfg.NumWorkers
+
+				// Use the fresh config
+				cfg = freshCfg
+			}
+		}
 
 		// Collect snapshots
 		LogMsg("Collecting worker state...")
@@ -916,17 +1066,41 @@ func RunMonitorLoopGlobal(
 		cycle++
 		LogMsg(fmt.Sprintf("==== Cycle %d starting ====", cycle))
 
-		// Reload configs
+		// Hot-reload configs with validation and change detection
 		var freshConfigs []*RunConfig
+		validStages := []string{"implement", "review", "test", "deploy"}
 		for _, cfg := range configs {
 			fresh, err := LoadConfig(cfg.ConfigPath)
-			if err == nil {
-				fresh.TmuxSession = tmuxSession
-				fresh.NumWorkers = numWorkers
-				freshConfigs = append(freshConfigs, fresh)
-			} else {
+			if err != nil {
+				LogMsg(fmt.Sprintf("[config] WARNING: Failed to reload %s: %v (using previous config)", cfg.Project, err))
 				freshConfigs = append(freshConfigs, cfg)
+				continue
 			}
+
+			// Validate the new config
+			validationErrors := ValidateConfig(fresh, validStages)
+			if len(validationErrors) > 0 {
+				LogMsg(fmt.Sprintf("[config] WARNING: Config validation failed for %s, using previous config:", cfg.Project))
+				for _, e := range validationErrors {
+					LogMsg(fmt.Sprintf("[config]   - %s", e))
+				}
+				freshConfigs = append(freshConfigs, cfg)
+				continue
+			}
+
+			// Detect and log changes
+			added, modified, removed := detectConfigChanges(cfg, fresh)
+			if len(added) > 0 || len(modified) > 0 || len(removed) > 0 {
+				LogMsg(fmt.Sprintf("[config] Changes detected in %s:", cfg.Project))
+				logConfigChanges(added, modified, removed)
+				// Merge state for in-progress issues
+				mergeConfigState(cfg, fresh, removed, state)
+			}
+
+			// Preserve runtime settings
+			fresh.TmuxSession = tmuxSession
+			fresh.NumWorkers = numWorkers
+			freshConfigs = append(freshConfigs, fresh)
 		}
 		configs = freshConfigs
 
