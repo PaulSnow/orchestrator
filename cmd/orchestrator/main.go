@@ -313,6 +313,20 @@ OPTIONS`)
 		dashboardServer.Start()
 		fmt.Printf("  Dashboard: http://localhost:%d\n", *webPort)
 		defer dashboardServer.Stop()
+
+		// Register this orchestrator in the global registry
+		if !*dryRun {
+			if err := orchestrator.RegisterOrchestrator(
+				primaryCfg.Project,
+				*webPort,
+				primaryCfg.ConfigPath,
+				numWorkers,
+				len(primaryCfg.Issues),
+			); err != nil {
+				fmt.Printf("  Warning: Failed to register orchestrator: %v\n", err)
+			}
+			defer orchestrator.DeregisterOrchestrator()
+		}
 	}
 
 	// Run review gate unless skipped
@@ -566,6 +580,7 @@ OPTIONS`)
 
 		// Orchestration complete
 		events.SetPhase(orchestrator.PhaseCompleted, "all work done")
+		orchestrator.UpdateOrchestratorStatus(orchestrator.StatusCompleted)
 		fmt.Println()
 		fmt.Println("Orchestration complete.")
 	}
@@ -612,6 +627,18 @@ func cmdReview(args []string) {
 		dashboardServer.Start()
 		fmt.Printf("Dashboard: http://localhost:%d\n", *webPort)
 		fmt.Println()
+
+		// Register this orchestrator in the global registry
+		if err := orchestrator.RegisterOrchestrator(
+			primaryCfg.Project,
+			*webPort,
+			primaryCfg.ConfigPath,
+			0, // no workers in review mode
+			len(primaryCfg.Issues),
+		); err != nil {
+			fmt.Printf("Warning: Failed to register orchestrator: %v\n", err)
+		}
+		defer orchestrator.DeregisterOrchestrator()
 	}
 
 	// Run review
