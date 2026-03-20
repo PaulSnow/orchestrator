@@ -61,6 +61,9 @@ func (ds *DashboardServer) Start() error {
 	// Worker log endpoint
 	mux.HandleFunc("/api/log/", ds.handleWorkerLog)
 
+	// Issue detail endpoints
+	mux.HandleFunc("/api/issue/", ds.handleIssueDetail)
+
 	// Review gate endpoints (backward compatibility)
 	mux.HandleFunc("/api/status", ds.handleStatus)
 	mux.HandleFunc("/api/gate-result", ds.handleGateResult)
@@ -388,6 +391,265 @@ func (ds *DashboardServer) handleWorkerLog(w http.ResponseWriter, r *http.Reques
 	w.Write([]byte(logTail))
 }
 
+// handleIssueDetail handles issue detail API requests including sub-paths.
+// Routes: /api/issue/{number}, /api/issue/{number}/log, /api/issue/{number}/commits
+func (ds *DashboardServer) handleIssueDetail(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+
+	// Parse path: /api/issue/{number}[/{action}]
+	path := strings.TrimPrefix(r.URL.Path, "/api/issue/")
+	parts := strings.Split(path, "/")
+	if len(parts) == 0 || parts[0] == "" {
+		http.Error(w, "missing issue number", http.StatusBadRequest)
+		return
+	}
+
+	issueNumber, err := strconv.Atoi(parts[0])
+	if err != nil {
+		http.Error(w, "invalid issue number", http.StatusBadRequest)
+		return
+	}
+
+	// Find the issue
+	var issue *Issue
+	for _, i := range ds.cfg.Issues {
+		if i.Number == issueNumber {
+			issue = i
+			break
+		}
+	}
+	if issue == nil {
+		http.Error(w, "issue not found", http.StatusNotFound)
+		return
+	}
+
+	// Route to sub-handler based on action
+	action := ""
+	if len(parts) > 1 {
+		action = parts[1]
+	}
+
+	switch action {
+	case "log":
+		ds.handleIssueLogSSE(w, r, issue)
+	case "commits":
+		ds.handleIssueCommits(w, r, issue)
+	default:
+		ds.handleIssueInfo(w, r, issue)
+	}
+}
+
+// handleIssueInfo returns detailed information about a single issue.
+func (ds *DashboardServer) handleIssueInfo(w http.ResponseWriter, r *http.Request, issue *Issue) {
+	w.Header().Set("Content-Type", "application/json")
+
+	// Find assigned worker info
+	var workerInfo map[string]any
+	if issue.AssignedWorker != nil {
+		worker := ds.state.LoadWorker(*issue.AssignedWorker)
+		if worker != nil {
+			workerInfo = map[string]any{
+				"worker_id":   worker.WorkerID,
+				"status":      worker.Status,
+				"stage":       worker.Stage,
+				"retry_count": worker.RetryCount,
+				"started_at":  worker.StartedAt,
+				"branch":      worker.Branch,
+				"worktree":    worker.Worktree,
+			}
+		}
+	}
+
+	// Build dependency info with titles
+	var dependencies []map[string]any
+	for _, depNum := range issue.DependsOn {
+		depInfo := map[string]any{"number": depNum}
+		for _, dep := range ds.cfg.Issues {
+			if dep.Number == depNum {
+				depInfo["title"] = dep.Title
+				depInfo["status"] = dep.Status
+				break
+			}
+		}
+		dependencies = append(dependencies, depInfo)
+	}
+
+	// Get review info if available
+	var reviewInfo any
+	ds.mu.Lock()
+	rg := ds.reviewGate
+	ds.mu.Unlock()
+	if rg != nil {
+		if review, err := rg.LoadIssueReview(issue.Number); err == nil {
+			reviewInfo = review
+		}
+	}
+
+	// Get last error from worker if failed
+	var lastError string
+	var retryCount int
+	if issue.AssignedWorker != nil {
+		worker := ds.state.LoadWorker(*issue.AssignedWorker)
+		if worker != nil {
+			retryCount = worker.RetryCount
+			// Check for recent failure in log
+			if worker.Status == "failed" {
+				logTail := ds.state.GetLogTail(*issue.AssignedWorker, 10)
+				if logTail != "" {
+					lines := strings.Split(logTail, "\n")
+					for i := len(lines) - 1; i >= 0; i-- {
+						if strings.Contains(strings.ToLower(lines[i]), "error") ||
+							strings.Contains(strings.ToLower(lines[i]), "failed") {
+							lastError = strings.TrimSpace(lines[i])
+							break
+						}
+					}
+				}
+			}
+		}
+	}
+
+	response := map[string]any{
+		"number":         issue.Number,
+		"title":          issue.Title,
+		"description":    issue.Description,
+		"status":         issue.Status,
+		"wave":           issue.Wave,
+		"priority":       issue.Priority,
+		"pipeline_stage": issue.PipelineStage,
+		"task_type":      issue.TaskType,
+		"repo":           issue.Repo,
+		"depends_on":     dependencies,
+		"retry_count":    retryCount,
+	}
+
+	if workerInfo != nil {
+		response["worker"] = workerInfo
+	}
+	if reviewInfo != nil {
+		response["review"] = reviewInfo
+	}
+	if lastError != "" {
+		response["last_error"] = lastError
+	}
+
+	json.NewEncoder(w).Encode(response)
+}
+
+// handleIssueLogSSE streams the worker log for an issue via SSE.
+func (ds *DashboardServer) handleIssueLogSSE(w http.ResponseWriter, r *http.Request, issue *Issue) {
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "SSE not supported", http.StatusInternalServerError)
+		return
+	}
+
+	// If no worker assigned, send empty and close
+	if issue.AssignedWorker == nil {
+		fmt.Fprintf(w, "event: log\ndata: {\"log\":\"No worker assigned to this issue\"}\n\n")
+		flusher.Flush()
+		return
+	}
+
+	workerID := *issue.AssignedWorker
+
+	// Send initial log content
+	logContent := ds.state.GetLogTail(workerID, 500)
+	initialData := map[string]any{
+		"log":       logContent,
+		"worker_id": workerID,
+	}
+	data, _ := json.Marshal(initialData)
+	fmt.Fprintf(w, "event: log\ndata: %s\n\n", string(data))
+	flusher.Flush()
+
+	// Track last log size for incremental updates
+	lastSize, _ := ds.state.GetLogStats(workerID)
+
+	// Poll for updates
+	ticker := time.NewTicker(1 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-r.Context().Done():
+			return
+		case <-ticker.C:
+			currentSize, _ := ds.state.GetLogStats(workerID)
+			if currentSize > lastSize {
+				// Get new content (approximate by getting more lines)
+				newContent := ds.state.GetLogTail(workerID, 50)
+				updateData := map[string]any{
+					"log":       newContent,
+					"worker_id": workerID,
+					"append":    true,
+				}
+				data, _ := json.Marshal(updateData)
+				fmt.Fprintf(w, "event: log\ndata: %s\n\n", string(data))
+				flusher.Flush()
+				lastSize = currentSize
+			}
+		}
+	}
+}
+
+// handleIssueCommits returns commit history for the issue's branch.
+func (ds *DashboardServer) handleIssueCommits(w http.ResponseWriter, r *http.Request, issue *Issue) {
+	w.Header().Set("Content-Type", "application/json")
+
+	// Find worker to get worktree path
+	var worktreePath string
+	if issue.AssignedWorker != nil {
+		worker := ds.state.LoadWorker(*issue.AssignedWorker)
+		if worker != nil {
+			worktreePath = worker.Worktree
+		}
+	}
+
+	if worktreePath == "" {
+		json.NewEncoder(w).Encode(map[string]any{
+			"commits": []string{},
+			"error":   "No worktree available for this issue",
+		})
+		return
+	}
+
+	// Get commits
+	count := 20
+	if countParam := r.URL.Query().Get("count"); countParam != "" {
+		if c, err := strconv.Atoi(countParam); err == nil && c > 0 && c <= 100 {
+			count = c
+		}
+	}
+
+	commitsStr := GetRecentCommits(worktreePath, count, "")
+	var commits []map[string]string
+	if commitsStr != "" {
+		lines := strings.Split(commitsStr, "\n")
+		for _, line := range lines {
+			line = strings.TrimSpace(line)
+			if line == "" {
+				continue
+			}
+			parts := strings.SplitN(line, " ", 2)
+			commit := map[string]string{"hash": parts[0]}
+			if len(parts) > 1 {
+				commit["message"] = parts[1]
+			}
+			commits = append(commits, commit)
+		}
+	}
+
+	json.NewEncoder(w).Encode(map[string]any{
+		"commits":  commits,
+		"worktree": worktreePath,
+	})
+}
+
 // handleStatus returns basic status (backward compatibility).
 func (ds *DashboardServer) handleStatus(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
@@ -618,6 +880,209 @@ const dashboardHTML = `<!DOCTYPE html>
             50% { opacity: 0.5; }
         }
         .running { animation: pulse 2s infinite; }
+
+        /* Issue Detail Panel */
+        .issue-panel-overlay {
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: rgba(0, 0, 0, 0.5);
+            opacity: 0;
+            visibility: hidden;
+            transition: opacity 0.3s, visibility 0.3s;
+            z-index: 100;
+        }
+        .issue-panel-overlay.open {
+            opacity: 1;
+            visibility: visible;
+        }
+        .issue-panel {
+            position: fixed;
+            top: 0;
+            right: -600px;
+            width: 600px;
+            height: 100vh;
+            background: #16213e;
+            box-shadow: -4px 0 20px rgba(0, 0, 0, 0.5);
+            transition: right 0.3s ease;
+            z-index: 101;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        }
+        .issue-panel.open {
+            right: 0;
+        }
+        .issue-panel-header {
+            padding: 20px;
+            background: #0f1a2e;
+            border-bottom: 1px solid #0a0a0a;
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-start;
+        }
+        .issue-panel-header h2 {
+            margin: 0 0 8px 0;
+            color: #00d9ff;
+            font-size: 18px;
+        }
+        .issue-panel-header .issue-meta {
+            font-size: 12px;
+            color: #888;
+        }
+        .issue-panel-close {
+            background: none;
+            border: none;
+            color: #888;
+            font-size: 24px;
+            cursor: pointer;
+            padding: 0;
+            line-height: 1;
+        }
+        .issue-panel-close:hover {
+            color: #fff;
+        }
+        .issue-panel-body {
+            flex: 1;
+            overflow-y: auto;
+            padding: 20px;
+        }
+        .issue-panel-section {
+            margin-bottom: 20px;
+        }
+        .issue-panel-section h3 {
+            font-size: 12px;
+            text-transform: uppercase;
+            color: #888;
+            margin: 0 0 10px 0;
+            padding-bottom: 5px;
+            border-bottom: 1px solid #0a0a0a;
+        }
+        .issue-description {
+            font-size: 14px;
+            line-height: 1.6;
+            color: #ccc;
+            white-space: pre-wrap;
+        }
+        .issue-info-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 12px;
+        }
+        .issue-info-item {
+            background: #0f1a2e;
+            padding: 10px;
+            border-radius: 4px;
+        }
+        .issue-info-item .label {
+            font-size: 11px;
+            color: #666;
+            text-transform: uppercase;
+            margin-bottom: 4px;
+        }
+        .issue-info-item .value {
+            font-size: 14px;
+            color: #eee;
+        }
+        .dependency-link {
+            display: inline-block;
+            padding: 4px 8px;
+            margin: 2px;
+            background: #0a0a0a;
+            border-radius: 4px;
+            color: #00d9ff;
+            text-decoration: none;
+            font-size: 12px;
+            cursor: pointer;
+        }
+        .dependency-link:hover {
+            background: #1a2540;
+        }
+        .dependency-link.completed {
+            color: #00ff88;
+        }
+        .dependency-link.failed {
+            color: #ff4444;
+        }
+        .worker-info-card {
+            background: #0f1a2e;
+            padding: 12px;
+            border-radius: 4px;
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            cursor: pointer;
+        }
+        .worker-info-card:hover {
+            background: #1a2540;
+        }
+        .worker-info-card .worker-id {
+            font-size: 20px;
+            font-weight: bold;
+            color: #00d9ff;
+            min-width: 50px;
+        }
+        .worker-info-card .worker-details {
+            flex: 1;
+        }
+        .worker-info-card .worker-details .status {
+            font-size: 12px;
+            margin-bottom: 4px;
+        }
+        .worker-info-card .worker-details .stage {
+            font-size: 14px;
+            color: #ccc;
+        }
+        .issue-log-container {
+            background: #0a0a0a;
+            border-radius: 4px;
+            padding: 10px;
+            max-height: 300px;
+            overflow-y: auto;
+            font-family: monospace;
+            font-size: 11px;
+            line-height: 1.4;
+            color: #aaa;
+            white-space: pre-wrap;
+            word-break: break-all;
+        }
+        .issue-log-container.streaming {
+            border: 1px solid #00d9ff44;
+        }
+        .commit-list {
+            max-height: 200px;
+            overflow-y: auto;
+        }
+        .commit-item {
+            display: flex;
+            gap: 10px;
+            padding: 8px 0;
+            border-bottom: 1px solid #0a0a0a;
+            font-size: 12px;
+        }
+        .commit-item:last-child {
+            border-bottom: none;
+        }
+        .commit-hash {
+            font-family: monospace;
+            color: #00d9ff;
+            min-width: 70px;
+        }
+        .commit-message {
+            color: #ccc;
+            flex: 1;
+        }
+        .error-box {
+            background: #3d0a0a;
+            border: 1px solid #ff4444;
+            border-radius: 4px;
+            padding: 12px;
+            color: #ff8888;
+            font-size: 13px;
+        }
+        .issue-row { cursor: pointer; }
     </style>
 </head>
 <body>
@@ -696,6 +1161,65 @@ const dashboardHTML = `<!DOCTYPE html>
         <h2>Event Log</h2>
         <div class="event-log" id="event-log">
             Connecting...
+        </div>
+    </div>
+
+    <!-- Issue Detail Panel -->
+    <div class="issue-panel-overlay" id="issue-panel-overlay" onclick="closeIssuePanel()"></div>
+    <div class="issue-panel" id="issue-panel">
+        <div class="issue-panel-header">
+            <div>
+                <h2 id="panel-issue-title">Issue #123</h2>
+                <div class="issue-meta">
+                    <span id="panel-issue-status" class="status-badge"></span>
+                    <span id="panel-issue-meta"></span>
+                </div>
+            </div>
+            <button class="issue-panel-close" onclick="closeIssuePanel()">&times;</button>
+        </div>
+        <div class="issue-panel-body">
+            <div class="issue-panel-section" id="panel-description-section">
+                <h3>Description</h3>
+                <div class="issue-description" id="panel-description">No description available.</div>
+            </div>
+
+            <div class="issue-panel-section">
+                <h3>Details</h3>
+                <div class="issue-info-grid" id="panel-info-grid">
+                    <!-- Populated by JS -->
+                </div>
+            </div>
+
+            <div class="issue-panel-section" id="panel-dependencies-section" style="display: none;">
+                <h3>Dependencies</h3>
+                <div id="panel-dependencies">
+                    <!-- Populated by JS -->
+                </div>
+            </div>
+
+            <div class="issue-panel-section" id="panel-worker-section" style="display: none;">
+                <h3>Assigned Worker</h3>
+                <div id="panel-worker">
+                    <!-- Populated by JS -->
+                </div>
+            </div>
+
+            <div class="issue-panel-section" id="panel-error-section" style="display: none;">
+                <h3>Last Error</h3>
+                <div class="error-box" id="panel-error"></div>
+            </div>
+
+            <div class="issue-panel-section" id="panel-log-section" style="display: none;">
+                <h3>Live Log <span id="log-streaming-indicator" style="color: #00d9ff; font-size: 10px;"></span></h3>
+                <div class="issue-log-container" id="panel-log">Connecting...</div>
+            </div>
+
+            <div class="issue-panel-section" id="panel-commits-section" style="display: none;">
+                <h3>Commit History</h3>
+                <div class="commit-list" id="panel-commits">
+                    <!-- Populated by JS -->
+                </div>
+            </div>
         </div>
     </div>
 
@@ -781,7 +1305,7 @@ const dashboardHTML = `<!DOCTYPE html>
                 const statusClass = 'status-' + i.status;
                 const workerStr = i.assigned_worker ? 'Worker ' + i.assigned_worker : '--';
 
-                return '<div class="issue-row">' +
+                return '<div class="issue-row" onclick="openIssuePanel(' + i.number + ')">' +
                     '<span class="issue-number">#' + i.number + '</span>' +
                     '<span class="issue-title">' + (i.title || '') + '</span>' +
                     '<span class="issue-status"><span class="status-badge ' + statusClass + '">' + i.status + '</span></span>' +
@@ -930,6 +1454,216 @@ const dashboardHTML = `<!DOCTYPE html>
         evtSource.onerror = () => {
             addEvent('connection_error', null);
         };
+
+        // Issue panel state
+        let currentIssueNumber = null;
+        let logEventSource = null;
+
+        function openIssuePanel(issueNumber) {
+            currentIssueNumber = issueNumber;
+            document.getElementById('issue-panel-overlay').classList.add('open');
+            document.getElementById('issue-panel').classList.add('open');
+
+            // Load issue details
+            loadIssueDetails(issueNumber);
+        }
+
+        function closeIssuePanel() {
+            document.getElementById('issue-panel-overlay').classList.remove('open');
+            document.getElementById('issue-panel').classList.remove('open');
+            currentIssueNumber = null;
+
+            // Close log SSE connection
+            if (logEventSource) {
+                logEventSource.close();
+                logEventSource = null;
+            }
+        }
+
+        // Close panel on Escape key
+        document.addEventListener('keydown', (e) => {
+            if (e.key === 'Escape' && currentIssueNumber !== null) {
+                closeIssuePanel();
+            }
+        });
+
+        function loadIssueDetails(issueNumber) {
+            fetch('/api/issue/' + issueNumber)
+                .then(r => r.json())
+                .then(data => {
+                    renderIssuePanel(data);
+                    loadIssueCommits(issueNumber);
+                    startLogStream(issueNumber);
+                })
+                .catch(err => {
+                    console.error('Failed to load issue details:', err);
+                });
+        }
+
+        function renderIssuePanel(data) {
+            // Title and status
+            document.getElementById('panel-issue-title').textContent = '#' + data.number + ' ' + (data.title || '');
+            const statusEl = document.getElementById('panel-issue-status');
+            statusEl.textContent = data.status;
+            statusEl.className = 'status-badge status-' + data.status;
+
+            // Meta info
+            const metaParts = [];
+            if (data.wave) metaParts.push('Wave ' + data.wave);
+            if (data.priority) metaParts.push('Priority ' + data.priority);
+            if (data.task_type) metaParts.push(data.task_type);
+            document.getElementById('panel-issue-meta').textContent = metaParts.join(' | ');
+
+            // Description
+            const descSection = document.getElementById('panel-description-section');
+            if (data.description) {
+                descSection.style.display = 'block';
+                document.getElementById('panel-description').textContent = data.description;
+            } else {
+                descSection.style.display = 'none';
+            }
+
+            // Info grid
+            const infoGrid = document.getElementById('panel-info-grid');
+            infoGrid.innerHTML = '' +
+                '<div class="issue-info-item"><div class="label">Status</div><div class="value">' + data.status + '</div></div>' +
+                '<div class="issue-info-item"><div class="label">Wave</div><div class="value">' + (data.wave || '--') + '</div></div>' +
+                '<div class="issue-info-item"><div class="label">Priority</div><div class="value">' + (data.priority || '--') + '</div></div>' +
+                '<div class="issue-info-item"><div class="label">Pipeline Stage</div><div class="value">' + (data.pipeline_stage || 0) + '</div></div>' +
+                '<div class="issue-info-item"><div class="label">Task Type</div><div class="value">' + (data.task_type || 'implement') + '</div></div>' +
+                '<div class="issue-info-item"><div class="label">Retry Count</div><div class="value">' + (data.retry_count || 0) + '</div></div>';
+
+            // Dependencies
+            const depsSection = document.getElementById('panel-dependencies-section');
+            const depsContainer = document.getElementById('panel-dependencies');
+            if (data.depends_on && data.depends_on.length > 0) {
+                depsSection.style.display = 'block';
+                depsContainer.innerHTML = data.depends_on.map(dep => {
+                    const statusClass = dep.status === 'completed' ? 'completed' : (dep.status === 'failed' ? 'failed' : '');
+                    return '<span class="dependency-link ' + statusClass + '" onclick="openIssuePanel(' + dep.number + ')">#' + dep.number + (dep.title ? ' - ' + dep.title : '') + '</span>';
+                }).join('');
+            } else {
+                depsSection.style.display = 'none';
+            }
+
+            // Worker info
+            const workerSection = document.getElementById('panel-worker-section');
+            const workerContainer = document.getElementById('panel-worker');
+            if (data.worker) {
+                workerSection.style.display = 'block';
+                const w = data.worker;
+                const statusClass = 'status-' + (w.status || 'unknown');
+                workerContainer.innerHTML = '' +
+                    '<div class="worker-info-card">' +
+                    '  <div class="worker-id">W' + w.worker_id + '</div>' +
+                    '  <div class="worker-details">' +
+                    '    <div class="status"><span class="status-badge ' + statusClass + '">' + (w.status || 'unknown') + '</span></div>' +
+                    '    <div class="stage">Stage: ' + (w.stage || '--') + '</div>' +
+                    '    <div style="font-size: 11px; color: #666; margin-top: 4px;">Retries: ' + (w.retry_count || 0) + (w.started_at ? ' | Started: ' + formatTime(w.started_at) : '') + '</div>' +
+                    '  </div>' +
+                    '</div>';
+            } else {
+                workerSection.style.display = 'none';
+            }
+
+            // Error
+            const errorSection = document.getElementById('panel-error-section');
+            if (data.last_error) {
+                errorSection.style.display = 'block';
+                document.getElementById('panel-error').textContent = data.last_error;
+            } else {
+                errorSection.style.display = 'none';
+            }
+
+            // Show log section if worker is assigned
+            const logSection = document.getElementById('panel-log-section');
+            logSection.style.display = data.worker ? 'block' : 'none';
+        }
+
+        function startLogStream(issueNumber) {
+            // Close existing connection
+            if (logEventSource) {
+                logEventSource.close();
+            }
+
+            const logContainer = document.getElementById('panel-log');
+            const indicator = document.getElementById('log-streaming-indicator');
+            logContainer.textContent = 'Connecting...';
+            logContainer.classList.add('streaming');
+            indicator.textContent = '(streaming)';
+
+            logEventSource = new EventSource('/api/issue/' + issueNumber + '/log');
+
+            logEventSource.addEventListener('log', (e) => {
+                const data = JSON.parse(e.data);
+                if (data.append) {
+                    // Append new content and scroll to bottom
+                    logContainer.textContent += '\n' + data.log;
+                } else {
+                    // Replace content
+                    logContainer.textContent = data.log || 'No log content available.';
+                }
+                logContainer.scrollTop = logContainer.scrollHeight;
+            });
+
+            logEventSource.onerror = () => {
+                indicator.textContent = '(disconnected)';
+                logContainer.classList.remove('streaming');
+            };
+        }
+
+        function loadIssueCommits(issueNumber) {
+            const commitsSection = document.getElementById('panel-commits-section');
+            const commitsContainer = document.getElementById('panel-commits');
+
+            fetch('/api/issue/' + issueNumber + '/commits')
+                .then(r => r.json())
+                .then(data => {
+                    if (data.commits && data.commits.length > 0) {
+                        commitsSection.style.display = 'block';
+                        commitsContainer.innerHTML = data.commits.map(c =>
+                            '<div class="commit-item">' +
+                            '  <span class="commit-hash">' + c.hash + '</span>' +
+                            '  <span class="commit-message">' + (c.message || '') + '</span>' +
+                            '</div>'
+                        ).join('');
+                    } else {
+                        commitsSection.style.display = 'none';
+                    }
+                })
+                .catch(() => {
+                    commitsSection.style.display = 'none';
+                });
+        }
+
+        // Update panel if it's open and issue data changes
+        evtSource.addEventListener('issue_status', (e) => {
+            const data = JSON.parse(e.data);
+            if (currentIssueNumber === data.issue_number) {
+                loadIssueDetails(currentIssueNumber);
+            }
+        });
+
+        evtSource.addEventListener('worker_assigned', (e) => {
+            const data = JSON.parse(e.data);
+            if (currentIssueNumber === data.issue_number) {
+                loadIssueDetails(currentIssueNumber);
+            }
+        });
+
+        evtSource.addEventListener('worker_completed', (e) => {
+            const data = JSON.parse(e.data);
+            if (currentIssueNumber === data.issue_number) {
+                loadIssueDetails(currentIssueNumber);
+            }
+        });
+
+        evtSource.addEventListener('worker_failed', (e) => {
+            const data = JSON.parse(e.data);
+            if (currentIssueNumber === data.issue_number) {
+                loadIssueDetails(currentIssueNumber);
+            }
+        });
 
         // Periodic refresh for runtime display
         setInterval(() => {
