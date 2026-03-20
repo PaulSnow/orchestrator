@@ -65,7 +65,7 @@ OVERVIEW
 
 WORKFLOW
   1. Load issues from config file OR GitHub epic issue
-  2. Run review gate (optional) - validates issues are well-specified
+  2. Run review gate - validates issues are well-specified
   3. Create git worktrees for each assigned issue
   4. Launch Claude workers in tmux windows with issue-specific prompts
   5. Monitor progress, reassign completed workers to next issues
@@ -117,9 +117,6 @@ EXAMPLES
 
   # Review issues without launching (check if issues are well-specified)
   orchestrator launch --config config/issues.json --review-only
-
-  # Skip review gate (for re-runs after issues already reviewed)
-  orchestrator launch --config config/issues.json --skip-review
 
   # Run with 3 parallel workers instead of default 5
   orchestrator launch --config config/issues.json --workers 3
@@ -190,9 +187,8 @@ EPIC MODE REQUIREMENTS
     --worktrees <path>   Directory for creating worktrees
 
 REVIEW GATE
-  By default, issues are reviewed before work begins to ensure they are
-  well-specified. Use --skip-review for re-runs or --review-only to check
-  issues without launching workers.
+  Issues are always reviewed before work begins to ensure they are
+  well-specified. Use --review-only to check issues without launching workers.
 
 EXAMPLES
 
@@ -207,9 +203,6 @@ EXAMPLES
 
   # Review only - validate issues are ready
   orchestrator launch --config issues.json --review-only
-
-  # Quick re-run, skip review
-  orchestrator launch --config issues.json --skip-review
 
   # Custom worker count and session name
   orchestrator launch --config issues.json --workers 3 --session mywork
@@ -226,7 +219,6 @@ OPTIONS`)
 	repoPath := fs.String("repo", "", "Repository path (required with --epic)")
 	worktreeBase := fs.String("worktrees", "", "Worktree base directory (required with --epic)")
 	branchPrefix := fs.String("branch-prefix", "feature/issue-", "Git branch prefix for issue branches")
-	skipReview := fs.Bool("skip-review", false, "Skip the review gate (for re-runs)")
 	reviewOnly := fs.Bool("review-only", false, "Run review gate only, exit before launching workers")
 	postComments := fs.Bool("post-comments", false, "Post review findings as comments on failing issues")
 	webPort := fs.Int("web-port", 8123, "Web dashboard port (0 to disable)")
@@ -315,58 +307,56 @@ OPTIONS`)
 		defer dashboardServer.Stop()
 	}
 
-	// Run review gate unless skipped
-	if !*skipReview {
-		fmt.Println("-- Running Review Gate --")
-		events.SetPhase(orchestrator.PhaseReview, "starting review gate")
+	// Run review gate (mandatory)
+	fmt.Println("-- Running Review Gate --")
+	events.SetPhase(orchestrator.PhaseReview, "starting review gate")
 
-		reviewGate := orchestrator.NewReviewGate(primaryCfg, state)
-		reviewGate.EnsureReviewDirs()
+	reviewGate := orchestrator.NewReviewGate(primaryCfg, state)
+	reviewGate.EnsureReviewDirs()
 
-		// Connect dashboard to review gate
-		if dashboardServer != nil {
-			dashboardServer.SetReviewGate(reviewGate)
-		}
+	// Connect dashboard to review gate
+	if dashboardServer != nil {
+		dashboardServer.SetReviewGate(reviewGate)
+	}
 
-		// Run review
-		gateResult := reviewGate.ReviewAllIssues()
+	// Run review
+	gateResult := reviewGate.ReviewAllIssues()
 
-		// Post comments if enabled
-		if *postComments {
-			commentPoster := orchestrator.NewCommentPoster(primaryCfg, true)
-			for _, result := range gateResult.Results {
-				if !result.Passed {
-					commentPoster.PostReviewFailure(result)
-				}
+	// Post comments if enabled
+	if *postComments {
+		commentPoster := orchestrator.NewCommentPoster(primaryCfg, true)
+		for _, result := range gateResult.Results {
+			if !result.Passed {
+				commentPoster.PostReviewFailure(result)
 			}
 		}
+	}
 
-		// Handle review-only mode or failure
-		if *reviewOnly {
-			if gateResult.Passed {
-				reviewGate.PrintSuccessReport(gateResult)
-				fmt.Println("\nReview-only mode: exiting without launching workers.")
-				events.SetPhase(orchestrator.PhaseCompleted, "review only")
-			} else {
-				reviewGate.PrintFailureReport(gateResult)
-				events.SetPhase(orchestrator.PhaseFailed, "review gate failed")
-			}
-			if gateResult.Passed {
-				os.Exit(0)
-			} else {
-				os.Exit(1)
-			}
-		}
-
-		if !gateResult.Passed {
+	// Handle review-only mode or failure
+	if *reviewOnly {
+		if gateResult.Passed {
+			reviewGate.PrintSuccessReport(gateResult)
+			fmt.Println("\nReview-only mode: exiting without launching workers.")
+			events.SetPhase(orchestrator.PhaseCompleted, "review only")
+		} else {
 			reviewGate.PrintFailureReport(gateResult)
 			events.SetPhase(orchestrator.PhaseFailed, "review gate failed")
+		}
+		if gateResult.Passed {
+			os.Exit(0)
+		} else {
 			os.Exit(1)
 		}
-
-		reviewGate.PrintSuccessReport(gateResult)
-		fmt.Println()
 	}
+
+	if !gateResult.Passed {
+		reviewGate.PrintFailureReport(gateResult)
+		events.SetPhase(orchestrator.PhaseFailed, "review gate failed")
+		os.Exit(1)
+	}
+
+	reviewGate.PrintSuccessReport(gateResult)
+	fmt.Println()
 
 	// Transition to implementing phase
 	events.SetPhase(orchestrator.PhaseImplementing, "starting workers")
