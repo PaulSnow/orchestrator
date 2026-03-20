@@ -1,0 +1,11 @@
+[2024-01-15T09:00:00Z] Worker 2 starting on issue #43
+[2024-01-15T09:00:05Z] Creating worktree at /tmp/test-worktrees/issue-43
+[2024-01-15T09:00:10Z] Worktree created successfully
+[2024-01-15T09:00:15Z] Starting Claude Code session
+[2024-01-15T09:15:00Z] Implementation complete
+[2024-01-15T09:15:30Z] Creating commit: def5678 feat: add feature
+[2024-01-15T09:20:00Z] Running tests
+[2024-01-15T09:25:00Z] Tests passed
+[2024-01-15T09:25:30Z] Pushing branch
+[2024-01-15T09:26:00Z] Branch pushed successfully
+[2024-01-15T09:30:00Z] Worker idle, waiting for review feedback

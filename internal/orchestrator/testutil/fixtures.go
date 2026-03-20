@@ -12,7 +12,7 @@ var configFixtures embed.FS
 //go:embed testdata/state/workers/*.json
 var stateFixtures embed.FS
 
-//go:embed testdata/logs/*.log
+//go:embed testdata/logs/*.txt
 var logFixtures embed.FS
 
 // FixturesDir returns the absolute path to the testdata directory.

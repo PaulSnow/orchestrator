@@ -1,0 +1,9 @@
+[2024-01-15T10:30:00Z] Worker 1 starting on issue #42
+[2024-01-15T10:30:05Z] Creating worktree at /tmp/test-worktrees/issue-42
+[2024-01-15T10:30:10Z] Worktree created successfully
+[2024-01-15T10:30:15Z] Starting Claude Code session
+[2024-01-15T10:35:00Z] Reading issue description
+[2024-01-15T10:35:30Z] Analyzing codebase structure
+[2024-01-15T10:40:00Z] Implementing feature
+[2024-01-15T10:44:00Z] Creating commit: abc1234 feat: initial implementation
+[2024-01-15T10:45:00Z] Continuing implementation...
