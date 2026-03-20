@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
 	"os/exec"
 	"runtime"
 	"strconv"
@@ -64,6 +65,11 @@ func (ds *DashboardServer) Start() error {
 	// Review gate endpoints (backward compatibility)
 	mux.HandleFunc("/api/status", ds.handleStatus)
 	mux.HandleFunc("/api/gate-result", ds.handleGateResult)
+
+	// Issue CRUD endpoints
+	mux.HandleFunc("/api/issues/create", ds.handleCreateIssue)
+	mux.HandleFunc("/api/issues/update", ds.handleUpdateIssue)
+	mux.HandleFunc("/api/issues/delete", ds.handleDeleteIssue)
 
 	// Dashboard HTML
 	mux.HandleFunc("/", ds.handleDashboard)
@@ -433,6 +439,410 @@ func (ds *DashboardServer) handleGateResult(w http.ResponseWriter, r *http.Reque
 	json.NewEncoder(w).Encode(result)
 }
 
+// handleCreateIssue handles creating a new issue.
+func (ds *DashboardServer) handleCreateIssue(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
+	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+
+	if r.Method == "OPTIONS" {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+
+	if r.Method != "POST" {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req struct {
+		Number      int    `json:"number"`
+		Title       string `json:"title"`
+		Description string `json:"description"`
+		Priority    int    `json:"priority"`
+		Wave        int    `json:"wave"`
+		DependsOn   []int  `json:"depends_on"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		json.NewEncoder(w).Encode(map[string]string{"error": "Invalid request body"})
+		return
+	}
+
+	// Validation
+	if req.Number <= 0 {
+		json.NewEncoder(w).Encode(map[string]string{"error": "Issue number is required and must be positive"})
+		return
+	}
+	if req.Title == "" {
+		json.NewEncoder(w).Encode(map[string]string{"error": "Title is required"})
+		return
+	}
+
+	// Check for duplicate number
+	ds.mu.Lock()
+	for _, issue := range ds.cfg.Issues {
+		if issue.Number == req.Number {
+			ds.mu.Unlock()
+			json.NewEncoder(w).Encode(map[string]string{"error": "Issue number already exists"})
+			return
+		}
+	}
+
+	// Validate dependencies exist
+	issueNumbers := make(map[int]bool)
+	for _, issue := range ds.cfg.Issues {
+		issueNumbers[issue.Number] = true
+	}
+	for _, dep := range req.DependsOn {
+		if !issueNumbers[dep] {
+			ds.mu.Unlock()
+			json.NewEncoder(w).Encode(map[string]string{"error": fmt.Sprintf("Dependency #%d does not exist", dep)})
+			return
+		}
+	}
+
+	// Create new issue
+	issue := &Issue{
+		Number:      req.Number,
+		Title:       req.Title,
+		Description: req.Description,
+		Priority:    req.Priority,
+		Wave:        req.Wave,
+		DependsOn:   req.DependsOn,
+		Status:      "pending",
+	}
+	issue.Init()
+
+	ds.cfg.Issues = append(ds.cfg.Issues, issue)
+	ds.mu.Unlock()
+
+	// Save config to file
+	if err := ds.saveConfig(); err != nil {
+		json.NewEncoder(w).Encode(map[string]string{"error": fmt.Sprintf("Failed to save config: %v", err)})
+		return
+	}
+
+	// Broadcast update
+	ds.events.EmitProgressUpdate(ds.cfg)
+
+	json.NewEncoder(w).Encode(map[string]any{
+		"success": true,
+		"issue":   issue,
+	})
+}
+
+// handleUpdateIssue handles updating an existing issue.
+func (ds *DashboardServer) handleUpdateIssue(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
+	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+
+	if r.Method == "OPTIONS" {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+
+	if r.Method != "POST" {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req struct {
+		Number      int    `json:"number"`
+		Title       string `json:"title"`
+		Description string `json:"description"`
+		Priority    int    `json:"priority"`
+		Wave        int    `json:"wave"`
+		DependsOn   []int  `json:"depends_on"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		json.NewEncoder(w).Encode(map[string]string{"error": "Invalid request body"})
+		return
+	}
+
+	// Validation
+	if req.Title == "" {
+		json.NewEncoder(w).Encode(map[string]string{"error": "Title is required"})
+		return
+	}
+
+	ds.mu.Lock()
+	var found *Issue
+	for _, issue := range ds.cfg.Issues {
+		if issue.Number == req.Number {
+			found = issue
+			break
+		}
+	}
+
+	if found == nil {
+		ds.mu.Unlock()
+		json.NewEncoder(w).Encode(map[string]string{"error": "Issue not found"})
+		return
+	}
+
+	// Validate dependencies exist and no self-dependency
+	issueNumbers := make(map[int]bool)
+	for _, issue := range ds.cfg.Issues {
+		issueNumbers[issue.Number] = true
+	}
+	for _, dep := range req.DependsOn {
+		if dep == req.Number {
+			ds.mu.Unlock()
+			json.NewEncoder(w).Encode(map[string]string{"error": "Issue cannot depend on itself"})
+			return
+		}
+		if !issueNumbers[dep] {
+			ds.mu.Unlock()
+			json.NewEncoder(w).Encode(map[string]string{"error": fmt.Sprintf("Dependency #%d does not exist", dep)})
+			return
+		}
+	}
+
+	// Update issue
+	found.Title = req.Title
+	found.Description = req.Description
+	found.Priority = req.Priority
+	found.Wave = req.Wave
+	found.DependsOn = req.DependsOn
+	ds.mu.Unlock()
+
+	// Save config to file
+	if err := ds.saveConfig(); err != nil {
+		json.NewEncoder(w).Encode(map[string]string{"error": fmt.Sprintf("Failed to save config: %v", err)})
+		return
+	}
+
+	// Broadcast update
+	ds.events.EmitIssueStatus(found.Number, found.Title, found.Status, found.AssignedWorker)
+
+	json.NewEncoder(w).Encode(map[string]any{
+		"success": true,
+		"issue":   found,
+	})
+}
+
+// handleDeleteIssue handles deleting an issue.
+func (ds *DashboardServer) handleDeleteIssue(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
+	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+
+	if r.Method == "OPTIONS" {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+
+	if r.Method != "POST" {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req struct {
+		Number int `json:"number"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		json.NewEncoder(w).Encode(map[string]string{"error": "Invalid request body"})
+		return
+	}
+
+	ds.mu.Lock()
+	var foundIdx = -1
+	var found *Issue
+	for idx, issue := range ds.cfg.Issues {
+		if issue.Number == req.Number {
+			foundIdx = idx
+			found = issue
+			break
+		}
+	}
+
+	if foundIdx == -1 {
+		ds.mu.Unlock()
+		json.NewEncoder(w).Encode(map[string]string{"error": "Issue not found"})
+		return
+	}
+
+	// Only allow deleting pending issues
+	if found.Status != "pending" {
+		ds.mu.Unlock()
+		json.NewEncoder(w).Encode(map[string]string{"error": "Can only delete pending issues"})
+		return
+	}
+
+	// Check if any other issues depend on this one
+	for _, issue := range ds.cfg.Issues {
+		for _, dep := range issue.DependsOn {
+			if dep == req.Number {
+				ds.mu.Unlock()
+				json.NewEncoder(w).Encode(map[string]string{
+					"error": fmt.Sprintf("Cannot delete: issue #%d depends on this issue", issue.Number),
+				})
+				return
+			}
+		}
+	}
+
+	// Remove the issue
+	ds.cfg.Issues = append(ds.cfg.Issues[:foundIdx], ds.cfg.Issues[foundIdx+1:]...)
+	ds.mu.Unlock()
+
+	// Save config to file
+	if err := ds.saveConfig(); err != nil {
+		json.NewEncoder(w).Encode(map[string]string{"error": fmt.Sprintf("Failed to save config: %v", err)})
+		return
+	}
+
+	// Broadcast update
+	ds.events.EmitProgressUpdate(ds.cfg)
+
+	json.NewEncoder(w).Encode(map[string]any{
+		"success": true,
+	})
+}
+
+// saveConfig saves the current configuration to its source file.
+func (ds *DashboardServer) saveConfig() error {
+	if ds.cfg.ConfigPath == "" {
+		return fmt.Errorf("no config path set")
+	}
+
+	// Build the config structure to save
+	configData := map[string]any{
+		"project":            ds.cfg.Project,
+		"num_workers":        ds.cfg.NumWorkers,
+		"cycle_interval":     ds.cfg.CycleInterval,
+		"max_retries":        ds.cfg.MaxRetries,
+		"stall_timeout":      ds.cfg.StallTimeout,
+		"wall_clock_timeout": ds.cfg.WallClockTimeout,
+		"prompt_type":        ds.cfg.PromptType,
+		"pipeline":           ds.cfg.Pipeline,
+		"tmux_session":       ds.cfg.TmuxSession,
+		"stagger_delay":      ds.cfg.StaggerDelay,
+	}
+
+	// Convert repos
+	if len(ds.cfg.Repos) > 0 {
+		repos := make(map[string]any)
+		for name, repo := range ds.cfg.Repos {
+			repos[name] = map[string]any{
+				"path":           repo.Path,
+				"default_branch": repo.DefaultBranch,
+				"worktree_base":  repo.WorktreeBase,
+				"branch_prefix":  repo.BranchPrefix,
+				"platform":       repo.Platform,
+			}
+		}
+		configData["repos"] = repos
+	}
+
+	// Convert issues
+	issues := make([]map[string]any, 0, len(ds.cfg.Issues))
+	for _, issue := range ds.cfg.Issues {
+		issueData := map[string]any{
+			"number":   issue.Number,
+			"title":    issue.Title,
+			"status":   issue.Status,
+			"priority": issue.Priority,
+			"wave":     issue.Wave,
+		}
+		if issue.Description != "" {
+			issueData["description"] = issue.Description
+		}
+		if len(issue.DependsOn) > 0 {
+			issueData["depends_on"] = issue.DependsOn
+		}
+		if issue.Repo != "" {
+			issueData["repo"] = issue.Repo
+		}
+		if issue.TaskType != "" && issue.TaskType != "implement" {
+			issueData["task_type"] = issue.TaskType
+		}
+		if issue.PipelineStage != 0 {
+			issueData["pipeline_stage"] = issue.PipelineStage
+		}
+		if issue.AssignedWorker != nil {
+			issueData["assigned_worker"] = *issue.AssignedWorker
+		}
+		issues = append(issues, issueData)
+	}
+	configData["issues"] = issues
+
+	// Add project context if present
+	if ds.cfg.ProjectContext != nil {
+		pc := map[string]any{}
+		if ds.cfg.ProjectContext.Language != "" {
+			pc["language"] = ds.cfg.ProjectContext.Language
+		}
+		if ds.cfg.ProjectContext.BuildCommand != "" {
+			pc["build_command"] = ds.cfg.ProjectContext.BuildCommand
+		}
+		if ds.cfg.ProjectContext.TestCommand != "" {
+			pc["test_command"] = ds.cfg.ProjectContext.TestCommand
+		}
+		if ds.cfg.ProjectContext.CommitPrefix != "" {
+			pc["commit_prefix"] = ds.cfg.ProjectContext.CommitPrefix
+		}
+		if len(ds.cfg.ProjectContext.SafetyRules) > 0 {
+			pc["safety_rules"] = ds.cfg.ProjectContext.SafetyRules
+		}
+		if len(ds.cfg.ProjectContext.KeyFiles) > 0 {
+			pc["key_files"] = ds.cfg.ProjectContext.KeyFiles
+		}
+		if len(pc) > 0 {
+			configData["project_context"] = pc
+		}
+	}
+
+	// Add review config if present
+	if ds.cfg.Review != nil {
+		configData["review"] = map[string]any{
+			"enabled":          ds.cfg.Review.Enabled,
+			"parallel_workers": ds.cfg.Review.ParallelWorkers,
+			"session_timeout":  ds.cfg.Review.SessionTimeout,
+			"post_comments":    ds.cfg.Review.PostComments,
+			"strict_mode":      ds.cfg.Review.StrictMode,
+		}
+	}
+
+	// Add web config if present
+	if ds.cfg.Web != nil {
+		configData["web"] = map[string]any{
+			"enabled": ds.cfg.Web.Enabled,
+			"port":    ds.cfg.Web.Port,
+			"host":    ds.cfg.Web.Host,
+		}
+	}
+
+	// Add initial assignments if present
+	if len(ds.cfg.InitialAssignments) > 0 {
+		assignments := make(map[string]int)
+		for k, v := range ds.cfg.InitialAssignments {
+			assignments[strconv.Itoa(k)] = v
+		}
+		configData["initial_assignments"] = assignments
+	}
+
+	// Marshal with indentation
+	data, err := json.MarshalIndent(configData, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshaling config: %w", err)
+	}
+
+	// Write to file
+	if err := os.WriteFile(ds.cfg.ConfigPath, data, 0644); err != nil {
+		return fmt.Errorf("writing config file: %w", err)
+	}
+
+	return nil
+}
+
 // handleDashboard serves the HTML dashboard.
 func (ds *DashboardServer) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html")
@@ -618,6 +1028,213 @@ const dashboardHTML = `<!DOCTYPE html>
             50% { opacity: 0.5; }
         }
         .running { animation: pulse 2s infinite; }
+
+        /* Modal styles */
+        .modal-overlay {
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: rgba(0, 0, 0, 0.7);
+            z-index: 1000;
+            align-items: center;
+            justify-content: center;
+        }
+        .modal-overlay.active { display: flex; }
+        .modal {
+            background: #16213e;
+            border-radius: 12px;
+            padding: 24px;
+            width: 500px;
+            max-width: 90%;
+            max-height: 90vh;
+            overflow-y: auto;
+        }
+        .modal h2 {
+            color: #00d9ff;
+            margin: 0 0 20px 0;
+            font-size: 18px;
+            text-transform: none;
+        }
+        .form-group {
+            margin-bottom: 16px;
+        }
+        .form-group label {
+            display: block;
+            margin-bottom: 6px;
+            color: #aaa;
+            font-size: 12px;
+            text-transform: uppercase;
+        }
+        .form-group input,
+        .form-group textarea,
+        .form-group select {
+            width: 100%;
+            padding: 10px 12px;
+            background: #0a0a0a;
+            border: 1px solid #333;
+            border-radius: 6px;
+            color: #eee;
+            font-size: 14px;
+            font-family: inherit;
+        }
+        .form-group input:focus,
+        .form-group textarea:focus,
+        .form-group select:focus {
+            outline: none;
+            border-color: #00d9ff;
+        }
+        .form-group textarea {
+            min-height: 100px;
+            resize: vertical;
+        }
+        .form-row {
+            display: flex;
+            gap: 16px;
+        }
+        .form-row .form-group { flex: 1; }
+        .form-actions {
+            display: flex;
+            gap: 12px;
+            justify-content: flex-end;
+            margin-top: 24px;
+        }
+        .btn {
+            padding: 10px 20px;
+            border-radius: 6px;
+            border: none;
+            font-size: 14px;
+            font-weight: bold;
+            cursor: pointer;
+            transition: opacity 0.2s;
+        }
+        .btn:hover { opacity: 0.8; }
+        .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+        .btn-primary { background: #00d9ff; color: #000; }
+        .btn-secondary { background: #333; color: #eee; }
+        .btn-danger { background: #ff4444; color: #fff; }
+        .btn-small {
+            padding: 4px 8px;
+            font-size: 11px;
+            margin-left: 8px;
+        }
+        .form-error {
+            color: #ff4444;
+            font-size: 12px;
+            margin-top: 4px;
+        }
+        .form-message {
+            padding: 12px;
+            border-radius: 6px;
+            margin-bottom: 16px;
+            font-size: 13px;
+        }
+        .form-message.error { background: #ff444422; color: #ff8888; }
+        .form-message.success { background: #00ff8822; color: #88ff88; }
+
+        /* Dependency multi-select */
+        .dep-select-container {
+            position: relative;
+        }
+        .dep-select-input {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 6px;
+            padding: 8px;
+            background: #0a0a0a;
+            border: 1px solid #333;
+            border-radius: 6px;
+            min-height: 42px;
+            cursor: text;
+        }
+        .dep-select-input:focus-within { border-color: #00d9ff; }
+        .dep-tag {
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+            padding: 4px 8px;
+            background: #00d9ff22;
+            color: #00d9ff;
+            border-radius: 4px;
+            font-size: 12px;
+        }
+        .dep-tag-remove {
+            cursor: pointer;
+            font-weight: bold;
+            opacity: 0.7;
+        }
+        .dep-tag-remove:hover { opacity: 1; }
+        .dep-select-text {
+            border: none;
+            background: transparent;
+            color: #eee;
+            font-size: 14px;
+            flex: 1;
+            min-width: 100px;
+            outline: none;
+        }
+        .dep-dropdown {
+            display: none;
+            position: absolute;
+            top: 100%;
+            left: 0;
+            right: 0;
+            background: #0f1a2e;
+            border: 1px solid #333;
+            border-radius: 6px;
+            margin-top: 4px;
+            max-height: 200px;
+            overflow-y: auto;
+            z-index: 10;
+        }
+        .dep-dropdown.active { display: block; }
+        .dep-option {
+            padding: 8px 12px;
+            cursor: pointer;
+            font-size: 13px;
+        }
+        .dep-option:hover { background: #1a2540; }
+        .dep-option.selected { background: #00d9ff22; }
+
+        /* Add button in header */
+        .add-issue-btn {
+            background: #00d9ff;
+            color: #000;
+            border: none;
+            padding: 8px 16px;
+            border-radius: 6px;
+            font-size: 13px;
+            font-weight: bold;
+            cursor: pointer;
+        }
+        .add-issue-btn:hover { opacity: 0.8; }
+
+        /* Issue row actions */
+        .issue-actions {
+            display: flex;
+            gap: 4px;
+            min-width: 80px;
+        }
+
+        /* Section header with button */
+        .section-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin: 20px 0 10px 0;
+        }
+        .section-header h2 { margin: 0; }
+
+        /* Confirm dialog */
+        .confirm-dialog {
+            text-align: center;
+        }
+        .confirm-dialog p {
+            margin: 0 0 20px 0;
+            color: #ccc;
+        }
     </style>
 </head>
 <body>
@@ -688,7 +1305,10 @@ const dashboardHTML = `<!DOCTYPE html>
             </table>
         </div>
 
-        <h2>Issues</h2>
+        <div class="section-header">
+            <h2>Issues</h2>
+            <button class="add-issue-btn" onclick="openIssueForm()">+ Add Issue</button>
+        </div>
         <div class="issues-section" id="issues-list">
             Loading...
         </div>
@@ -696,6 +1316,76 @@ const dashboardHTML = `<!DOCTYPE html>
         <h2>Event Log</h2>
         <div class="event-log" id="event-log">
             Connecting...
+        </div>
+    </div>
+
+    <!-- Issue Form Modal -->
+    <div class="modal-overlay" id="issue-modal">
+        <div class="modal">
+            <h2 id="modal-title">Add Issue</h2>
+            <div id="form-message" class="form-message" style="display: none;"></div>
+            <form id="issue-form" onsubmit="submitIssueForm(event)">
+                <input type="hidden" id="form-mode" value="create">
+                <input type="hidden" id="form-original-number" value="">
+
+                <div class="form-row">
+                    <div class="form-group">
+                        <label for="issue-number">Issue Number *</label>
+                        <input type="number" id="issue-number" min="1" required>
+                    </div>
+                    <div class="form-group">
+                        <label for="issue-priority">Priority</label>
+                        <input type="number" id="issue-priority" min="1" value="1">
+                    </div>
+                    <div class="form-group">
+                        <label for="issue-wave">Wave</label>
+                        <input type="number" id="issue-wave" min="1" value="1">
+                    </div>
+                </div>
+
+                <div class="form-group">
+                    <label for="issue-title">Title *</label>
+                    <input type="text" id="issue-title" required placeholder="Brief description of the issue">
+                </div>
+
+                <div class="form-group">
+                    <label for="issue-description">Description</label>
+                    <textarea id="issue-description" placeholder="Detailed description, acceptance criteria, etc."></textarea>
+                </div>
+
+                <div class="form-group">
+                    <label>Dependencies</label>
+                    <div class="dep-select-container">
+                        <div class="dep-select-input" onclick="focusDepInput()">
+                            <span id="dep-tags"></span>
+                            <input type="text" class="dep-select-text" id="dep-input"
+                                   placeholder="Type to search issues..."
+                                   onfocus="showDepDropdown()"
+                                   onblur="hideDepDropdown()"
+                                   oninput="filterDepOptions()">
+                        </div>
+                        <div class="dep-dropdown" id="dep-dropdown"></div>
+                    </div>
+                    <input type="hidden" id="issue-depends-on" value="[]">
+                </div>
+
+                <div class="form-actions">
+                    <button type="button" class="btn btn-secondary" onclick="closeIssueForm()">Cancel</button>
+                    <button type="submit" class="btn btn-primary" id="submit-btn">Save Issue</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <!-- Confirm Delete Modal -->
+    <div class="modal-overlay" id="confirm-modal">
+        <div class="modal confirm-dialog">
+            <h2>Delete Issue</h2>
+            <p id="confirm-message">Are you sure you want to delete this issue?</p>
+            <div class="form-actions" style="justify-content: center;">
+                <button type="button" class="btn btn-secondary" onclick="closeConfirmModal()">Cancel</button>
+                <button type="button" class="btn btn-danger" id="confirm-delete-btn">Delete</button>
+            </div>
         </div>
     </div>
 
@@ -780,12 +1470,18 @@ const dashboardHTML = `<!DOCTYPE html>
             container.innerHTML = issues.map(i => {
                 const statusClass = 'status-' + i.status;
                 const workerStr = i.assigned_worker ? 'Worker ' + i.assigned_worker : '--';
+                const canDelete = i.status === 'pending';
+                const depsStr = i.depends_on && i.depends_on.length > 0 ? ' [deps: ' + i.depends_on.map(d => '#' + d).join(', ') + ']' : '';
 
                 return '<div class="issue-row">' +
                     '<span class="issue-number">#' + i.number + '</span>' +
-                    '<span class="issue-title">' + (i.title || '') + '</span>' +
+                    '<span class="issue-title">' + (i.title || '') + depsStr + '</span>' +
                     '<span class="issue-status"><span class="status-badge ' + statusClass + '">' + i.status + '</span></span>' +
                     '<span class="issue-worker">' + workerStr + '</span>' +
+                    '<span class="issue-actions">' +
+                        '<button class="btn btn-secondary btn-small" onclick="editIssue(' + i.number + ')">Edit</button>' +
+                        (canDelete ? '<button class="btn btn-danger btn-small" onclick="confirmDeleteIssue(' + i.number + ')">Del</button>' : '') +
+                    '</span>' +
                 '</div>';
             }).join('');
         }
@@ -939,6 +1635,245 @@ const dashboardHTML = `<!DOCTYPE html>
                 document.getElementById('runtime').textContent = 'Running ' + formatElapsed(elapsed);
             }
         }, 1000);
+
+        // Issue form handling
+        let selectedDeps = [];
+        let deleteIssueNumber = null;
+
+        function openIssueForm(issue = null) {
+            const modal = document.getElementById('issue-modal');
+            const title = document.getElementById('modal-title');
+            const mode = document.getElementById('form-mode');
+            const origNumber = document.getElementById('form-original-number');
+            const numberInput = document.getElementById('issue-number');
+
+            // Reset form
+            document.getElementById('issue-form').reset();
+            document.getElementById('form-message').style.display = 'none';
+            selectedDeps = [];
+            updateDepTags();
+
+            if (issue) {
+                // Edit mode
+                title.textContent = 'Edit Issue #' + issue.number;
+                mode.value = 'update';
+                origNumber.value = issue.number;
+                numberInput.value = issue.number;
+                numberInput.readOnly = true;
+                document.getElementById('issue-title').value = issue.title || '';
+                document.getElementById('issue-description').value = issue.description || '';
+                document.getElementById('issue-priority').value = issue.priority || 1;
+                document.getElementById('issue-wave').value = issue.wave || 1;
+                selectedDeps = issue.depends_on || [];
+                updateDepTags();
+            } else {
+                // Create mode
+                title.textContent = 'Add Issue';
+                mode.value = 'create';
+                origNumber.value = '';
+                numberInput.readOnly = false;
+                // Suggest next issue number
+                const maxNum = issues.reduce((max, i) => Math.max(max, i.number), 0);
+                numberInput.value = maxNum + 1;
+            }
+
+            modal.classList.add('active');
+            if (!issue) numberInput.focus();
+        }
+
+        function closeIssueForm() {
+            document.getElementById('issue-modal').classList.remove('active');
+        }
+
+        function editIssue(number) {
+            const issue = issues.find(i => i.number === number);
+            if (issue) openIssueForm(issue);
+        }
+
+        function showFormMessage(msg, isError) {
+            const el = document.getElementById('form-message');
+            el.textContent = msg;
+            el.className = 'form-message ' + (isError ? 'error' : 'success');
+            el.style.display = 'block';
+        }
+
+        async function submitIssueForm(event) {
+            event.preventDefault();
+
+            const mode = document.getElementById('form-mode').value;
+            const data = {
+                number: parseInt(document.getElementById('issue-number').value),
+                title: document.getElementById('issue-title').value.trim(),
+                description: document.getElementById('issue-description').value.trim(),
+                priority: parseInt(document.getElementById('issue-priority').value) || 1,
+                wave: parseInt(document.getElementById('issue-wave').value) || 1,
+                depends_on: selectedDeps
+            };
+
+            // Validation
+            if (!data.number || data.number <= 0) {
+                showFormMessage('Issue number is required and must be positive', true);
+                return;
+            }
+            if (!data.title) {
+                showFormMessage('Title is required', true);
+                return;
+            }
+
+            const endpoint = mode === 'create' ? '/api/issues/create' : '/api/issues/update';
+            const btn = document.getElementById('submit-btn');
+            btn.disabled = true;
+            btn.textContent = 'Saving...';
+
+            try {
+                const resp = await fetch(endpoint, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(data)
+                });
+                const result = await resp.json();
+
+                if (result.error) {
+                    showFormMessage(result.error, true);
+                } else {
+                    closeIssueForm();
+                    // Refresh issues
+                    fetch('/api/issues').then(r => r.json()).then(updateIssues);
+                    fetch('/api/progress').then(r => r.json()).then(updateProgress);
+                    addEvent(mode === 'create' ? 'issue_created' : 'issue_updated', { issue_number: data.number });
+                }
+            } catch (err) {
+                showFormMessage('Network error: ' + err.message, true);
+            } finally {
+                btn.disabled = false;
+                btn.textContent = 'Save Issue';
+            }
+        }
+
+        // Delete confirmation
+        function confirmDeleteIssue(number) {
+            deleteIssueNumber = number;
+            const issue = issues.find(i => i.number === number);
+            document.getElementById('confirm-message').textContent =
+                'Are you sure you want to delete issue #' + number + ' (' + (issue?.title || 'Untitled') + ')?';
+            document.getElementById('confirm-modal').classList.add('active');
+        }
+
+        function closeConfirmModal() {
+            document.getElementById('confirm-modal').classList.remove('active');
+            deleteIssueNumber = null;
+        }
+
+        document.getElementById('confirm-delete-btn').onclick = async function() {
+            if (!deleteIssueNumber) return;
+
+            try {
+                const resp = await fetch('/api/issues/delete', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ number: deleteIssueNumber })
+                });
+                const result = await resp.json();
+
+                if (result.error) {
+                    alert('Error: ' + result.error);
+                } else {
+                    addEvent('issue_deleted', { issue_number: deleteIssueNumber });
+                    fetch('/api/issues').then(r => r.json()).then(updateIssues);
+                    fetch('/api/progress').then(r => r.json()).then(updateProgress);
+                }
+            } catch (err) {
+                alert('Network error: ' + err.message);
+            } finally {
+                closeConfirmModal();
+            }
+        };
+
+        // Dependency multi-select
+        function focusDepInput() {
+            document.getElementById('dep-input').focus();
+        }
+
+        function updateDepTags() {
+            const container = document.getElementById('dep-tags');
+            container.innerHTML = selectedDeps.map(num => {
+                const issue = issues.find(i => i.number === num);
+                const title = issue ? issue.title : 'Issue';
+                const shortTitle = title.length > 20 ? title.substring(0, 20) + '...' : title;
+                return '<span class="dep-tag">#' + num + ' ' + shortTitle +
+                       '<span class="dep-tag-remove" onclick="removeDep(' + num + ')">x</span></span>';
+            }).join('');
+            document.getElementById('issue-depends-on').value = JSON.stringify(selectedDeps);
+        }
+
+        function removeDep(num) {
+            selectedDeps = selectedDeps.filter(d => d !== num);
+            updateDepTags();
+        }
+
+        function showDepDropdown() {
+            const dropdown = document.getElementById('dep-dropdown');
+            const editNumber = parseInt(document.getElementById('issue-number').value) || 0;
+            const available = issues.filter(i => i.number !== editNumber && !selectedDeps.includes(i.number));
+
+            if (available.length === 0) {
+                dropdown.innerHTML = '<div class="dep-option" style="color: #666;">No available issues</div>';
+            } else {
+                dropdown.innerHTML = available.map(i =>
+                    '<div class="dep-option" onmousedown="addDep(' + i.number + ')">#' + i.number + ' - ' + (i.title || 'Untitled') + '</div>'
+                ).join('');
+            }
+            dropdown.classList.add('active');
+        }
+
+        function hideDepDropdown() {
+            setTimeout(() => {
+                document.getElementById('dep-dropdown').classList.remove('active');
+            }, 200);
+        }
+
+        function filterDepOptions() {
+            const query = document.getElementById('dep-input').value.toLowerCase();
+            const editNumber = parseInt(document.getElementById('issue-number').value) || 0;
+            const available = issues.filter(i =>
+                i.number !== editNumber &&
+                !selectedDeps.includes(i.number) &&
+                (('#' + i.number).includes(query) || (i.title || '').toLowerCase().includes(query))
+            );
+
+            const dropdown = document.getElementById('dep-dropdown');
+            if (available.length === 0) {
+                dropdown.innerHTML = '<div class="dep-option" style="color: #666;">No matching issues</div>';
+            } else {
+                dropdown.innerHTML = available.map(i =>
+                    '<div class="dep-option" onmousedown="addDep(' + i.number + ')">#' + i.number + ' - ' + (i.title || 'Untitled') + '</div>'
+                ).join('');
+            }
+        }
+
+        function addDep(num) {
+            if (!selectedDeps.includes(num)) {
+                selectedDeps.push(num);
+                updateDepTags();
+            }
+            document.getElementById('dep-input').value = '';
+        }
+
+        // Close modal on escape key
+        document.addEventListener('keydown', function(e) {
+            if (e.key === 'Escape') {
+                closeIssueForm();
+                closeConfirmModal();
+            }
+        });
+
+        // Close modal on overlay click
+        document.getElementById('issue-modal').addEventListener('click', function(e) {
+            if (e.target === this) closeIssueForm();
+        });
+        document.getElementById('confirm-modal').addEventListener('click', function(e) {
+            if (e.target === this) closeConfirmModal();
+        });
     </script>
 </body>
 </html>`
