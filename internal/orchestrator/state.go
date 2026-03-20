@@ -56,6 +56,11 @@ func NewStateManager(cfg *RunConfig) *StateManager {
 	}
 }
 
+// StateDir returns the state directory path.
+func (sm *StateManager) StateDir() string {
+	return sm.stateDir
+}
+
 // EnsureDirs creates all state directories.
 func (sm *StateManager) EnsureDirs() error {
 	if err := os.MkdirAll(sm.workersDir, 0755); err != nil {

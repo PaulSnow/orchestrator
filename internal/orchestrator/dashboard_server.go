@@ -15,13 +15,14 @@ import (
 
 // DashboardServer provides a unified web dashboard for the orchestrator.
 type DashboardServer struct {
-	cfg         *RunConfig
-	state       *StateManager
-	events      *EventBroadcaster
-	reviewGate  *ReviewGate
-	server      *http.Server
-	port        int
-	mu          sync.Mutex
+	cfg            *RunConfig
+	state          *StateManager
+	events         *EventBroadcaster
+	reviewGate     *ReviewGate
+	sessionManager *SessionManager
+	server         *http.Server
+	port           int
+	mu             sync.Mutex
 }
 
 // NewDashboardServer creates a new dashboard server instance.
@@ -29,11 +30,22 @@ func NewDashboardServer(cfg *RunConfig, state *StateManager, events *EventBroadc
 	if port == 0 {
 		port = 8123
 	}
+
+	// Initialize session manager with state directory
+	stateDir := ""
+	if state != nil {
+		stateDir = state.StateDir()
+	}
+	if stateDir == "" {
+		stateDir = "/tmp/orchestrator-state"
+	}
+
 	return &DashboardServer{
-		cfg:    cfg,
-		state:  state,
-		events: events,
-		port:   port,
+		cfg:            cfg,
+		state:          state,
+		events:         events,
+		sessionManager: NewSessionManager(stateDir),
+		port:           port,
 	}
 }
 
@@ -64,6 +76,12 @@ func (ds *DashboardServer) Start() error {
 	// Review gate endpoints (backward compatibility)
 	mux.HandleFunc("/api/status", ds.handleStatus)
 	mux.HandleFunc("/api/gate-result", ds.handleGateResult)
+
+	// Claude session endpoints
+	mux.HandleFunc("/api/sessions", ds.handleSessions)
+	mux.HandleFunc("/api/sessions/", ds.handleSessionByID)
+	mux.HandleFunc("/api/sessions/send", ds.handleSessionSend)
+	mux.HandleFunc("/api/sessions/stream", ds.handleSessionStream)
 
 	// Dashboard HTML
 	mux.HandleFunc("/", ds.handleDashboard)
@@ -433,6 +451,184 @@ func (ds *DashboardServer) handleGateResult(w http.ResponseWriter, r *http.Reque
 	json.NewEncoder(w).Encode(result)
 }
 
+// handleSessions handles session list and creation.
+func (ds *DashboardServer) handleSessions(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
+	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+
+	if r.Method == "OPTIONS" {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+
+	switch r.Method {
+	case "GET":
+		// List all sessions
+		sessions := ds.sessionManager.ListSessions()
+		json.NewEncoder(w).Encode(sessions)
+
+	case "POST":
+		// Create new session
+		var req struct {
+			WorkingDir string `json:"working_dir"`
+			Context    string `json:"context"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, `{"error": "invalid request body"}`, http.StatusBadRequest)
+			return
+		}
+
+		session, err := ds.sessionManager.CreateSession(req.WorkingDir, req.Context)
+		if err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+			return
+		}
+		json.NewEncoder(w).Encode(session)
+
+	default:
+		http.Error(w, `{"error": "method not allowed"}`, http.StatusMethodNotAllowed)
+	}
+}
+
+// handleSessionByID handles operations on a specific session.
+func (ds *DashboardServer) handleSessionByID(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Control-Allow-Methods", "GET, DELETE, OPTIONS")
+	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+
+	if r.Method == "OPTIONS" {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+
+	// Extract session ID from path: /api/sessions/{id}
+	sessionID := strings.TrimPrefix(r.URL.Path, "/api/sessions/")
+	if sessionID == "" || sessionID == "send" || sessionID == "stream" {
+		http.Error(w, `{"error": "session ID required"}`, http.StatusBadRequest)
+		return
+	}
+
+	switch r.Method {
+	case "GET":
+		session, ok := ds.sessionManager.GetSession(sessionID)
+		if !ok {
+			http.Error(w, `{"error": "session not found"}`, http.StatusNotFound)
+			return
+		}
+		json.NewEncoder(w).Encode(session)
+
+	case "DELETE":
+		if err := ds.sessionManager.DeleteSession(sessionID); err != nil {
+			http.Error(w, `{"error": "session not found"}`, http.StatusNotFound)
+			return
+		}
+		json.NewEncoder(w).Encode(map[string]string{"status": "deleted"})
+
+	default:
+		http.Error(w, `{"error": "method not allowed"}`, http.StatusMethodNotAllowed)
+	}
+}
+
+// handleSessionSend sends a prompt to a session (non-streaming).
+func (ds *DashboardServer) handleSessionSend(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
+	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+
+	if r.Method == "OPTIONS" {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+
+	if r.Method != "POST" {
+		http.Error(w, `{"error": "method not allowed"}`, http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req struct {
+		SessionID string `json:"session_id"`
+		Prompt    string `json:"prompt"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, `{"error": "invalid request body"}`, http.StatusBadRequest)
+		return
+	}
+
+	if req.SessionID == "" || req.Prompt == "" {
+		http.Error(w, `{"error": "session_id and prompt required"}`, http.StatusBadRequest)
+		return
+	}
+
+	// Collect all response chunks
+	responseCh := make(chan StreamResponse, 100)
+	go ds.sessionManager.SendPrompt(req.SessionID, req.Prompt, responseCh)
+
+	var fullContent strings.Builder
+	var lastError string
+	for chunk := range responseCh {
+		if chunk.Error != "" {
+			lastError = chunk.Error
+		}
+		fullContent.WriteString(chunk.Content)
+	}
+
+	if lastError != "" {
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{"error": lastError})
+		return
+	}
+
+	json.NewEncoder(w).Encode(map[string]string{
+		"session_id": req.SessionID,
+		"content":    fullContent.String(),
+	})
+}
+
+// handleSessionStream streams a Claude response via SSE.
+func (ds *DashboardServer) handleSessionStream(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+
+	if r.Method == "OPTIONS" {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+
+	sessionID := r.URL.Query().Get("session_id")
+	prompt := r.URL.Query().Get("prompt")
+
+	if sessionID == "" || prompt == "" {
+		fmt.Fprintf(w, "event: error\ndata: {\"error\": \"session_id and prompt required\"}\n\n")
+		return
+	}
+
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "SSE not supported", http.StatusInternalServerError)
+		return
+	}
+
+	// Stream response
+	responseCh := make(chan StreamResponse, 100)
+	go ds.sessionManager.SendPrompt(sessionID, prompt, responseCh)
+
+	for chunk := range responseCh {
+		data, _ := json.Marshal(chunk)
+		fmt.Fprintf(w, "event: chunk\ndata: %s\n\n", string(data))
+		flusher.Flush()
+	}
+
+	fmt.Fprintf(w, "event: done\ndata: {}\n\n")
+	flusher.Flush()
+}
+
 // handleDashboard serves the HTML dashboard.
 func (ds *DashboardServer) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html")
@@ -618,6 +814,288 @@ const dashboardHTML = `<!DOCTYPE html>
             50% { opacity: 0.5; }
         }
         .running { animation: pulse 2s infinite; }
+
+        /* Tab navigation */
+        .tab-nav {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 20px;
+            border-bottom: 2px solid #16213e;
+        }
+        .tab-btn {
+            padding: 10px 20px;
+            background: transparent;
+            border: none;
+            color: #888;
+            font-size: 14px;
+            cursor: pointer;
+            border-bottom: 2px solid transparent;
+            margin-bottom: -2px;
+        }
+        .tab-btn:hover { color: #00d9ff; }
+        .tab-btn.active {
+            color: #00d9ff;
+            border-bottom-color: #00d9ff;
+        }
+        .tab-content { display: none; }
+        .tab-content.active { display: block; }
+
+        /* Claude Session Panel */
+        .session-container {
+            display: flex;
+            gap: 20px;
+            height: calc(100vh - 200px);
+            min-height: 500px;
+        }
+        .session-sidebar {
+            width: 250px;
+            background: #16213e;
+            border-radius: 8px;
+            padding: 15px;
+            display: flex;
+            flex-direction: column;
+        }
+        .session-list {
+            flex: 1;
+            overflow-y: auto;
+        }
+        .session-item {
+            padding: 10px;
+            border-radius: 4px;
+            cursor: pointer;
+            margin-bottom: 5px;
+            background: #0a0a0a;
+            border-left: 3px solid transparent;
+        }
+        .session-item:hover { background: #1a2540; }
+        .session-item.active {
+            border-left-color: #00d9ff;
+            background: #1a2540;
+        }
+        .session-item-title {
+            font-size: 12px;
+            color: #eee;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+        .session-item-meta {
+            font-size: 10px;
+            color: #666;
+            margin-top: 4px;
+        }
+        .new-session-btn {
+            padding: 10px;
+            background: #00d9ff;
+            color: #000;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-weight: bold;
+            margin-bottom: 15px;
+        }
+        .new-session-btn:hover { background: #00c4e8; }
+
+        .session-main {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            background: #16213e;
+            border-radius: 8px;
+            overflow: hidden;
+        }
+        .session-header {
+            padding: 15px;
+            border-bottom: 1px solid #0a0a0a;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        .session-header-title {
+            font-weight: bold;
+            color: #00d9ff;
+        }
+        .session-header-dir {
+            font-size: 12px;
+            color: #888;
+        }
+        .clear-session-btn {
+            padding: 6px 12px;
+            background: #ff4444;
+            color: #fff;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 12px;
+        }
+        .clear-session-btn:hover { background: #cc3333; }
+
+        .chat-messages {
+            flex: 1;
+            overflow-y: auto;
+            padding: 15px;
+        }
+        .chat-message {
+            margin-bottom: 15px;
+            padding: 12px;
+            border-radius: 8px;
+        }
+        .chat-message.user {
+            background: #0f1a2e;
+            margin-left: 40px;
+        }
+        .chat-message.assistant {
+            background: #0a0a0a;
+            margin-right: 40px;
+        }
+        .chat-message-header {
+            font-size: 11px;
+            color: #666;
+            margin-bottom: 8px;
+        }
+        .chat-message-content {
+            font-size: 14px;
+            line-height: 1.6;
+            white-space: pre-wrap;
+            word-break: break-word;
+        }
+        .chat-message-content code {
+            background: #1a1a2e;
+            padding: 2px 6px;
+            border-radius: 3px;
+            font-family: monospace;
+        }
+        .chat-message-content pre {
+            background: #1a1a2e;
+            padding: 12px;
+            border-radius: 4px;
+            overflow-x: auto;
+            margin: 10px 0;
+        }
+        .chat-message-content pre code {
+            background: transparent;
+            padding: 0;
+        }
+
+        .chat-input-area {
+            padding: 15px;
+            border-top: 1px solid #0a0a0a;
+        }
+        .chat-input-row {
+            display: flex;
+            gap: 10px;
+        }
+        .chat-input {
+            flex: 1;
+            padding: 12px;
+            background: #0a0a0a;
+            border: 1px solid #333;
+            border-radius: 4px;
+            color: #eee;
+            font-size: 14px;
+            resize: none;
+            min-height: 60px;
+            max-height: 200px;
+        }
+        .chat-input:focus {
+            outline: none;
+            border-color: #00d9ff;
+        }
+        .send-btn {
+            padding: 12px 24px;
+            background: #00d9ff;
+            color: #000;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-weight: bold;
+            align-self: flex-end;
+        }
+        .send-btn:hover { background: #00c4e8; }
+        .send-btn:disabled {
+            background: #444;
+            cursor: not-allowed;
+        }
+
+        /* New session modal */
+        .modal-overlay {
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: rgba(0,0,0,0.7);
+            justify-content: center;
+            align-items: center;
+            z-index: 1000;
+        }
+        .modal-overlay.active { display: flex; }
+        .modal {
+            background: #16213e;
+            padding: 25px;
+            border-radius: 8px;
+            width: 500px;
+            max-width: 90%;
+        }
+        .modal h3 {
+            margin: 0 0 20px 0;
+            color: #00d9ff;
+        }
+        .modal-field {
+            margin-bottom: 15px;
+        }
+        .modal-field label {
+            display: block;
+            margin-bottom: 5px;
+            color: #888;
+            font-size: 12px;
+        }
+        .modal-field input, .modal-field textarea {
+            width: 100%;
+            padding: 10px;
+            background: #0a0a0a;
+            border: 1px solid #333;
+            border-radius: 4px;
+            color: #eee;
+            font-size: 14px;
+        }
+        .modal-field input:focus, .modal-field textarea:focus {
+            outline: none;
+            border-color: #00d9ff;
+        }
+        .modal-actions {
+            display: flex;
+            gap: 10px;
+            justify-content: flex-end;
+            margin-top: 20px;
+        }
+        .modal-btn {
+            padding: 10px 20px;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 14px;
+        }
+        .modal-btn.primary {
+            background: #00d9ff;
+            color: #000;
+        }
+        .modal-btn.secondary {
+            background: #333;
+            color: #eee;
+        }
+
+        /* Streaming indicator */
+        .streaming-indicator {
+            display: inline-block;
+            width: 8px;
+            height: 8px;
+            background: #00d9ff;
+            border-radius: 50%;
+            animation: pulse 1s infinite;
+            margin-left: 8px;
+        }
     </style>
 </head>
 <body>
@@ -632,6 +1110,15 @@ const dashboardHTML = `<!DOCTYPE html>
                 <div id="runtime"></div>
             </div>
         </div>
+
+        <!-- Tab Navigation -->
+        <div class="tab-nav">
+            <button class="tab-btn active" data-tab="orchestrator">Orchestrator</button>
+            <button class="tab-btn" data-tab="claude">Claude Session</button>
+        </div>
+
+        <!-- Orchestrator Tab -->
+        <div id="tab-orchestrator" class="tab-content active">
 
         <div class="phase-bar" id="phase-bar">
             <div class="phase" data-phase="review">Review</div>
@@ -696,6 +1183,58 @@ const dashboardHTML = `<!DOCTYPE html>
         <h2>Event Log</h2>
         <div class="event-log" id="event-log">
             Connecting...
+        </div>
+        </div><!-- End Orchestrator Tab -->
+
+        <!-- Claude Session Tab -->
+        <div id="tab-claude" class="tab-content">
+            <div class="session-container">
+                <div class="session-sidebar">
+                    <button class="new-session-btn" onclick="showNewSessionModal()">+ New Session</button>
+                    <div class="session-list" id="session-list">
+                        <div style="color: #666; font-size: 12px;">No sessions yet</div>
+                    </div>
+                </div>
+                <div class="session-main">
+                    <div class="session-header" id="session-header" style="display: none;">
+                        <div>
+                            <div class="session-header-title" id="current-session-title">Session</div>
+                            <div class="session-header-dir" id="current-session-dir"></div>
+                        </div>
+                        <button class="clear-session-btn" onclick="clearCurrentSession()">Clear Session</button>
+                    </div>
+                    <div class="chat-messages" id="chat-messages">
+                        <div style="color: #666; text-align: center; padding: 40px;">
+                            Select a session or create a new one to start chatting with Claude.
+                        </div>
+                    </div>
+                    <div class="chat-input-area" id="chat-input-area" style="display: none;">
+                        <div class="chat-input-row">
+                            <textarea class="chat-input" id="chat-input" placeholder="Type your message..." rows="2"></textarea>
+                            <button class="send-btn" id="send-btn" onclick="sendMessage()">Send</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div><!-- End Claude Tab -->
+    </div>
+
+    <!-- New Session Modal -->
+    <div class="modal-overlay" id="new-session-modal">
+        <div class="modal">
+            <h3>New Claude Session</h3>
+            <div class="modal-field">
+                <label>Working Directory</label>
+                <input type="text" id="new-session-dir" placeholder="/path/to/project">
+            </div>
+            <div class="modal-field">
+                <label>Context (optional)</label>
+                <textarea id="new-session-context" rows="3" placeholder="e.g., Issue #123 or link to requirements"></textarea>
+            </div>
+            <div class="modal-actions">
+                <button class="modal-btn secondary" onclick="hideNewSessionModal()">Cancel</button>
+                <button class="modal-btn primary" onclick="createNewSession()">Create Session</button>
+            </div>
         </div>
     </div>
 
@@ -939,6 +1478,263 @@ const dashboardHTML = `<!DOCTYPE html>
                 document.getElementById('runtime').textContent = 'Running ' + formatElapsed(elapsed);
             }
         }, 1000);
+
+        // ========== Tab Navigation ==========
+        document.querySelectorAll('.tab-btn').forEach(btn => {
+            btn.addEventListener('click', () => {
+                const tabId = btn.dataset.tab;
+                document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+                document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
+                btn.classList.add('active');
+                document.getElementById('tab-' + tabId).classList.add('active');
+
+                if (tabId === 'claude') {
+                    loadSessions();
+                }
+            });
+        });
+
+        // ========== Claude Session Functions ==========
+        let sessions = [];
+        let currentSessionId = null;
+        let isStreaming = false;
+
+        function loadSessions() {
+            fetch('/api/sessions')
+                .then(r => r.json())
+                .then(data => {
+                    sessions = data || [];
+                    renderSessionList();
+                })
+                .catch(err => console.error('Failed to load sessions:', err));
+        }
+
+        function renderSessionList() {
+            const list = document.getElementById('session-list');
+            if (sessions.length === 0) {
+                list.innerHTML = '<div style="color: #666; font-size: 12px;">No sessions yet</div>';
+                return;
+            }
+
+            list.innerHTML = sessions.map(s => {
+                const isActive = s.id === currentSessionId ? 'active' : '';
+                const title = s.working_dir.split('/').pop() || 'Session';
+                const date = new Date(s.updated_at).toLocaleDateString();
+                const msgCount = s.messages ? s.messages.length : 0;
+                return '<div class="session-item ' + isActive + '" onclick="selectSession(\x27' + s.id + '\x27)">' +
+                    '<div class="session-item-title">' + escapeHtml(title) + '</div>' +
+                    '<div class="session-item-meta">' + date + ' - ' + msgCount + ' messages</div>' +
+                '</div>';
+            }).join('');
+        }
+
+        function selectSession(sessionId) {
+            currentSessionId = sessionId;
+            const session = sessions.find(s => s.id === sessionId);
+            if (!session) return;
+
+            document.getElementById('session-header').style.display = 'flex';
+            document.getElementById('chat-input-area').style.display = 'block';
+            document.getElementById('current-session-title').textContent = session.working_dir.split('/').pop() || 'Session';
+            document.getElementById('current-session-dir').textContent = session.working_dir;
+
+            renderMessages(session.messages || []);
+            renderSessionList();
+        }
+
+        function renderMessages(messages) {
+            const container = document.getElementById('chat-messages');
+            if (messages.length === 0) {
+                container.innerHTML = '<div style="color: #666; text-align: center; padding: 40px;">Start a conversation with Claude.</div>';
+                return;
+            }
+
+            container.innerHTML = messages.map(m => {
+                const roleClass = m.role === 'user' ? 'user' : 'assistant';
+                const time = new Date(m.timestamp).toLocaleTimeString();
+                return '<div class="chat-message ' + roleClass + '">' +
+                    '<div class="chat-message-header">' + m.role + ' - ' + time + '</div>' +
+                    '<div class="chat-message-content">' + formatMessageContent(m.content) + '</div>' +
+                '</div>';
+            }).join('');
+
+            container.scrollTop = container.scrollHeight;
+        }
+
+        function formatMessageContent(content) {
+            if (!content) return '';
+
+            // Escape HTML first
+            let html = escapeHtml(content);
+
+            // Format code blocks
+            html = html.replace(/\x60\x60\x60(\\w*)\\n([\\s\\S]*?)\x60\x60\x60/g, function(match, lang, code) {
+                return '<pre><code class="language-' + lang + '">' + code.trim() + '</code></pre>';
+            });
+
+            // Format inline code
+            html = html.replace(/\x60([^\x60]+)\x60/g, '<code>$1</code>');
+
+            // Format bold
+            html = html.replace(/\\*\\*([^*]+)\\*\\*/g, '<strong>$1</strong>');
+
+            // Format italic
+            html = html.replace(/\\*([^*]+)\\*/g, '<em>$1</em>');
+
+            return html;
+        }
+
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+
+        function showNewSessionModal() {
+            document.getElementById('new-session-modal').classList.add('active');
+            document.getElementById('new-session-dir').focus();
+        }
+
+        function hideNewSessionModal() {
+            document.getElementById('new-session-modal').classList.remove('active');
+            document.getElementById('new-session-dir').value = '';
+            document.getElementById('new-session-context').value = '';
+        }
+
+        function createNewSession() {
+            const workingDir = document.getElementById('new-session-dir').value.trim();
+            const context = document.getElementById('new-session-context').value.trim();
+
+            if (!workingDir) {
+                alert('Working directory is required');
+                return;
+            }
+
+            fetch('/api/sessions', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ working_dir: workingDir, context: context })
+            })
+            .then(r => r.json())
+            .then(data => {
+                if (data.error) {
+                    alert('Error: ' + data.error);
+                    return;
+                }
+                hideNewSessionModal();
+                loadSessions();
+                setTimeout(() => selectSession(data.id), 100);
+            })
+            .catch(err => alert('Failed to create session: ' + err));
+        }
+
+        function clearCurrentSession() {
+            if (!currentSessionId) return;
+            if (!confirm('Delete this session?')) return;
+
+            fetch('/api/sessions/' + currentSessionId, { method: 'DELETE' })
+                .then(() => {
+                    currentSessionId = null;
+                    document.getElementById('session-header').style.display = 'none';
+                    document.getElementById('chat-input-area').style.display = 'none';
+                    document.getElementById('chat-messages').innerHTML = '<div style="color: #666; text-align: center; padding: 40px;">Select a session or create a new one to start chatting with Claude.</div>';
+                    loadSessions();
+                })
+                .catch(err => alert('Failed to delete session: ' + err));
+        }
+
+        function sendMessage() {
+            if (isStreaming || !currentSessionId) return;
+
+            const input = document.getElementById('chat-input');
+            const prompt = input.value.trim();
+            if (!prompt) return;
+
+            input.value = '';
+            isStreaming = true;
+            document.getElementById('send-btn').disabled = true;
+
+            // Add user message to UI
+            const messagesContainer = document.getElementById('chat-messages');
+            const userMsgHtml = '<div class="chat-message user">' +
+                '<div class="chat-message-header">user - ' + new Date().toLocaleTimeString() + '</div>' +
+                '<div class="chat-message-content">' + escapeHtml(prompt) + '</div>' +
+            '</div>';
+
+            // Remove placeholder if present
+            if (messagesContainer.querySelector('div[style*="text-align: center"]')) {
+                messagesContainer.innerHTML = '';
+            }
+            messagesContainer.innerHTML += userMsgHtml;
+
+            // Add streaming assistant message placeholder
+            const assistantMsgId = 'streaming-msg-' + Date.now();
+            messagesContainer.innerHTML += '<div class="chat-message assistant" id="' + assistantMsgId + '">' +
+                '<div class="chat-message-header">assistant - ' + new Date().toLocaleTimeString() + ' <span class="streaming-indicator"></span></div>' +
+                '<div class="chat-message-content"></div>' +
+            '</div>';
+            messagesContainer.scrollTop = messagesContainer.scrollHeight;
+
+            // Stream response via SSE
+            const url = '/api/sessions/stream?session_id=' + encodeURIComponent(currentSessionId) + '&prompt=' + encodeURIComponent(prompt);
+            const evtSource = new EventSource(url);
+            let fullContent = '';
+
+            evtSource.addEventListener('chunk', (e) => {
+                const data = JSON.parse(e.data);
+                if (data.content) {
+                    fullContent += data.content;
+                    const msgEl = document.getElementById(assistantMsgId);
+                    if (msgEl) {
+                        const contentEl = msgEl.querySelector('.chat-message-content');
+                        contentEl.innerHTML = formatMessageContent(fullContent);
+                        messagesContainer.scrollTop = messagesContainer.scrollHeight;
+                    }
+                }
+                if (data.error) {
+                    const msgEl = document.getElementById(assistantMsgId);
+                    if (msgEl) {
+                        msgEl.querySelector('.chat-message-content').innerHTML = '<span style="color: #ff4444;">Error: ' + escapeHtml(data.error) + '</span>';
+                    }
+                }
+            });
+
+            evtSource.addEventListener('done', () => {
+                evtSource.close();
+                isStreaming = false;
+                document.getElementById('send-btn').disabled = false;
+
+                // Remove streaming indicator
+                const msgEl = document.getElementById(assistantMsgId);
+                if (msgEl) {
+                    const indicator = msgEl.querySelector('.streaming-indicator');
+                    if (indicator) indicator.remove();
+                }
+
+                // Reload session to get updated messages
+                loadSessions();
+            });
+
+            evtSource.addEventListener('error', () => {
+                evtSource.close();
+                isStreaming = false;
+                document.getElementById('send-btn').disabled = false;
+            });
+
+            evtSource.onerror = () => {
+                evtSource.close();
+                isStreaming = false;
+                document.getElementById('send-btn').disabled = false;
+            };
+        }
+
+        // Handle Enter key to send
+        document.getElementById('chat-input').addEventListener('keydown', (e) => {
+            if (e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault();
+                sendMessage();
+            }
+        });
     </script>
 </body>
 </html>`
