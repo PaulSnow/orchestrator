@@ -43,6 +43,10 @@ func main() {
 		cmdStatus(args)
 	case "dashboard":
 		cmdDashboard(args)
+	case "metrics":
+		cmdMetrics(args)
+	case "activity":
+		cmdActivity(args)
 	case "add-issue":
 		cmdAddIssue(args)
 	case "version", "-v", "--version":
@@ -103,6 +107,8 @@ COMMANDS
   cleanup    Kill tmux session and optionally remove worktrees
   status     Show current progress (one-shot)
   dashboard  Live terminal dashboard with auto-refresh
+  metrics    Show productivity metrics and trends
+  activity   Show recent activity log
   add-issue  Add an issue to config mid-run
   version    Show version information
 
@@ -813,6 +819,124 @@ func cmdDashboard(args []string) {
 	primaryCfg.NumWorkers = *workers
 	state := orchestrator.NewStateManager(primaryCfg)
 	orchestrator.RunDashboard(primaryCfg, state)
+}
+
+func cmdMetrics(args []string) {
+	fs := flag.NewFlagSet("metrics", flag.ExitOnError)
+	fs.Usage = func() {
+		fmt.Println(`orchestrator metrics - Show productivity metrics and trends
+
+DESCRIPTION
+  Displays aggregated productivity metrics calculated from the activity log:
+  - Total orchestrator runs (successful/failed)
+  - Issues completed and failed
+  - Average duration per run
+  - Issues completed per hour
+  - Recent productivity trend
+  - Top projects by issues completed
+
+USAGE
+  orchestrator metrics
+  orchestrator metrics --json
+
+OPTIONS`)
+		fs.PrintDefaults()
+	}
+	jsonOutput := fs.Bool("json", false, "Output as JSON")
+	fs.Parse(args)
+
+	if *jsonOutput {
+		report, err := orchestrator.GenerateMetricsReport()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
+		data, _ := json.MarshalIndent(report, "", "  ")
+		fmt.Println(string(data))
+	} else {
+		summary, err := orchestrator.GetProductivitySummary()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Println(summary)
+	}
+}
+
+func cmdActivity(args []string) {
+	fs := flag.NewFlagSet("activity", flag.ExitOnError)
+	fs.Usage = func() {
+		fmt.Println(`orchestrator activity - Show recent activity log
+
+DESCRIPTION
+  Displays recent orchestrator activity events:
+  - Orchestrator starts, completions, failures
+  - Issue assignments, completions, failures
+  - Worker restarts
+  - Consistency issues detected/fixed
+
+USAGE
+  orchestrator activity
+  orchestrator activity --limit 50
+
+OPTIONS`)
+		fs.PrintDefaults()
+	}
+	limit := fs.Int("limit", 20, "Number of events to show")
+	jsonOutput := fs.Bool("json", false, "Output as JSON")
+	fs.Parse(args)
+
+	events, err := orchestrator.ReadActivityLog(*limit)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+
+	if len(events) == 0 {
+		fmt.Println("No activity recorded yet.")
+		return
+	}
+
+	if *jsonOutput {
+		data, _ := json.MarshalIndent(events, "", "  ")
+		fmt.Println(string(data))
+	} else {
+		fmt.Println("Recent Activity")
+		fmt.Println(strings.Repeat("=", 60))
+		for _, event := range events {
+			ts := event.Timestamp
+			if len(ts) > 19 {
+				ts = ts[:19]
+			}
+			ts = strings.Replace(ts, "T", " ", 1)
+
+			var detail string
+			switch event.Event {
+			case orchestrator.ActivityOrchestratorStarted:
+				detail = fmt.Sprintf("Started %s (%d workers, %d issues)", event.Project, event.NumWorkers, event.TotalIssues)
+			case orchestrator.ActivityOrchestratorCompleted:
+				detail = fmt.Sprintf("Completed %s (%d done, %d failed, %s)", event.Project, event.IssuesCompleted, event.IssuesFailed, event.Duration)
+			case orchestrator.ActivityOrchestratorFailed:
+				detail = fmt.Sprintf("Failed %s: %s", event.Project, event.Error)
+			case orchestrator.ActivityIssueAssigned:
+				detail = fmt.Sprintf("Issue #%d assigned to worker %d", event.IssueNumber, event.WorkerID)
+			case orchestrator.ActivityIssueCompleted:
+				detail = fmt.Sprintf("Issue #%d completed by worker %d", event.IssueNumber, event.WorkerID)
+			case orchestrator.ActivityIssueFailed:
+				detail = fmt.Sprintf("Issue #%d failed (worker %d, retry %d): %s", event.IssueNumber, event.WorkerID, event.RetryCount, event.Error)
+			case orchestrator.ActivityWorkerRestarted:
+				detail = fmt.Sprintf("Worker %d restarted on issue #%d (attempt %d)", event.WorkerID, event.IssueNumber, event.RetryCount)
+			case orchestrator.ActivityInconsistencyDetected:
+				detail = fmt.Sprintf("Inconsistency: %s - %s", event.InconsistencyType, event.InconsistencyDesc)
+			case orchestrator.ActivityInconsistencyFixed:
+				detail = fmt.Sprintf("Fixed: %s - %s", event.InconsistencyType, event.InconsistencyDesc)
+			default:
+				detail = string(event.Event)
+			}
+
+			fmt.Printf("%s  %s\n", ts, detail)
+		}
+	}
 }
 
 func cmdAddIssue(args []string) {

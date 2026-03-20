@@ -71,6 +71,10 @@ func (ds *DashboardServer) Start() error {
 	// Orchestrator registry endpoint
 	mux.HandleFunc("/api/orchestrators", ds.handleOrchestrators)
 
+	// Metrics and activity endpoints
+	mux.HandleFunc("/api/metrics", ds.handleMetrics)
+	mux.HandleFunc("/api/activity", ds.handleActivity)
+
 	// Dashboard HTML
 	mux.HandleFunc("/", ds.handleDashboard)
 
@@ -495,6 +499,45 @@ func (ds *DashboardServer) handleOrchestrators(w http.ResponseWriter, r *http.Re
 	}
 
 	json.NewEncoder(w).Encode(infos)
+}
+
+// handleMetrics returns productivity metrics.
+func (ds *DashboardServer) handleMetrics(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+
+	report, err := GenerateMetricsReport()
+	if err != nil {
+		json.NewEncoder(w).Encode(map[string]string{
+			"error": err.Error(),
+		})
+		return
+	}
+
+	json.NewEncoder(w).Encode(report)
+}
+
+// handleActivity returns recent activity events.
+func (ds *DashboardServer) handleActivity(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+
+	limit := 50
+	if limitStr := r.URL.Query().Get("limit"); limitStr != "" {
+		if n, err := strconv.Atoi(limitStr); err == nil && n > 0 {
+			limit = n
+		}
+	}
+
+	events, err := ReadActivityLog(limit)
+	if err != nil {
+		json.NewEncoder(w).Encode(map[string]string{
+			"error": err.Error(),
+		})
+		return
+	}
+
+	json.NewEncoder(w).Encode(events)
 }
 
 // handleDashboard serves the HTML dashboard.

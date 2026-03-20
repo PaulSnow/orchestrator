@@ -229,6 +229,8 @@ func ExecuteDecision(decision *Decision, cfg *RunConfig, state *StateManager) {
 			state.SaveWorker(worker)
 		}
 		state.LogEvent(map[string]any{"action": "mark_complete", "issue": issueNum})
+		// Log to activity log
+		GetActivityLogger().LogIssueCompleted(*issueNum, workerID)
 		// Emit worker completed event
 		if globalEventBroadcaster != nil {
 			globalEventBroadcaster.EmitWorkerCompleted(workerID, *issueNum, issueTitle)
@@ -302,6 +304,8 @@ func ExecuteDecision(decision *Decision, cfg *RunConfig, state *StateManager) {
 			BuildClaudeCmd(newWt, promptPath, logFile, signalFile, workerID, *newIssueNum, stageName, false))
 
 		state.LogEvent(map[string]any{"action": "reassign", "worker": workerID, "new_issue": newIssueNum})
+		// Log to activity log
+		GetActivityLogger().LogIssueAssigned(*newIssueNum, workerID, newBranch)
 		// Emit worker assigned event
 		if globalEventBroadcaster != nil {
 			globalEventBroadcaster.EmitWorkerAssigned(workerID, *newIssueNum, newIssue.Title, stageName)
@@ -365,6 +369,8 @@ func ExecuteDecision(decision *Decision, cfg *RunConfig, state *StateManager) {
 			"action": "restart", "worker": workerID,
 			"issue": issueNum, "retry_count": worker.RetryCount,
 		})
+		// Log to activity log
+		GetActivityLogger().LogWorkerRestarted(workerID, issueNum, worker.RetryCount)
 
 	case "advance_stage":
 		issueNum := decision.Issue
@@ -460,6 +466,8 @@ func ExecuteDecision(decision *Decision, cfg *RunConfig, state *StateManager) {
 		}
 
 		state.LogEvent(map[string]any{"action": "skip", "worker": workerID, "issue": issueNum})
+		// Log to activity log
+		GetActivityLogger().LogIssueFailed(*issueNum, workerID, "exceeded retries", worker.RetryCount)
 		// Emit worker failed event
 		if globalEventBroadcaster != nil {
 			globalEventBroadcaster.EmitWorkerFailed(workerID, *issueNum, "exceeded retries")
@@ -538,6 +546,8 @@ func ExecuteDecision(decision *Decision, cfg *RunConfig, state *StateManager) {
 			"action": "reassign_cross", "worker": workerID,
 			"new_issue": newIssueNum, "source_project": otherCfg.Project,
 		})
+		// Log to activity log
+		GetActivityLogger().LogIssueAssigned(*newIssueNum, workerID, newBranch)
 		// Emit worker assigned event for cross-project
 		if globalEventBroadcaster != nil {
 			globalEventBroadcaster.EmitWorkerAssigned(workerID, *newIssueNum, newIssue.Title, stageName)
@@ -790,6 +800,10 @@ func RunMonitorLoop(cfg *RunConfig, state *StateManager, noDelay bool) {
 	LogMsg(fmt.Sprintf("State dir: %s", cfg.StateDir))
 	LogMsg("")
 
+	// Initialize activity logger
+	activityLogger := InitActivityLogger(cfg.Project)
+	activityLogger.LogOrchestratorStarted(cfg.ConfigPath, cfg.NumWorkers, len(cfg.Issues))
+
 	if !noDelay {
 		LogMsg("Waiting 60s for workers to initialize...")
 		time.Sleep(60 * time.Second)
@@ -827,6 +841,9 @@ func RunMonitorLoop(cfg *RunConfig, state *StateManager, noDelay bool) {
 					if inc.AutoFixable {
 						if err := consistencyChecker.AutoFix(inc); err != nil {
 							LogMsg(fmt.Sprintf("[consistency] Auto-fix failed: %v", err))
+							activityLogger.LogInconsistency(string(inc.Type), inc.Description, false)
+						} else {
+							activityLogger.LogInconsistency(string(inc.Type), inc.Description, true)
 						}
 					}
 				}
@@ -887,6 +904,8 @@ func RunMonitorLoop(cfg *RunConfig, state *StateManager, noDelay bool) {
 		if AllDone(cfg, state) {
 			LogMsg("All issues completed or failed. Orchestrator shutting down.")
 			state.LogEvent(map[string]any{"action": "shutdown", "reason": "all_done"})
+			// Log completion to activity log
+			activityLogger.LogOrchestratorCompleted(GetCompletedCount(cfg), GetFailedCount(cfg))
 			printSummary(cfg, state)
 			break
 		}
