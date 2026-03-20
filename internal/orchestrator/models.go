@@ -115,6 +115,11 @@ type Worker struct {
 	ClaudePID     *int     `json:"claude_pid,omitempty"`
 	Stage         string   `json:"stage,omitempty"`
 	SourceConfig  string   `json:"source_config,omitempty"`
+	// Error tracking
+	HasErrors    bool              `json:"has_errors,omitempty"`
+	ErrorCount   int               `json:"error_count,omitempty"`
+	ErrorSummary string            `json:"error_summary,omitempty"`
+	Errors       []*ExtractedError `json:"errors,omitempty"`
 }
 
 // Decision is a decision made by the orchestrator.

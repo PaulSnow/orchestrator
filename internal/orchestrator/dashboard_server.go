@@ -61,6 +61,9 @@ func (ds *DashboardServer) Start() error {
 	// Worker log endpoint
 	mux.HandleFunc("/api/log/", ds.handleWorkerLog)
 
+	// Error tracking endpoint
+	mux.HandleFunc("/api/errors", ds.handleErrors)
+
 	// Review gate endpoints (backward compatibility)
 	mux.HandleFunc("/api/status", ds.handleStatus)
 	mux.HandleFunc("/api/gate-result", ds.handleGateResult)
@@ -281,6 +284,14 @@ func (ds *DashboardServer) buildWorkersResponse() []map[string]any {
 			}
 		}
 
+		// Get error information
+		workerErrors := ds.getWorkerErrors(i)
+		if workerErrors != nil && workerErrors.HasErrors {
+			workerData["has_errors"] = true
+			workerData["error_count"] = workerErrors.ErrorCount
+			workerData["error_summary"] = GetErrorSummary(workerErrors.Errors)
+		}
+
 		workers = append(workers, workerData)
 	}
 
@@ -350,6 +361,16 @@ func (ds *DashboardServer) handleIssues(w http.ResponseWriter, r *http.Request) 
 			}
 		}
 
+		// Check for errors if issue is assigned to a worker
+		if issue.AssignedWorker != nil {
+			workerErrors := ds.getWorkerErrors(*issue.AssignedWorker)
+			if workerErrors != nil && workerErrors.HasErrors {
+				issueData["has_errors"] = true
+				issueData["error_count"] = workerErrors.ErrorCount
+				issueData["error_summary"] = GetErrorSummary(workerErrors.Errors)
+			}
+		}
+
 		issues = append(issues, issueData)
 	}
 
@@ -386,6 +407,60 @@ func (ds *DashboardServer) handleWorkerLog(w http.ResponseWriter, r *http.Reques
 
 	logTail := ds.state.GetLogTail(workerID, lines)
 	w.Write([]byte(logTail))
+}
+
+// handleErrors returns all current errors across workers.
+func (ds *DashboardServer) handleErrors(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+
+	allErrors := make([]*WorkerErrors, 0)
+
+	for i := 1; i <= ds.cfg.NumWorkers; i++ {
+		workerErrors := ds.getWorkerErrors(i)
+		if workerErrors != nil && workerErrors.HasErrors {
+			allErrors = append(allErrors, workerErrors)
+		}
+	}
+
+	response := map[string]any{
+		"total_workers_with_errors": len(allErrors),
+		"workers":                   allErrors,
+	}
+
+	json.NewEncoder(w).Encode(response)
+}
+
+// getWorkerErrors extracts errors from a worker's log.
+func (ds *DashboardServer) getWorkerErrors(workerID int) *WorkerErrors {
+	worker := ds.state.LoadWorker(workerID)
+	if worker == nil {
+		return nil
+	}
+
+	// Get the full log content for error extraction
+	logContent := ds.state.GetLogTail(workerID, 1000) // Get more lines for full error context
+	errors := ExtractErrors(logContent)
+
+	workerErrors := &WorkerErrors{
+		WorkerID:   workerID,
+		Errors:     errors,
+		HasErrors:  len(errors) > 0,
+		ErrorCount: len(errors),
+	}
+
+	if worker.IssueNumber != nil {
+		workerErrors.IssueNumber = worker.IssueNumber
+		// Get issue title
+		for _, issue := range ds.cfg.Issues {
+			if issue.Number == *worker.IssueNumber {
+				workerErrors.IssueTitle = issue.Title
+				break
+			}
+		}
+	}
+
+	return workerErrors
 }
 
 // handleStatus returns basic status (backward compatibility).
@@ -565,6 +640,136 @@ const dashboardHTML = `<!DOCTYPE html>
             white-space: nowrap;
         }
 
+        /* Error badge */
+        .error-badge {
+            display: inline-block;
+            padding: 2px 6px;
+            border-radius: 10px;
+            font-size: 10px;
+            font-weight: bold;
+            background: #ff4444;
+            color: #fff;
+            margin-left: 8px;
+        }
+        .error-badge.panic {
+            background: #ff0000;
+            animation: pulse 1s infinite;
+        }
+
+        /* Errors panel */
+        .errors-section {
+            background: #16213e;
+            border-radius: 8px;
+            margin-bottom: 20px;
+            overflow: hidden;
+        }
+        .errors-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 12px;
+            background: #0f1a2e;
+            border-bottom: 1px solid #0a0a0a;
+        }
+        .errors-header h2 {
+            margin: 0;
+            color: #ff4444;
+        }
+        .error-item {
+            padding: 12px;
+            border-bottom: 1px solid #0a0a0a;
+            font-family: monospace;
+            font-size: 12px;
+        }
+        .error-item:hover { background: #1a2540; }
+        .error-item.panic { border-left: 3px solid #ff0000; }
+        .error-item.error { border-left: 3px solid #ff4444; }
+        .error-meta {
+            display: flex;
+            gap: 15px;
+            margin-bottom: 8px;
+            font-size: 11px;
+            color: #888;
+        }
+        .error-message {
+            color: #ff8888;
+            word-break: break-all;
+        }
+        .error-stack {
+            margin-top: 8px;
+            padding: 8px;
+            background: #0a0a0a;
+            border-radius: 4px;
+            font-size: 11px;
+            color: #888;
+            white-space: pre-wrap;
+            max-height: 150px;
+            overflow-y: auto;
+        }
+        .no-errors {
+            padding: 20px;
+            text-align: center;
+            color: #00ff88;
+        }
+
+        /* Tab navigation */
+        .tab-nav {
+            display: flex;
+            gap: 0;
+            margin-bottom: 20px;
+        }
+        .tab-btn {
+            padding: 10px 20px;
+            background: #16213e;
+            border: none;
+            color: #888;
+            cursor: pointer;
+            font-size: 14px;
+            border-bottom: 2px solid transparent;
+        }
+        .tab-btn:first-child { border-radius: 8px 0 0 0; }
+        .tab-btn:last-child { border-radius: 0 8px 0 0; }
+        .tab-btn.active {
+            color: #00d9ff;
+            border-bottom: 2px solid #00d9ff;
+            background: #1a2540;
+        }
+        .tab-btn:hover:not(.active) { background: #1a2540; }
+        .tab-content { display: none; }
+        .tab-content.active { display: block; }
+
+        /* Log viewer with error highlighting */
+        .log-viewer {
+            background: #0a0a0a;
+            border-radius: 8px;
+            padding: 15px;
+            font-family: monospace;
+            font-size: 12px;
+            max-height: 400px;
+            overflow-y: auto;
+            white-space: pre-wrap;
+            word-break: break-all;
+        }
+        .log-line { padding: 2px 0; }
+        .log-line.error-line {
+            background: #ff444433;
+            border-left: 3px solid #ff4444;
+            padding-left: 8px;
+            margin-left: -8px;
+        }
+        .log-line.panic-line {
+            background: #ff000044;
+            border-left: 3px solid #ff0000;
+            padding-left: 8px;
+            margin-left: -8px;
+        }
+        .log-line-num {
+            color: #666;
+            user-select: none;
+            width: 40px;
+            display: inline-block;
+        }
+
         /* Issues grid */
         .issues-section {
             background: #16213e;
@@ -669,28 +874,63 @@ const dashboardHTML = `<!DOCTYPE html>
             </div>
         </div>
 
-        <h2>Workers</h2>
-        <div class="workers-section">
-            <table>
-                <thead>
-                    <tr>
-                        <th>#</th>
-                        <th>Issue</th>
-                        <th>Stage</th>
-                        <th>Status</th>
-                        <th>Retries</th>
-                        <th>Log (tail)</th>
-                    </tr>
-                </thead>
-                <tbody id="workers-table">
-                    <tr><td colspan="6">Loading...</td></tr>
-                </tbody>
-            </table>
+        <div class="tab-nav">
+            <button class="tab-btn active" onclick="showTab('workers')">Workers</button>
+            <button class="tab-btn" onclick="showTab('issues')">Issues</button>
+            <button class="tab-btn" onclick="showTab('errors')" id="errors-tab-btn">Errors <span id="error-count-badge" class="error-badge" style="display:none;">0</span></button>
+            <button class="tab-btn" onclick="showTab('logs')">Logs</button>
         </div>
 
-        <h2>Issues</h2>
-        <div class="issues-section" id="issues-list">
-            Loading...
+        <div id="tab-workers" class="tab-content active">
+            <div class="workers-section">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>#</th>
+                            <th>Issue</th>
+                            <th>Stage</th>
+                            <th>Status</th>
+                            <th>Retries</th>
+                            <th>Errors</th>
+                            <th>Log (tail)</th>
+                        </tr>
+                    </thead>
+                    <tbody id="workers-table">
+                        <tr><td colspan="7">Loading...</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+        <div id="tab-issues" class="tab-content">
+            <div class="issues-section" id="issues-list">
+                Loading...
+            </div>
+        </div>
+
+        <div id="tab-errors" class="tab-content">
+            <div class="errors-section">
+                <div class="errors-header">
+                    <h2>Errors Across All Workers</h2>
+                    <button onclick="refreshErrors()" style="background:#00d9ff;border:none;padding:8px 16px;border-radius:4px;cursor:pointer;">Refresh</button>
+                </div>
+                <div id="errors-list">
+                    <div class="no-errors">No errors detected</div>
+                </div>
+            </div>
+        </div>
+
+        <div id="tab-logs" class="tab-content">
+            <div style="margin-bottom: 10px;">
+                <label style="color:#888;">Select Worker: </label>
+                <select id="log-worker-select" onchange="loadWorkerLog()" style="background:#0a0a0a;color:#eee;border:1px solid #333;padding:8px;border-radius:4px;">
+                    <option value="">-- Select --</option>
+                </select>
+                <button onclick="loadWorkerLog()" style="background:#00d9ff;border:none;padding:8px 16px;border-radius:4px;cursor:pointer;margin-left:10px;">Refresh</button>
+            </div>
+            <div class="log-viewer" id="log-viewer">
+                Select a worker to view logs...
+            </div>
         </div>
 
         <h2>Event Log</h2>
@@ -704,6 +944,7 @@ const dashboardHTML = `<!DOCTYPE html>
         let workers = [];
         let issues = [];
         let events = [];
+        let allErrors = [];
 
         function formatTime(isoString) {
             if (!isoString) return '';
@@ -716,6 +957,19 @@ const dashboardHTML = `<!DOCTYPE html>
             const mins = Math.floor(seconds / 60);
             const secs = Math.floor(seconds % 60);
             return mins + 'm ' + secs + 's';
+        }
+
+        function showTab(tabName) {
+            document.querySelectorAll('.tab-content').forEach(el => el.classList.remove('active'));
+            document.querySelectorAll('.tab-btn').forEach(el => el.classList.remove('active'));
+            document.getElementById('tab-' + tabName).classList.add('active');
+            event.target.classList.add('active');
+
+            if (tabName === 'errors') {
+                refreshErrors();
+            } else if (tabName === 'logs') {
+                updateWorkerSelect();
+            }
         }
 
         function updatePhaseBar(phase) {
@@ -747,15 +1001,22 @@ const dashboardHTML = `<!DOCTYPE html>
             const tbody = document.getElementById('workers-table');
 
             if (workers.length === 0) {
-                tbody.innerHTML = '<tr><td colspan="6">No workers</td></tr>';
+                tbody.innerHTML = '<tr><td colspan="7">No workers</td></tr>';
                 return;
             }
 
+            let totalErrors = 0;
             tbody.innerHTML = workers.map(w => {
                 const statusClass = 'status-' + (w.status || 'unknown');
                 const runningClass = w.status === 'running' ? 'running' : '';
                 const issueStr = w.issue_number ? '#' + w.issue_number : '--';
                 const titleStr = w.issue_title ? ' - ' + (w.issue_title.length > 30 ? w.issue_title.substring(0, 30) + '...' : w.issue_title) : '';
+
+                let errorCell = '--';
+                if (w.has_errors && w.error_count > 0) {
+                    totalErrors += w.error_count;
+                    errorCell = '<span class="error-badge">' + w.error_count + '</span> ' + (w.error_summary || '');
+                }
 
                 return '<tr class="' + runningClass + '">' +
                     '<td>' + w.worker_id + '</td>' +
@@ -763,9 +1024,19 @@ const dashboardHTML = `<!DOCTYPE html>
                     '<td>' + (w.stage || '--') + '</td>' +
                     '<td><span class="status-badge ' + statusClass + '">' + (w.status || 'unknown') + '</span></td>' +
                     '<td>' + (w.retry_count || 0) + '</td>' +
+                    '<td>' + errorCell + '</td>' +
                     '<td class="log-preview">' + (w.log_tail || '--') + '</td>' +
                 '</tr>';
             }).join('');
+
+            // Update error count badge in tab
+            const badge = document.getElementById('error-count-badge');
+            if (totalErrors > 0) {
+                badge.textContent = totalErrors;
+                badge.style.display = 'inline-block';
+            } else {
+                badge.style.display = 'none';
+            }
         }
 
         function updateIssues(data) {
@@ -781,13 +1052,118 @@ const dashboardHTML = `<!DOCTYPE html>
                 const statusClass = 'status-' + i.status;
                 const workerStr = i.assigned_worker ? 'Worker ' + i.assigned_worker : '--';
 
+                let errorBadge = '';
+                if (i.has_errors && i.error_count > 0) {
+                    errorBadge = '<span class="error-badge">' + i.error_count + '</span>';
+                }
+
                 return '<div class="issue-row">' +
-                    '<span class="issue-number">#' + i.number + '</span>' +
-                    '<span class="issue-title">' + (i.title || '') + '</span>' +
+                    '<span class="issue-number">#' + i.number + errorBadge + '</span>' +
+                    '<span class="issue-title">' + (i.title || '') + (i.error_summary ? ' <span style="color:#ff8888;font-size:11px;">(' + i.error_summary + ')</span>' : '') + '</span>' +
                     '<span class="issue-status"><span class="status-badge ' + statusClass + '">' + i.status + '</span></span>' +
                     '<span class="issue-worker">' + workerStr + '</span>' +
                 '</div>';
             }).join('');
+        }
+
+        function refreshErrors() {
+            fetch('/api/errors')
+                .then(r => r.json())
+                .then(data => {
+                    allErrors = data.workers || [];
+                    updateErrorsList();
+                });
+        }
+
+        function updateErrorsList() {
+            const container = document.getElementById('errors-list');
+
+            if (allErrors.length === 0) {
+                container.innerHTML = '<div class="no-errors">No errors detected</div>';
+                return;
+            }
+
+            let html = '';
+            allErrors.forEach(workerErrors => {
+                const issueStr = workerErrors.issue_number ? '#' + workerErrors.issue_number : '';
+                const titleStr = workerErrors.issue_title || '';
+
+                workerErrors.errors.forEach(err => {
+                    const severityClass = err.severity === 'panic' ? 'panic' : 'error';
+                    html += '<div class="error-item ' + severityClass + '">' +
+                        '<div class="error-meta">' +
+                            '<span>Worker ' + workerErrors.worker_id + '</span>' +
+                            '<span>' + issueStr + ' ' + titleStr + '</span>' +
+                            '<span>Line ' + err.line_number + '</span>' +
+                            '<span class="' + severityClass + '">' + err.severity.toUpperCase() + '</span>' +
+                        '</div>' +
+                        '<div class="error-message">' + escapeHtml(err.message) + '</div>' +
+                        (err.stack_trace ? '<div class="error-stack">' + escapeHtml(err.stack_trace) + '</div>' : '') +
+                    '</div>';
+                });
+            });
+
+            container.innerHTML = html;
+        }
+
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+
+        function updateWorkerSelect() {
+            const select = document.getElementById('log-worker-select');
+            const currentValue = select.value;
+
+            select.innerHTML = '<option value="">-- Select --</option>' +
+                workers.map(w => {
+                    const issueStr = w.issue_number ? ' (#' + w.issue_number + ')' : '';
+                    return '<option value="' + w.worker_id + '">Worker ' + w.worker_id + issueStr + '</option>';
+                }).join('');
+
+            if (currentValue) {
+                select.value = currentValue;
+            }
+        }
+
+        function loadWorkerLog() {
+            const select = document.getElementById('log-worker-select');
+            const workerId = select.value;
+            const viewer = document.getElementById('log-viewer');
+
+            if (!workerId) {
+                viewer.innerHTML = 'Select a worker to view logs...';
+                return;
+            }
+
+            fetch('/api/log/' + workerId + '?lines=500')
+                .then(r => r.text())
+                .then(logContent => {
+                    // Highlight error lines
+                    const lines = logContent.split('\n');
+                    const errorPatterns = ['FAIL', 'panic:', 'Error:', 'error:', 'fatal:', 'Fatal:', 'FATAL:', 'compilation failed', 'build failed'];
+
+                    const html = lines.map((line, idx) => {
+                        let lineClass = 'log-line';
+                        const lowerLine = line.toLowerCase();
+
+                        if (line.includes('panic:') || line.includes('runtime error:')) {
+                            lineClass += ' panic-line';
+                        } else if (errorPatterns.some(p => line.includes(p))) {
+                            lineClass += ' error-line';
+                        }
+
+                        return '<div class="' + lineClass + '"><span class="log-line-num">' + (idx + 1) + '</span>' + escapeHtml(line) + '</div>';
+                    }).join('');
+
+                    viewer.innerHTML = html;
+                    // Scroll to first error if present
+                    const firstError = viewer.querySelector('.error-line, .panic-line');
+                    if (firstError) {
+                        firstError.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                    }
+                });
         }
 
         function addEvent(type, data) {
@@ -838,8 +1214,9 @@ const dashboardHTML = `<!DOCTYPE html>
             fetch('/api/workers').then(r => r.json()),
             fetch('/api/issues').then(r => r.json()),
             fetch('/api/progress').then(r => r.json()),
-            fetch('/api/gate-result').then(r => r.json()).catch(() => null)
-        ]).then(([stateData, workersData, issuesData, progressData, gateData]) => {
+            fetch('/api/gate-result').then(r => r.json()).catch(() => null),
+            fetch('/api/errors').then(r => r.json()).catch(() => ({ workers: [] }))
+        ]).then(([stateData, workersData, issuesData, progressData, gateData, errorsData]) => {
             updateState(stateData);
             updateWorkers(workersData);
             updateIssues(issuesData);
@@ -847,6 +1224,8 @@ const dashboardHTML = `<!DOCTYPE html>
             if (gateData && !gateData.error) {
                 updateGateResult(gateData);
             }
+            allErrors = errorsData.workers || [];
+            updateWorkerSelect();
         });
 
         // SSE connection
@@ -912,6 +1291,14 @@ const dashboardHTML = `<!DOCTYPE html>
 
         evtSource.addEventListener('log_update', (e) => {
             fetch('/api/workers').then(r => r.json()).then(updateWorkers);
+            // Also refresh errors on log update
+            fetch('/api/errors').then(r => r.json()).then(data => {
+                allErrors = data.workers || [];
+                // Only update errors list if errors tab is active
+                if (document.getElementById('tab-errors').classList.contains('active')) {
+                    updateErrorsList();
+                }
+            });
         });
 
         evtSource.addEventListener('gate_result', (e) => {
