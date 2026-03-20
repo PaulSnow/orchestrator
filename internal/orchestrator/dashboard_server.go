@@ -15,13 +15,14 @@ import (
 
 // DashboardServer provides a unified web dashboard for the orchestrator.
 type DashboardServer struct {
-	cfg         *RunConfig
-	state       *StateManager
-	events      *EventBroadcaster
-	reviewGate  *ReviewGate
-	server      *http.Server
-	port        int
-	mu          sync.Mutex
+	cfg           *RunConfig
+	state         *StateManager
+	events        *EventBroadcaster
+	reviewGate    *ReviewGate
+	server        *http.Server
+	port          int
+	mu            sync.Mutex
+	pausedWorkers map[int]bool // Tracks which workers are paused
 }
 
 // NewDashboardServer creates a new dashboard server instance.
@@ -30,10 +31,11 @@ func NewDashboardServer(cfg *RunConfig, state *StateManager, events *EventBroadc
 		port = 8123
 	}
 	return &DashboardServer{
-		cfg:    cfg,
-		state:  state,
-		events: events,
-		port:   port,
+		cfg:           cfg,
+		state:         state,
+		events:        events,
+		port:          port,
+		pausedWorkers: make(map[int]bool),
 	}
 }
 
@@ -53,12 +55,12 @@ func (ds *DashboardServer) Start() error {
 
 	// State and progress endpoints
 	mux.HandleFunc("/api/state", ds.handleState)
-	mux.HandleFunc("/api/workers", ds.handleWorkers)
+	mux.HandleFunc("/api/workers", ds.handleWorkersRouter)
 	mux.HandleFunc("/api/progress", ds.handleProgress)
 	mux.HandleFunc("/api/issues", ds.handleIssues)
 	mux.HandleFunc("/api/event-log", ds.handleEventLog)
 
-	// Worker log endpoint
+	// Worker log endpoint (legacy)
 	mux.HandleFunc("/api/log/", ds.handleWorkerLog)
 
 	// Review gate endpoints (backward compatibility)
@@ -220,11 +222,301 @@ func (ds *DashboardServer) buildStateResponse() map[string]any {
 	}
 }
 
+// handleWorkersRouter routes worker-related API requests.
+func (ds *DashboardServer) handleWorkersRouter(w http.ResponseWriter, r *http.Request) {
+	path := strings.TrimPrefix(r.URL.Path, "/api/workers")
+
+	// Handle CORS preflight
+	if r.Method == "OPTIONS" {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+
+	// GET /api/workers - list all workers
+	if path == "" || path == "/" {
+		ds.handleWorkers(w, r)
+		return
+	}
+
+	// Parse worker ID from path: /:id, /:id/log, /:id/log/stream, /:id/pause, /:id/resume
+	parts := strings.Split(strings.TrimPrefix(path, "/"), "/")
+	if len(parts) == 0 {
+		http.Error(w, "invalid path", http.StatusBadRequest)
+		return
+	}
+
+	workerID, err := strconv.Atoi(parts[0])
+	if err != nil {
+		http.Error(w, "invalid worker id", http.StatusBadRequest)
+		return
+	}
+
+	if workerID < 1 || workerID > ds.cfg.NumWorkers {
+		http.Error(w, "worker not found", http.StatusNotFound)
+		return
+	}
+
+	// Route based on remaining path
+	if len(parts) == 1 {
+		// GET /api/workers/:id
+		ds.handleWorkerDetail(w, r, workerID)
+		return
+	}
+
+	switch parts[1] {
+	case "log":
+		if len(parts) == 3 && parts[2] == "stream" {
+			// GET /api/workers/:id/log/stream
+			ds.handleWorkerLogStream(w, r, workerID)
+		} else {
+			// GET /api/workers/:id/log
+			ds.handleWorkerLogDetail(w, r, workerID)
+		}
+	case "pause":
+		// POST /api/workers/:id/pause
+		if r.Method != "POST" {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		ds.handleWorkerPause(w, r, workerID)
+	case "resume":
+		// POST /api/workers/:id/resume
+		if r.Method != "POST" {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		ds.handleWorkerResume(w, r, workerID)
+	default:
+		http.Error(w, "not found", http.StatusNotFound)
+	}
+}
+
 // handleWorkers returns the current worker details.
 func (ds *DashboardServer) handleWorkers(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 	json.NewEncoder(w).Encode(ds.buildWorkersResponse())
+}
+
+// handleWorkerDetail returns detailed info for a single worker.
+func (ds *DashboardServer) handleWorkerDetail(w http.ResponseWriter, r *http.Request, workerID int) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+
+	worker := ds.state.LoadWorker(workerID)
+	if worker == nil {
+		json.NewEncoder(w).Encode(map[string]any{
+			"worker_id": workerID,
+			"status":    "unknown",
+		})
+		return
+	}
+
+	workerData := ds.buildWorkerDetailResponse(worker)
+	json.NewEncoder(w).Encode(workerData)
+}
+
+// buildWorkerDetailResponse builds detailed worker response including health indicators.
+func (ds *DashboardServer) buildWorkerDetailResponse(worker *Worker) map[string]any {
+	workerID := worker.WorkerID
+
+	workerData := map[string]any{
+		"worker_id":   worker.WorkerID,
+		"status":      worker.Status,
+		"stage":       worker.Stage,
+		"retry_count": worker.RetryCount,
+		"branch":      worker.Branch,
+		"worktree":    worker.Worktree,
+	}
+
+	// Add paused status
+	ds.mu.Lock()
+	paused := ds.pausedWorkers[workerID]
+	ds.mu.Unlock()
+	workerData["paused"] = paused
+
+	if worker.IssueNumber != nil {
+		workerData["issue_number"] = *worker.IssueNumber
+		// Get issue title and details
+		for _, issue := range ds.cfg.Issues {
+			if issue.Number == *worker.IssueNumber {
+				workerData["issue_title"] = issue.Title
+				workerData["issue_status"] = issue.Status
+				break
+			}
+		}
+	}
+
+	if worker.StartedAt != "" {
+		workerData["started_at"] = worker.StartedAt
+		start, err := time.Parse("2006-01-02T15:04:05Z", worker.StartedAt)
+		if err == nil {
+			workerData["elapsed_seconds"] = time.Since(start).Seconds()
+		}
+	}
+
+	// Health indicators
+	healthIndicators := ds.buildHealthIndicators(workerID, worker)
+	for k, v := range healthIndicators {
+		workerData[k] = v
+	}
+
+	return workerData
+}
+
+// buildHealthIndicators returns health-related indicators for a worker.
+func (ds *DashboardServer) buildHealthIndicators(workerID int, worker *Worker) map[string]any {
+	health := make(map[string]any)
+
+	// Get log stats for activity detection
+	logSize, logMtime := ds.state.GetLogStats(workerID)
+	health["log_size"] = logSize
+
+	if logMtime != nil {
+		lastActivity := time.Unix(int64(*logMtime), 0)
+		health["last_activity"] = lastActivity.Format(time.RFC3339)
+
+		// Detect stall: no log activity for > 5 minutes while running
+		if worker.Status == "running" {
+			stalledThreshold := 5 * time.Minute
+			if time.Since(lastActivity) > stalledThreshold {
+				health["stall_detected"] = true
+			} else {
+				health["stall_detected"] = false
+			}
+		} else {
+			health["stall_detected"] = false
+		}
+	} else {
+		health["stall_detected"] = false
+	}
+
+	health["retry_count"] = worker.RetryCount
+
+	return health
+}
+
+// handleWorkerLogDetail returns the log for a specific worker.
+func (ds *DashboardServer) handleWorkerLogDetail(w http.ResponseWriter, r *http.Request, workerID int) {
+	w.Header().Set("Content-Type", "text/plain")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+
+	// Get lines parameter (default 100)
+	lines := 100
+	if linesParam := r.URL.Query().Get("lines"); linesParam != "" {
+		if l, err := strconv.Atoi(linesParam); err == nil && l > 0 {
+			lines = l
+		}
+	}
+
+	logTail := ds.state.GetLogTail(workerID, lines)
+	w.Write([]byte(logTail))
+}
+
+// handleWorkerLogStream provides SSE streaming of worker logs.
+func (ds *DashboardServer) handleWorkerLogStream(w http.ResponseWriter, r *http.Request, workerID int) {
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "SSE not supported", http.StatusInternalServerError)
+		return
+	}
+
+	// Send initial log content
+	initialLog := ds.state.GetLogTail(workerID, 100)
+	fmt.Fprintf(w, "event: log\ndata: %s\n\n", escapeSSEData(initialLog))
+	flusher.Flush()
+
+	// Track last known log size
+	lastSize, _ := ds.state.GetLogStats(workerID)
+
+	// Poll for new log content
+	ticker := time.NewTicker(1 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-r.Context().Done():
+			return
+		case <-ticker.C:
+			currentSize, _ := ds.state.GetLogStats(workerID)
+			if currentSize > lastSize {
+				// New content available - send the tail
+				newContent := ds.state.GetLogTail(workerID, 20)
+				fmt.Fprintf(w, "event: log\ndata: %s\n\n", escapeSSEData(newContent))
+				flusher.Flush()
+				lastSize = currentSize
+			}
+		}
+	}
+}
+
+// escapeSSEData escapes newlines for SSE data format.
+func escapeSSEData(s string) string {
+	// SSE data fields with newlines need each line prefixed with "data: "
+	// For simplicity, we'll encode as JSON which handles escaping
+	data, _ := json.Marshal(s)
+	return string(data)
+}
+
+// handleWorkerPause pauses a worker (won't assign new issues when current completes).
+func (ds *DashboardServer) handleWorkerPause(w http.ResponseWriter, r *http.Request, workerID int) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+
+	ds.mu.Lock()
+	ds.pausedWorkers[workerID] = true
+	ds.mu.Unlock()
+
+	// Also update the worker state file
+	worker := ds.state.LoadWorker(workerID)
+	if worker != nil {
+		worker.Paused = true
+		ds.state.SaveWorker(worker)
+	}
+
+	json.NewEncoder(w).Encode(map[string]any{
+		"worker_id": workerID,
+		"paused":    true,
+		"message":   "Worker paused. Will not receive new assignments when current task completes.",
+	})
+}
+
+// handleWorkerResume resumes a paused worker.
+func (ds *DashboardServer) handleWorkerResume(w http.ResponseWriter, r *http.Request, workerID int) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+
+	ds.mu.Lock()
+	delete(ds.pausedWorkers, workerID)
+	ds.mu.Unlock()
+
+	// Also update the worker state file
+	worker := ds.state.LoadWorker(workerID)
+	if worker != nil {
+		worker.Paused = false
+		ds.state.SaveWorker(worker)
+	}
+
+	json.NewEncoder(w).Encode(map[string]any{
+		"worker_id": workerID,
+		"paused":    false,
+		"message":   "Worker resumed. Will receive new assignments when available.",
+	})
+}
+
+// IsWorkerPaused returns whether a worker is paused.
+func (ds *DashboardServer) IsWorkerPaused(workerID int) bool {
+	ds.mu.Lock()
+	defer ds.mu.Unlock()
+	return ds.pausedWorkers[workerID]
 }
 
 func (ds *DashboardServer) buildWorkersResponse() []map[string]any {
@@ -249,6 +541,12 @@ func (ds *DashboardServer) buildWorkersResponse() []map[string]any {
 			"worktree":    worker.Worktree,
 		}
 
+		// Add paused status
+		ds.mu.Lock()
+		paused := ds.pausedWorkers[i]
+		ds.mu.Unlock()
+		workerData["paused"] = paused
+
 		if worker.IssueNumber != nil {
 			workerData["issue_number"] = *worker.IssueNumber
 			// Get issue title
@@ -266,6 +564,12 @@ func (ds *DashboardServer) buildWorkersResponse() []map[string]any {
 			if err == nil {
 				workerData["elapsed_seconds"] = time.Since(start).Seconds()
 			}
+		}
+
+		// Health indicators
+		healthIndicators := ds.buildHealthIndicators(i, worker)
+		for k, v := range healthIndicators {
+			workerData[k] = v
 		}
 
 		// Get log tail (last 3 lines, truncated)

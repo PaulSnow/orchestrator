@@ -115,6 +115,8 @@ type Worker struct {
 	ClaudePID     *int     `json:"claude_pid,omitempty"`
 	Stage         string   `json:"stage,omitempty"`
 	SourceConfig  string   `json:"source_config,omitempty"`
+	Paused        bool     `json:"paused,omitempty"`        // Worker is paused (won't get new assignments)
+	LastActivity  string   `json:"last_activity,omitempty"` // ISO timestamp of last activity
 }
 
 // Decision is a decision made by the orchestrator.
