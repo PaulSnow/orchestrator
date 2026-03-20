@@ -1,0 +1,51 @@
+{
+  "project": "test-project",
+  "tmux_session": "test-orchestrator",
+  "num_workers": 3,
+  "cycle_interval": 30,
+  "max_retries": 5,
+  "stall_timeout": 600,
+  "wall_clock_timeout": 1200,
+  "prompt_type": "implement",
+  "pipeline": ["implement"],
+  "stagger_delay": 10,
+  "repos": {
+    "test-repo": {
+      "path": "/tmp/test-repo",
+      "default_branch": "main",
+      "worktree_base": "/tmp/test-worktrees",
+      "branch_prefix": "feature/issue-",
+      "platform": "github"
+    }
+  },
+  "issues": [
+    {
+      "number": 1,
+      "title": "Add basic feature",
+      "priority": 1,
+      "wave": 1,
+      "status": "pending",
+      "task_type": "implement",
+      "repo": "test-repo"
+    },
+    {
+      "number": 2,
+      "title": "Enhance feature",
+      "priority": 2,
+      "wave": 1,
+      "status": "pending",
+      "task_type": "implement",
+      "repo": "test-repo"
+    },
+    {
+      "number": 3,
+      "title": "Fix bug in feature",
+      "priority": 1,
+      "wave": 2,
+      "status": "pending",
+      "task_type": "implement",
+      "repo": "test-repo",
+      "depends_on": [1]
+    }
+  ]
+}

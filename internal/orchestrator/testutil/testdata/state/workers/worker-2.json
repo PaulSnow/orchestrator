@@ -1,0 +1,17 @@
+{
+  "worker_id": 2,
+  "issue_number": 43,
+  "branch": "feature/issue-43",
+  "worktree": "/tmp/test-worktrees/issue-43",
+  "status": "idle",
+  "started_at": "2024-01-15T09:00:00Z",
+  "last_log_size": 8192,
+  "last_log_update": "2024-01-15T09:30:00Z",
+  "retry_count": 1,
+  "commits": [
+    "def5678 feat: add feature",
+    "ghi9012 fix: address review comments"
+  ],
+  "stage": "review",
+  "source_config": "/tmp/config/test-issues.json"
+}

@@ -1,0 +1,67 @@
+{
+  "project": "multi-repo-project",
+  "tmux_session": "multi-orchestrator",
+  "num_workers": 5,
+  "cycle_interval": 60,
+  "max_retries": 3,
+  "stall_timeout": 900,
+  "wall_clock_timeout": 1800,
+  "prompt_type": "implement",
+  "pipeline": ["implement", "review"],
+  "stagger_delay": 15,
+  "repos": {
+    "frontend": {
+      "path": "/tmp/frontend-repo",
+      "default_branch": "main",
+      "worktree_base": "/tmp/frontend-worktrees",
+      "branch_prefix": "feature/",
+      "platform": "github"
+    },
+    "backend": {
+      "path": "/tmp/backend-repo",
+      "default_branch": "main",
+      "worktree_base": "/tmp/backend-worktrees",
+      "branch_prefix": "feature/",
+      "platform": "gitlab"
+    }
+  },
+  "issues": [
+    {
+      "number": 10,
+      "title": "Backend API endpoint",
+      "priority": 1,
+      "wave": 1,
+      "status": "pending",
+      "task_type": "implement",
+      "repo": "backend"
+    },
+    {
+      "number": 11,
+      "title": "Frontend component",
+      "priority": 1,
+      "wave": 2,
+      "status": "pending",
+      "task_type": "implement",
+      "repo": "frontend",
+      "depends_on": [10]
+    }
+  ],
+  "project_context": {
+    "language": "go",
+    "build_command": "go build ./...",
+    "test_command": "go test ./...",
+    "safety_rules": ["Do not modify production configs"]
+  },
+  "review": {
+    "enabled": true,
+    "parallel_workers": 2,
+    "session_timeout": 1800,
+    "post_comments": true,
+    "strict_mode": false
+  },
+  "web": {
+    "enabled": true,
+    "port": 8080,
+    "host": "localhost"
+  }
+}
