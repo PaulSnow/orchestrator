@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
 	"os/exec"
 	"runtime"
 	"strconv"
@@ -60,6 +61,10 @@ func (ds *DashboardServer) Start() error {
 
 	// Worker log endpoint
 	mux.HandleFunc("/api/log/", ds.handleWorkerLog)
+
+	// Worker control endpoints
+	mux.HandleFunc("/api/worker/pause/", ds.handleWorkerPause)
+	mux.HandleFunc("/api/worker/resume/", ds.handleWorkerResume)
 
 	// Review gate endpoints (backward compatibility)
 	mux.HandleFunc("/api/status", ds.handleStatus)
@@ -229,6 +234,7 @@ func (ds *DashboardServer) handleWorkers(w http.ResponseWriter, r *http.Request)
 
 func (ds *DashboardServer) buildWorkersResponse() []map[string]any {
 	workers := make([]map[string]any, 0, ds.cfg.NumWorkers)
+	now := time.Now()
 
 	for i := 1; i <= ds.cfg.NumWorkers; i++ {
 		worker := ds.state.LoadWorker(i)
@@ -236,6 +242,7 @@ func (ds *DashboardServer) buildWorkersResponse() []map[string]any {
 			workers = append(workers, map[string]any{
 				"worker_id": i,
 				"status":    "unknown",
+				"health":    "unknown",
 			})
 			continue
 		}
@@ -268,6 +275,22 @@ func (ds *DashboardServer) buildWorkersResponse() []map[string]any {
 			}
 		}
 
+		// Get log stats for health calculation
+		logSize, logMtime := ds.state.GetLogStats(i)
+		var lastActivitySeconds float64 = -1
+		if logMtime != nil {
+			lastActivitySeconds = float64(now.Unix()) - *logMtime
+			workerData["last_activity"] = time.Unix(int64(*logMtime), 0).Format(time.RFC3339)
+			workerData["last_activity_seconds"] = lastActivitySeconds
+		}
+
+		// Calculate health indicator based on log activity
+		// green = active (log updated within stall_timeout/2)
+		// yellow = slow (log updated within stall_timeout but older than stall_timeout/2)
+		// red = stalled (no log activity for > stall_timeout seconds)
+		health := ds.calculateWorkerHealth(worker, logSize, lastActivitySeconds)
+		workerData["health"] = health
+
 		// Get log tail (last 3 lines, truncated)
 		logTail := ds.state.GetLogTail(i, 3)
 		if logTail != "" {
@@ -285,6 +308,44 @@ func (ds *DashboardServer) buildWorkersResponse() []map[string]any {
 	}
 
 	return workers
+}
+
+// calculateWorkerHealth determines the health status of a worker.
+// Returns "green" (active), "yellow" (slow), "red" (stalled), or "idle".
+func (ds *DashboardServer) calculateWorkerHealth(worker *Worker, logSize int64, lastActivitySeconds float64) string {
+	// Idle or completed workers don't need health monitoring
+	if worker.Status == "idle" || worker.Status == "completed" {
+		return "idle"
+	}
+
+	// Unknown/failed status
+	if worker.Status == "failed" {
+		return "red"
+	}
+
+	// If worker isn't running, use status-based health
+	if worker.Status != "running" {
+		return "idle"
+	}
+
+	// No log activity yet
+	if lastActivitySeconds < 0 || logSize == 0 {
+		return "yellow"
+	}
+
+	stallTimeout := float64(ds.cfg.StallTimeout)
+	if stallTimeout <= 0 {
+		stallTimeout = 900 // default 15 minutes
+	}
+
+	halfStallTimeout := stallTimeout / 2
+
+	if lastActivitySeconds <= halfStallTimeout {
+		return "green" // Active - recent activity
+	} else if lastActivitySeconds <= stallTimeout {
+		return "yellow" // Slow - activity within timeout but getting old
+	}
+	return "red" // Stalled - no activity for too long
 }
 
 // handleProgress returns overall completion stats.
@@ -386,6 +447,136 @@ func (ds *DashboardServer) handleWorkerLog(w http.ResponseWriter, r *http.Reques
 
 	logTail := ds.state.GetLogTail(workerID, lines)
 	w.Write([]byte(logTail))
+}
+
+// handleWorkerPause pauses a specific worker by sending Ctrl-C.
+func (ds *DashboardServer) handleWorkerPause(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+
+	if r.Method != "POST" {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Extract worker ID from path
+	path := strings.TrimPrefix(r.URL.Path, "/api/worker/pause/")
+	workerID, err := strconv.Atoi(path)
+	if err != nil {
+		http.Error(w, "invalid worker id", http.StatusBadRequest)
+		return
+	}
+
+	if workerID < 1 || workerID > ds.cfg.NumWorkers {
+		http.Error(w, "worker id out of range", http.StatusBadRequest)
+		return
+	}
+
+	// Send Ctrl-C to pause the worker
+	SendCtrlC(ds.cfg.TmuxSession, fmt.Sprintf("worker-%d", workerID))
+
+	// Update worker status
+	worker := ds.state.LoadWorker(workerID)
+	if worker != nil {
+		worker.Status = "paused"
+		ds.state.SaveWorker(worker)
+	}
+
+	// Broadcast the pause event
+	if ds.events != nil {
+		ds.events.BroadcastType("worker_paused", map[string]any{
+			"worker_id": workerID,
+			"status":    "paused",
+		})
+	}
+
+	json.NewEncoder(w).Encode(map[string]any{
+		"success":   true,
+		"worker_id": workerID,
+		"status":    "paused",
+	})
+}
+
+// handleWorkerResume resumes a paused worker.
+func (ds *DashboardServer) handleWorkerResume(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+
+	if r.Method != "POST" {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Extract worker ID from path
+	path := strings.TrimPrefix(r.URL.Path, "/api/worker/resume/")
+	workerID, err := strconv.Atoi(path)
+	if err != nil {
+		http.Error(w, "invalid worker id", http.StatusBadRequest)
+		return
+	}
+
+	if workerID < 1 || workerID > ds.cfg.NumWorkers {
+		http.Error(w, "worker id out of range", http.StatusBadRequest)
+		return
+	}
+
+	worker := ds.state.LoadWorker(workerID)
+	if worker == nil {
+		http.Error(w, "worker not found", http.StatusNotFound)
+		return
+	}
+
+	// Only resume if the worker was paused and has an issue
+	if worker.IssueNumber == nil {
+		http.Error(w, "worker has no assigned issue", http.StatusBadRequest)
+		return
+	}
+
+	issueNum := *worker.IssueNumber
+	issue := ds.cfg.GetIssue(issueNum)
+	if issue == nil {
+		http.Error(w, "assigned issue not found", http.StatusNotFound)
+		return
+	}
+
+	repo := ds.cfg.RepoForIssue(issue)
+	stageName := "implement"
+	if len(ds.cfg.Pipeline) > issue.PipelineStage {
+		stageName = ds.cfg.Pipeline[issue.PipelineStage]
+	}
+
+	// Generate and write the prompt
+	promptPath := ds.state.PromptPath(workerID)
+	prompt, _ := GeneratePrompt(stageName, issue, workerID, worker.Worktree, repo, ds.cfg, ds.state, true, "")
+	os.WriteFile(promptPath, []byte(prompt), 0644)
+
+	// Update worker status
+	worker.Status = "running"
+	ds.state.SaveWorker(worker)
+
+	// Restart the Claude command
+	logFile := ds.state.LogPath(workerID)
+	signalFile := ds.state.SignalPath(workerID)
+	ds.state.ClearSignal(workerID)
+
+	SendCommand(ds.cfg.TmuxSession, fmt.Sprintf("worker-%d", workerID),
+		BuildClaudeCmd(worker.Worktree, promptPath, logFile, signalFile, workerID, issueNum, stageName, true))
+
+	// Broadcast the resume event
+	if ds.events != nil {
+		ds.events.BroadcastType("worker_resumed", map[string]any{
+			"worker_id":    workerID,
+			"issue_number": issueNum,
+			"status":       "running",
+		})
+	}
+
+	json.NewEncoder(w).Encode(map[string]any{
+		"success":      true,
+		"worker_id":    workerID,
+		"issue_number": issueNum,
+		"status":       "running",
+	})
 }
 
 // handleStatus returns basic status (backward compatibility).
@@ -533,17 +724,95 @@ const dashboardHTML = `<!DOCTYPE html>
         .stat-value.pending { color: #ffaa00; }
         .stat-value.failed { color: #ff4444; }
 
-        /* Workers table */
-        .workers-section {
+        /* Workers panel - card view */
+        .workers-panel {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+            gap: 15px;
+            margin-bottom: 20px;
+        }
+        .worker-card {
             background: #16213e;
             border-radius: 8px;
-            margin-bottom: 20px;
-            overflow: hidden;
+            padding: 15px;
+            border-left: 4px solid #666;
+            cursor: pointer;
+            transition: all 0.2s ease;
         }
-        table { width: 100%; border-collapse: collapse; }
-        th, td { padding: 12px; text-align: left; border-bottom: 1px solid #0a0a0a; }
-        th { background: #0f1a2e; font-size: 12px; color: #888; text-transform: uppercase; }
-        tr:hover { background: #1a2540; }
+        .worker-card:hover { background: #1a2540; transform: translateY(-2px); }
+        .worker-card.health-green { border-left-color: #00ff88; }
+        .worker-card.health-yellow { border-left-color: #ffaa00; }
+        .worker-card.health-red { border-left-color: #ff4444; }
+        .worker-card.health-idle { border-left-color: #666; }
+        .worker-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 10px;
+        }
+        .worker-id {
+            font-size: 18px;
+            font-weight: bold;
+            color: #00d9ff;
+        }
+        .worker-health {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        .health-dot {
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            background: #666;
+        }
+        .health-dot.green { background: #00ff88; }
+        .health-dot.yellow { background: #ffaa00; animation: pulse 1.5s infinite; }
+        .health-dot.red { background: #ff4444; animation: pulse 0.8s infinite; }
+        .worker-issue {
+            font-size: 14px;
+            color: #eee;
+            margin-bottom: 8px;
+        }
+        .worker-issue a { color: #00d9ff; text-decoration: none; }
+        .worker-meta {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 10px;
+            font-size: 12px;
+            color: #888;
+            margin-bottom: 10px;
+        }
+        .worker-meta span { display: flex; align-items: center; gap: 4px; }
+        .worker-log-preview {
+            font-family: monospace;
+            font-size: 11px;
+            color: #666;
+            background: #0a0a0a;
+            padding: 8px;
+            border-radius: 4px;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+            margin-bottom: 10px;
+        }
+        .worker-actions {
+            display: flex;
+            gap: 8px;
+        }
+        .worker-btn {
+            padding: 6px 12px;
+            border: none;
+            border-radius: 4px;
+            font-size: 11px;
+            font-weight: bold;
+            cursor: pointer;
+            transition: all 0.2s ease;
+        }
+        .worker-btn:hover { transform: scale(1.05); }
+        .btn-pause { background: #ffaa0033; color: #ffaa00; }
+        .btn-resume { background: #00ff8833; color: #00ff88; }
+        .btn-log { background: #00d9ff33; color: #00d9ff; }
         .status-badge {
             display: inline-block;
             padding: 4px 8px;
@@ -552,17 +821,57 @@ const dashboardHTML = `<!DOCTYPE html>
             font-weight: bold;
         }
         .status-running { background: #00d9ff22; color: #00d9ff; }
+        .status-paused { background: #ffaa0022; color: #ffaa00; }
         .status-idle { background: #88888822; color: #888; }
         .status-failed { background: #ff444422; color: #ff4444; }
         .status-completed { background: #00ff8822; color: #00ff88; }
-        .log-preview {
-            font-family: monospace;
-            font-size: 11px;
+
+        /* Log modal */
+        .log-modal {
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0,0,0,0.8);
+            z-index: 1000;
+        }
+        .log-modal.active { display: flex; justify-content: center; align-items: center; }
+        .log-modal-content {
+            background: #1a1a2e;
+            border-radius: 8px;
+            width: 90%;
+            max-width: 900px;
+            max-height: 80vh;
+            display: flex;
+            flex-direction: column;
+        }
+        .log-modal-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 15px 20px;
+            border-bottom: 1px solid #333;
+        }
+        .log-modal-header h3 { margin: 0; color: #00d9ff; }
+        .log-modal-close {
+            background: none;
+            border: none;
             color: #888;
-            max-width: 400px;
-            overflow: hidden;
-            text-overflow: ellipsis;
-            white-space: nowrap;
+            font-size: 24px;
+            cursor: pointer;
+        }
+        .log-modal-close:hover { color: #fff; }
+        .log-modal-body {
+            flex: 1;
+            overflow-y: auto;
+            padding: 15px 20px;
+            font-family: monospace;
+            font-size: 12px;
+            white-space: pre-wrap;
+            color: #ccc;
+            background: #0a0a0a;
         }
 
         /* Issues grid */
@@ -670,22 +979,19 @@ const dashboardHTML = `<!DOCTYPE html>
         </div>
 
         <h2>Workers</h2>
-        <div class="workers-section">
-            <table>
-                <thead>
-                    <tr>
-                        <th>#</th>
-                        <th>Issue</th>
-                        <th>Stage</th>
-                        <th>Status</th>
-                        <th>Retries</th>
-                        <th>Log (tail)</th>
-                    </tr>
-                </thead>
-                <tbody id="workers-table">
-                    <tr><td colspan="6">Loading...</td></tr>
-                </tbody>
-            </table>
+        <div class="workers-panel" id="workers-panel">
+            Loading workers...
+        </div>
+
+        <!-- Log Modal -->
+        <div class="log-modal" id="log-modal">
+            <div class="log-modal-content">
+                <div class="log-modal-header">
+                    <h3>Worker <span id="log-modal-worker-id"></span> Log</h3>
+                    <button class="log-modal-close" onclick="closeLogModal()">&times;</button>
+                </div>
+                <div class="log-modal-body" id="log-modal-body">Loading...</div>
+            </div>
         </div>
 
         <h2>Issues</h2>
@@ -744,29 +1050,104 @@ const dashboardHTML = `<!DOCTYPE html>
 
         function updateWorkers(data) {
             workers = data || [];
-            const tbody = document.getElementById('workers-table');
+            const panel = document.getElementById('workers-panel');
 
             if (workers.length === 0) {
-                tbody.innerHTML = '<tr><td colspan="6">No workers</td></tr>';
+                panel.innerHTML = '<div style="color: #888; padding: 20px;">No workers</div>';
                 return;
             }
 
-            tbody.innerHTML = workers.map(w => {
+            panel.innerHTML = workers.map(w => {
+                const health = w.health || 'idle';
+                const healthClass = 'health-' + health;
                 const statusClass = 'status-' + (w.status || 'unknown');
-                const runningClass = w.status === 'running' ? 'running' : '';
-                const issueStr = w.issue_number ? '#' + w.issue_number : '--';
-                const titleStr = w.issue_title ? ' - ' + (w.issue_title.length > 30 ? w.issue_title.substring(0, 30) + '...' : w.issue_title) : '';
+                const issueStr = w.issue_number ? '#' + w.issue_number : 'No issue';
+                const titleStr = w.issue_title ? (w.issue_title.length > 35 ? w.issue_title.substring(0, 35) + '...' : w.issue_title) : '';
+                const lastActivity = w.last_activity_seconds !== undefined ? formatElapsed(w.last_activity_seconds) + ' ago' : '--';
+                const isPaused = w.status === 'paused';
+                const isRunning = w.status === 'running';
 
-                return '<tr class="' + runningClass + '">' +
-                    '<td>' + w.worker_id + '</td>' +
-                    '<td>' + issueStr + titleStr + '</td>' +
-                    '<td>' + (w.stage || '--') + '</td>' +
-                    '<td><span class="status-badge ' + statusClass + '">' + (w.status || 'unknown') + '</span></td>' +
-                    '<td>' + (w.retry_count || 0) + '</td>' +
-                    '<td class="log-preview">' + (w.log_tail || '--') + '</td>' +
-                '</tr>';
+                return '<div class="worker-card ' + healthClass + '" onclick="showWorkerLog(' + w.worker_id + ')">' +
+                    '<div class="worker-header">' +
+                        '<span class="worker-id">Worker ' + w.worker_id + '</span>' +
+                        '<div class="worker-health">' +
+                            '<span class="status-badge ' + statusClass + '">' + (w.status || 'unknown') + '</span>' +
+                            '<span class="health-dot ' + health + '" title="Health: ' + health + '"></span>' +
+                        '</div>' +
+                    '</div>' +
+                    '<div class="worker-issue">' + issueStr + (titleStr ? ' - ' + titleStr : '') + '</div>' +
+                    '<div class="worker-meta">' +
+                        '<span>Stage: ' + (w.stage || '--') + '</span>' +
+                        '<span>Retries: ' + (w.retry_count || 0) + '</span>' +
+                        '<span>Last activity: ' + lastActivity + '</span>' +
+                    '</div>' +
+                    '<div class="worker-log-preview">' + (w.log_tail || 'No log output') + '</div>' +
+                    '<div class="worker-actions" onclick="event.stopPropagation()">' +
+                        (isRunning ? '<button class="worker-btn btn-pause" onclick="pauseWorker(' + w.worker_id + ')">Pause</button>' : '') +
+                        (isPaused ? '<button class="worker-btn btn-resume" onclick="resumeWorker(' + w.worker_id + ')">Resume</button>' : '') +
+                        '<button class="worker-btn btn-log" onclick="showWorkerLog(' + w.worker_id + ')">View Log</button>' +
+                    '</div>' +
+                '</div>';
             }).join('');
         }
+
+        function pauseWorker(workerId) {
+            fetch('/api/worker/pause/' + workerId, { method: 'POST' })
+                .then(r => r.json())
+                .then(data => {
+                    if (data.success) {
+                        addEvent('worker_paused', { worker_id: workerId, status: 'paused' });
+                        fetch('/api/workers').then(r => r.json()).then(updateWorkers);
+                    }
+                })
+                .catch(err => addEvent('error', { message: 'Failed to pause worker' }));
+        }
+
+        function resumeWorker(workerId) {
+            fetch('/api/worker/resume/' + workerId, { method: 'POST' })
+                .then(r => r.json())
+                .then(data => {
+                    if (data.success) {
+                        addEvent('worker_resumed', { worker_id: workerId, status: 'running' });
+                        fetch('/api/workers').then(r => r.json()).then(updateWorkers);
+                    }
+                })
+                .catch(err => addEvent('error', { message: 'Failed to resume worker' }));
+        }
+
+        let logRefreshInterval = null;
+
+        function showWorkerLog(workerId) {
+            document.getElementById('log-modal').classList.add('active');
+            document.getElementById('log-modal-worker-id').textContent = workerId;
+            refreshWorkerLog(workerId);
+            // Auto-refresh log every 2 seconds
+            if (logRefreshInterval) clearInterval(logRefreshInterval);
+            logRefreshInterval = setInterval(() => refreshWorkerLog(workerId), 2000);
+        }
+
+        function refreshWorkerLog(workerId) {
+            fetch('/api/log/' + workerId + '?lines=200')
+                .then(r => r.text())
+                .then(log => {
+                    const body = document.getElementById('log-modal-body');
+                    body.textContent = log || 'No log output yet...';
+                    body.scrollTop = body.scrollHeight;
+                });
+        }
+
+        function closeLogModal() {
+            document.getElementById('log-modal').classList.remove('active');
+            if (logRefreshInterval) {
+                clearInterval(logRefreshInterval);
+                logRefreshInterval = null;
+            }
+        }
+
+        // Close modal on escape key
+        document.addEventListener('keydown', (e) => {
+            if (e.key === 'Escape') closeLogModal();
+        });
 
         function updateIssues(data) {
             issues = data || [];
@@ -896,6 +1277,18 @@ const dashboardHTML = `<!DOCTYPE html>
         evtSource.addEventListener('worker_idle', (e) => {
             const data = JSON.parse(e.data);
             addEvent('worker_idle', data);
+            fetch('/api/workers').then(r => r.json()).then(updateWorkers);
+        });
+
+        evtSource.addEventListener('worker_paused', (e) => {
+            const data = JSON.parse(e.data);
+            addEvent('worker_paused', data);
+            fetch('/api/workers').then(r => r.json()).then(updateWorkers);
+        });
+
+        evtSource.addEventListener('worker_resumed', (e) => {
+            const data = JSON.parse(e.data);
+            addEvent('worker_resumed', data);
             fetch('/api/workers').then(r => r.json()).then(updateWorkers);
         });
 
