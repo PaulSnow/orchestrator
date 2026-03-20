@@ -214,6 +214,12 @@ EXAMPLES
   # Custom worker count and session name
   orchestrator launch --config issues.json --workers 3 --session mywork
 
+  # Keep tmux session alive after completion for inspection
+  orchestrator launch --config issues.json --keep-tmux-session
+
+  # Clean up worktrees on completion
+  orchestrator launch --config issues.json --cleanup-worktrees
+
 OPTIONS`)
 		fs.PrintDefaults()
 	}
@@ -230,6 +236,9 @@ OPTIONS`)
 	reviewOnly := fs.Bool("review-only", false, "Run review gate only, exit before launching workers")
 	postComments := fs.Bool("post-comments", false, "Post review findings as comments on failing issues")
 	webPort := fs.Int("web-port", 8123, "Web dashboard port (0 to disable)")
+	// Cleanup options
+	keepTmuxSession := fs.Bool("keep-tmux-session", false, "Keep tmux session alive after completion")
+	cleanupWorktrees := fs.Bool("cleanup-worktrees", false, "Remove worktrees on completion")
 	fs.Parse(args)
 
 	var configs []*orchestrator.RunConfig
@@ -556,18 +565,47 @@ OPTIONS`)
 			cfg.NumWorkers = numWorkers
 		}
 
-		if len(configs) > 1 {
-			// Multi-project mode
-			orchestrator.RunMonitorLoopGlobal(configs, state, numWorkers, tmuxSession, false)
-		} else {
-			// Single project mode
-			orchestrator.RunMonitorLoop(primaryCfg, state, false)
+		// Create cleanup manager and setup signal handler for graceful shutdown
+		cleanupOptions := &orchestrator.CleanupOptions{
+			KeepTmuxSession:  *keepTmuxSession,
+			CleanupWorktrees: *cleanupWorktrees,
+			Quiet:            false,
 		}
+		cleanupMgr := orchestrator.NewCleanupManager(primaryCfg, state, cleanupOptions)
 
-		// Orchestration complete
-		events.SetPhase(orchestrator.PhaseCompleted, "all work done")
-		fmt.Println()
-		fmt.Println("Orchestration complete.")
+		// Register this orchestrator instance
+		cleanupMgr.RegisterInstance()
+
+		// Setup signal handler for SIGINT/SIGTERM
+		shutdownCh := cleanupMgr.SetupSignalHandler()
+
+		// Run monitor loop with shutdown awareness
+		done := make(chan bool, 1)
+		go func() {
+			if len(configs) > 1 {
+				// Multi-project mode
+				orchestrator.RunMonitorLoopGlobal(configs, state, numWorkers, tmuxSession, false)
+			} else {
+				// Single project mode
+				orchestrator.RunMonitorLoop(primaryCfg, state, false)
+			}
+			done <- true
+		}()
+
+		// Wait for either normal completion or signal-triggered shutdown
+		select {
+		case <-done:
+			// Normal completion - run cleanup
+			events.SetPhase(orchestrator.PhaseCompleted, "all work done")
+			fmt.Println()
+			fmt.Println("Orchestration complete.")
+			cleanupMgr.RunCleanup()
+		case <-shutdownCh:
+			// Signal-triggered shutdown - cleanup already happened in handler
+			events.SetPhase(orchestrator.PhaseCompleted, "shutdown signal received")
+			fmt.Println()
+			fmt.Println("Graceful shutdown complete.")
+		}
 	}
 }
 
@@ -661,23 +699,109 @@ func cmdCleanup(args []string) {
 
 DESCRIPTION
   Stops all workers and cleans up resources:
-  - Kills the tmux session
-  - Removes git worktrees (unless --keep-worktrees)
-  - Clears state files
+  - Kills the tmux session (unless --keep-tmux-session)
+  - Removes signal files in /tmp
+  - Removes worker log files in /tmp
+  - Removes git worktrees (if --cleanup-worktrees)
+  - Deregisters from orchestrator registry
+
+  Use --all to clean up orphaned resources from crashed or
+  killed orchestrator instances.
 
 USAGE
   orchestrator cleanup --config <file>
-  orchestrator cleanup --config <file> --keep-worktrees
+  orchestrator cleanup --all
 
 OPTIONS`)
 		fs.PrintDefaults()
 	}
-	keepWorktrees := fs.Bool("keep-worktrees", false, "Keep worktrees (don't delete)")
-	config := fs.String("config", defaultConfigPath(), "Config file")
+	all := fs.Bool("all", false, "Clean up all orphaned resources from dead orchestrator instances")
+	keepWorktrees := fs.Bool("keep-worktrees", false, "Keep worktrees (don't delete) - deprecated, use --cleanup-worktrees")
+	cleanupWorktrees := fs.Bool("cleanup-worktrees", false, "Remove worktrees")
+	keepTmux := fs.Bool("keep-tmux-session", false, "Keep tmux session alive")
+	config := fs.String("config", "", "Config file")
+	verbose := fs.Bool("verbose", true, "Show detailed output")
 	fs.Parse(args)
 
-	cfg, _ := orchestrator.LoadConfig(*config)
-	orchestrator.RunCleanup(cfg, *keepWorktrees)
+	// Handle --all mode for orphaned resource cleanup
+	if *all {
+		fmt.Println("+" + strings.Repeat("=", 48) + "+")
+		fmt.Println("|  Cleaning Orphaned Orchestrator Resources       |")
+		fmt.Println("+" + strings.Repeat("=", 48) + "+")
+		fmt.Println()
+
+		// Clean orphaned registry entries
+		count, err := orchestrator.CleanupOrphanedResources(*verbose)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error cleaning orphaned resources: %v\n", err)
+			os.Exit(1)
+		}
+
+		// Find and report orphaned tmux sessions
+		orphanedSessions := orchestrator.FindOrphanedTmuxSessions()
+		if len(orphanedSessions) > 0 {
+			fmt.Println()
+			fmt.Printf("Found %d potentially orphaned tmux sessions:\n", len(orphanedSessions))
+			for _, s := range orphanedSessions {
+				fmt.Printf("  - %s\n", s)
+			}
+			fmt.Println()
+			fmt.Println("To kill these sessions manually:")
+			for _, s := range orphanedSessions {
+				fmt.Printf("  tmux kill-session -t %s\n", s)
+			}
+		}
+
+		// Find and clean orphaned signal files
+		orphanedSignals := orchestrator.FindOrphanedSignalFiles()
+		if len(orphanedSignals) > 0 {
+			fmt.Println()
+			fmt.Printf("Cleaning %d orphaned signal files...\n", len(orphanedSignals))
+			for _, f := range orphanedSignals {
+				if *verbose {
+					fmt.Printf("  Removing: %s\n", f)
+				}
+				os.Remove(f)
+			}
+		}
+
+		fmt.Println()
+		if count == 0 && len(orphanedSessions) == 0 && len(orphanedSignals) == 0 {
+			fmt.Println("No orphaned resources found.")
+		} else {
+			fmt.Println("Cleanup complete.")
+		}
+		return
+	}
+
+	// Normal cleanup mode - requires config
+	if *config == "" {
+		*config = defaultConfigPath()
+	}
+
+	cfg, err := orchestrator.LoadConfig(*config)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error loading config: %v\n", err)
+		os.Exit(1)
+	}
+
+	// Determine cleanup options
+	// For backward compatibility: --keep-worktrees means don't cleanup worktrees
+	// New flag: --cleanup-worktrees means do cleanup worktrees
+	doCleanupWorktrees := *cleanupWorktrees
+	if *keepWorktrees {
+		doCleanupWorktrees = false
+	}
+
+	state := orchestrator.NewStateManager(cfg)
+	options := &orchestrator.CleanupOptions{
+		KeepTmuxSession:  *keepTmux,
+		CleanupWorktrees: doCleanupWorktrees,
+		Quiet:            !*verbose,
+	}
+
+	cm := orchestrator.NewCleanupManager(cfg, state, options)
+	cm.RunCleanup()
 }
 
 func cmdStatus(args []string) {
