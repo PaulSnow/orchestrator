@@ -106,11 +106,11 @@ func GetInProgressIssues(cfg *RunConfig) map[int]bool {
 	return result
 }
 
-// GetPendingCount returns count of pending + in_progress issues.
+// GetPendingCount returns count of pending issues only.
 func GetPendingCount(cfg *RunConfig) int {
 	count := 0
 	for _, i := range cfg.Issues {
-		if i.Status == "pending" || i.Status == "in_progress" {
+		if i.Status == "pending" {
 			count++
 		}
 	}

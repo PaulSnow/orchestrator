@@ -97,13 +97,15 @@ func (cc *ConsistencyChecker) checkBranchVsStatus() []Inconsistency {
 		}
 
 		if issue.Status == "pending" && hasRemoteBranch && hasCommits {
+			// Don't auto-fix - branch existing doesn't mean work is complete.
+			// The previous run may have crashed or work may be incomplete.
 			issues = append(issues, Inconsistency{
 				Type:        InconsistencyBranchExistsButPending,
-				Description: fmt.Sprintf("Issue #%d is pending but branch %s exists with commits", issue.Number, branchName),
+				Description: fmt.Sprintf("Issue #%d is pending but branch %s exists (stale branch?)", issue.Number, branchName),
 				IssueNumber: &issue.Number,
 				DetectedAt:  time.Now(),
-				AutoFixable: true,
-				SuggestedFix: "Mark issue as completed since work exists on branch",
+				AutoFixable: false,
+				SuggestedFix: "Check if work is complete or delete stale branch",
 				Details: map[string]any{
 					"branch": branchName,
 					"status": issue.Status,

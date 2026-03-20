@@ -117,6 +117,18 @@ func (sm *StateManager) LoadAllWorkers() []*Worker {
 
 // UpdateIssueStatus updates an issue's status in the config file.
 func (sm *StateManager) UpdateIssueStatus(issueNumber int, status string, assignedWorker *int) error {
+	// Always update in-memory config first
+	for _, issue := range sm.cfg.Issues {
+		if issue.Number == issueNumber {
+			issue.Status = status
+			if assignedWorker != nil {
+				issue.AssignedWorker = assignedWorker
+			}
+			break
+		}
+	}
+
+	// If no config file (epic-based config), we're done
 	if sm.cfg.ConfigPath == "" {
 		return nil
 	}
@@ -153,17 +165,6 @@ func (sm *StateManager) UpdateIssueStatus(issueNumber int, status string, assign
 
 	if err := AtomicWrite(sm.cfg.ConfigPath, raw); err != nil {
 		return err
-	}
-
-	// Also update in-memory config
-	for _, issue := range sm.cfg.Issues {
-		if issue.Number == issueNumber {
-			issue.Status = status
-			if assignedWorker != nil {
-				issue.AssignedWorker = assignedWorker
-			}
-			break
-		}
 	}
 
 	return nil
