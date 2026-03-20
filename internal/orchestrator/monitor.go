@@ -797,10 +797,54 @@ func RunMonitorLoop(cfg *RunConfig, state *StateManager, noDelay bool) {
 		LogMsg("Skipping initial delay (--no-delay)")
 	}
 
+	// Create consistency checker
+	consistencyChecker := NewConsistencyChecker(cfg, state)
+
 	cycle := 0
 	for {
 		cycle++
 		LogMsg(fmt.Sprintf("==== Cycle %d starting ====", cycle))
+
+		// Hot-reload from epic every 10 cycles (if epic-based config)
+		if cycle%10 == 1 && cfg.EpicNumber > 0 {
+			LogMsg("[epic] Reloading from epic issue...")
+			if err := ReloadFromEpic(cfg); err != nil {
+				LogMsg(fmt.Sprintf("[epic] Reload failed: %v", err))
+			} else {
+				LogMsg(fmt.Sprintf("[epic] Reloaded: %d issues", len(cfg.Issues)))
+			}
+		}
+
+		// Run consistency checks every 5 cycles
+		if cycle%5 == 1 {
+			inconsistencies := consistencyChecker.CheckAll()
+			if len(inconsistencies) > 0 {
+				LogMsg(fmt.Sprintf("[consistency] Found %d inconsistencies", len(inconsistencies)))
+				consistencyChecker.ReportToEventLog(inconsistencies)
+
+				// Auto-fix what we can
+				for _, inc := range inconsistencies {
+					if inc.AutoFixable {
+						if err := consistencyChecker.AutoFix(inc); err != nil {
+							LogMsg(fmt.Sprintf("[consistency] Auto-fix failed: %v", err))
+						}
+					}
+				}
+
+				// For non-auto-fixable issues, launch fixer session
+				var needsFixer []Inconsistency
+				for _, inc := range inconsistencies {
+					if !inc.AutoFixable {
+						needsFixer = append(needsFixer, inc)
+					}
+				}
+				if len(needsFixer) > 0 {
+					if err := consistencyChecker.LaunchFixerSession(needsFixer, cfg.TmuxSession); err != nil {
+						LogMsg(fmt.Sprintf("[consistency] Failed to launch fixer: %v", err))
+					}
+				}
+			}
+		}
 
 		// Collect snapshots
 		LogMsg("Collecting worker state...")

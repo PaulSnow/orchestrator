@@ -298,6 +298,11 @@ func (eb *EventBroadcaster) EmitLogUpdate(workerID int, logTail string) {
 	})
 }
 
+// EmitEvent broadcasts a generic event with custom data.
+func (eb *EventBroadcaster) EmitEvent(eventType string, data map[string]any) {
+	eb.BroadcastType(eventType, data)
+}
+
 // GetInProgressCount returns the count of in-progress issues.
 func GetInProgressCount(cfg *RunConfig) int {
 	count := 0

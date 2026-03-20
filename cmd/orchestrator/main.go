@@ -166,28 +166,34 @@ func cmdLaunch(args []string) {
 		fmt.Println(`orchestrator launch - Start parallel Claude workers on issues
 
 USAGE
-  orchestrator launch --config <file>
-  orchestrator launch --epic <url> --repo <path> --worktrees <path>
+  orchestrator launch <epic-number>          # Recommended - auto-detects repo
+  orchestrator launch --config <file>        # Legacy - uses JSON config file
 
 DESCRIPTION
   Launches Claude Code workers in parallel tmux windows. Each worker gets
   an isolated git worktree and works on one issue at a time. When a worker
   completes, it's automatically assigned the next available issue.
 
+  The epic issue contains a task list with checkboxes that reference other
+  issues. The orchestrator parses this list and assigns issues to workers.
+  When an issue is completed, its checkbox is automatically checked.
+
 INPUT SOURCES (pick one)
 
+  <epic-number>         Epic issue number (auto-detects repo from git remote)
   --config <file>       JSON config file with issues array
   --config-dir <dir>    Directory containing *-issues.json files (merges all)
-  --epic <url>          GitHub epic issue URL - parses task list from body
+  --epic <url>          Full GitHub/GitLab epic issue URL
 
-  Epic URL formats supported:
-    https://github.com/owner/repo/issues/123
-    owner/repo#123
+EPIC FORMAT
+  The epic issue body should contain a task list like:
 
-EPIC MODE REQUIREMENTS
-  When using --epic, you must also specify:
-    --repo <path>        Path to the git repository
-    --worktrees <path>   Directory for creating worktrees
+    ## Tasks
+    - [ ] #101 - Implement feature A
+    - [ ] #102 - Fix bug B (blocked by #101)
+    - [x] #103 - Already completed
+
+  Dependencies are parsed from "(blocked by #N)" or "(depends on #N)".
 
 REVIEW GATE
   By default, issues are reviewed before work begins to ensure they are
@@ -196,23 +202,18 @@ REVIEW GATE
 
 EXAMPLES
 
-  # Standard launch with config file
-  orchestrator launch --config config/my-issues.json
+  # Launch from epic issue (run from within the repo)
+  cd /path/to/myrepo
+  orchestrator launch 42
 
-  # Launch from GitHub epic
-  orchestrator launch \
-    --epic https://github.com/PaulSnow/myrepo/issues/42 \
-    --repo /home/paul/go/src/github.com/PaulSnow/myrepo \
-    --worktrees /tmp/myrepo-worktrees
+  # Launch with custom worker count
+  orchestrator launch 42 --workers 3
+
+  # Launch with config file (legacy)
+  orchestrator launch --config config/issues.json
 
   # Review only - validate issues are ready
-  orchestrator launch --config issues.json --review-only
-
-  # Quick re-run, skip review
-  orchestrator launch --config issues.json --skip-review
-
-  # Custom worker count and session name
-  orchestrator launch --config issues.json --workers 3 --session mywork
+  orchestrator launch 42 --review-only
 
 OPTIONS`)
 		fs.PrintDefaults()
@@ -223,8 +224,8 @@ OPTIONS`)
 	configDir := fs.String("config-dir", "", "Directory with *-issues.json configs (merges all)")
 	config := fs.String("config", "", "JSON config file with issues array")
 	epic := fs.String("epic", "", "GitHub epic issue URL to use as config source")
-	repoPath := fs.String("repo", "", "Repository path (required with --epic)")
-	worktreeBase := fs.String("worktrees", "", "Worktree base directory (required with --epic)")
+	repoPath := fs.String("repo", "", "Repository path (defaults to current directory)")
+	worktreeBase := fs.String("worktrees", "", "Worktree base directory (defaults to /tmp/<repo>-worktrees)")
 	branchPrefix := fs.String("branch-prefix", "feature/issue-", "Git branch prefix for issue branches")
 	skipReview := fs.Bool("skip-review", false, "Skip the review gate (for re-runs)")
 	reviewOnly := fs.Bool("review-only", false, "Run review gate only, exit before launching workers")
@@ -234,10 +235,44 @@ OPTIONS`)
 
 	var configs []*orchestrator.RunConfig
 
-	// Load config from epic or traditional config file
-	if *epic != "" {
+	// Check for positional argument (epic issue number)
+	positionalArgs := fs.Args()
+
+	// Load config from: (1) positional epic number, (2) --epic URL, or (3) config file
+	if len(positionalArgs) > 0 {
+		// Try to parse as issue number
+		epicNum, err := strconv.Atoi(positionalArgs[0])
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error: '%s' is not a valid issue number\n", positionalArgs[0])
+			os.Exit(1)
+		}
+
+		fmt.Printf("Loading epic issue #%d from current repository...\n", epicNum)
+		cfg, err := orchestrator.LoadConfigFromEpicNumber(epicNum, *workers)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error loading epic #%d: %v\n", epicNum, err)
+			os.Exit(1)
+		}
+
+		// Apply overrides
+		if *worktreeBase != "" {
+			if repo, _ := cfg.PrimaryRepo(); repo != nil {
+				repo.WorktreeBase = *worktreeBase
+			}
+		}
+		if *branchPrefix != "feature/issue-" {
+			if repo, _ := cfg.PrimaryRepo(); repo != nil {
+				repo.BranchPrefix = *branchPrefix
+			}
+		}
+
+		configs = append(configs, cfg)
+		fmt.Printf("Loaded %d issues from epic #%d (%s)\n", len(cfg.Issues), epicNum, cfg.Project)
+
+	} else if *epic != "" {
+		// Legacy --epic URL mode
 		if *repoPath == "" || *worktreeBase == "" {
-			fmt.Fprintln(os.Stderr, "Error: --repo and --worktrees are required when using --epic")
+			fmt.Fprintln(os.Stderr, "Error: --repo and --worktrees are required when using --epic URL")
 			os.Exit(1)
 		}
 		cfg, err := orchestrator.LoadConfigFromEpic(*epic, *repoPath, *worktreeBase, *branchPrefix, *workers)
@@ -249,8 +284,16 @@ OPTIONS`)
 		cfg.ConfigPath = *epic
 		configs = append(configs, cfg)
 		fmt.Printf("Loaded %d issues from epic: %s\n", len(cfg.Issues), *epic)
-	} else {
+	} else if *config != "" || *configDir != "" {
 		configs = resolveConfigs(*configDir, *config)
+	} else {
+		fmt.Fprintln(os.Stderr, "Error: provide an epic issue number, --epic URL, or --config file")
+		fmt.Fprintln(os.Stderr, "")
+		fmt.Fprintln(os.Stderr, "Usage:")
+		fmt.Fprintln(os.Stderr, "  orchestrator launch 123              # Epic issue number (auto-detect repo)")
+		fmt.Fprintln(os.Stderr, "  orchestrator launch --config file.json")
+		fmt.Fprintln(os.Stderr, "  orchestrator launch --epic https://github.com/owner/repo/issues/123 --repo . --worktrees /tmp/wt")
+		os.Exit(1)
 	}
 	numWorkers := *workers
 	// Default session name to project name

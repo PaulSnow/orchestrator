@@ -3,7 +3,9 @@ package orchestrator
 import (
 	"encoding/json"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -18,6 +20,311 @@ type EpicConfig struct {
 	Workers      int    `json:"workers"`       // Number of workers
 }
 
+// RepoInfo contains information about a git repository.
+type RepoInfo struct {
+	Owner        string // GitHub/GitLab owner/org
+	Name         string // Repository name
+	Platform     string // "github" or "gitlab"
+	LocalPath    string // Absolute path to repo
+	DefaultBranch string // main, master, etc.
+	RemoteURL    string // Original remote URL
+}
+
+// DetectRepoInfo detects repository information from the current directory.
+func DetectRepoInfo() (*RepoInfo, error) {
+	return DetectRepoInfoFromPath(".")
+}
+
+// DetectRepoInfoFromPath detects repository information from a given path.
+func DetectRepoInfoFromPath(path string) (*RepoInfo, error) {
+	// Get absolute path
+	absPath, err := filepath.Abs(path)
+	if err != nil {
+		return nil, fmt.Errorf("get absolute path: %w", err)
+	}
+
+	// Check if it's a git repo
+	cmd := exec.Command("git", "-C", absPath, "rev-parse", "--git-dir")
+	if err := cmd.Run(); err != nil {
+		return nil, fmt.Errorf("not a git repository: %s", absPath)
+	}
+
+	// Get remote URL
+	cmd = exec.Command("git", "-C", absPath, "remote", "get-url", "origin")
+	output, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("no origin remote configured")
+	}
+	remoteURL := strings.TrimSpace(string(output))
+
+	// Parse remote URL to extract owner, repo, platform
+	owner, repo, platform, err := parseRemoteURL(remoteURL)
+	if err != nil {
+		return nil, err
+	}
+
+	// Get default branch
+	defaultBranch := detectDefaultBranch(absPath)
+
+	return &RepoInfo{
+		Owner:         owner,
+		Name:          repo,
+		Platform:      platform,
+		LocalPath:     absPath,
+		DefaultBranch: defaultBranch,
+		RemoteURL:     remoteURL,
+	}, nil
+}
+
+// parseRemoteURL parses a git remote URL and extracts owner, repo, and platform.
+// Supports formats:
+//   - https://github.com/owner/repo.git
+//   - git@github.com:owner/repo.git
+//   - https://gitlab.com/owner/repo.git
+//   - git@gitlab.com:owner/repo.git
+func parseRemoteURL(url string) (owner, repo, platform string, err error) {
+	// HTTPS format: https://github.com/owner/repo.git
+	httpsRe := regexp.MustCompile(`https?://([^/]+)/([^/]+)/([^/]+?)(?:\.git)?$`)
+	if m := httpsRe.FindStringSubmatch(url); m != nil {
+		host := m[1]
+		owner = m[2]
+		repo = strings.TrimSuffix(m[3], ".git")
+		platform = detectPlatformFromHost(host)
+		return owner, repo, platform, nil
+	}
+
+	// SSH format: git@github.com:owner/repo.git
+	sshRe := regexp.MustCompile(`git@([^:]+):([^/]+)/([^/]+?)(?:\.git)?$`)
+	if m := sshRe.FindStringSubmatch(url); m != nil {
+		host := m[1]
+		owner = m[2]
+		repo = strings.TrimSuffix(m[3], ".git")
+		platform = detectPlatformFromHost(host)
+		return owner, repo, platform, nil
+	}
+
+	return "", "", "", fmt.Errorf("unable to parse remote URL: %s", url)
+}
+
+// detectPlatformFromHost determines the platform from the host name.
+func detectPlatformFromHost(host string) string {
+	host = strings.ToLower(host)
+	if strings.Contains(host, "gitlab") {
+		return "gitlab"
+	}
+	return "github" // Default to GitHub
+}
+
+// detectDefaultBranch tries to detect the default branch name.
+func detectDefaultBranch(repoPath string) string {
+	// Try to get from remote HEAD
+	cmd := exec.Command("git", "-C", repoPath, "symbolic-ref", "refs/remotes/origin/HEAD")
+	output, err := cmd.Output()
+	if err == nil {
+		ref := strings.TrimSpace(string(output))
+		if strings.HasPrefix(ref, "refs/remotes/origin/") {
+			return strings.TrimPrefix(ref, "refs/remotes/origin/")
+		}
+	}
+
+	// Check for common branch names
+	for _, branch := range []string{"main", "master"} {
+		cmd = exec.Command("git", "-C", repoPath, "show-ref", "--verify", "--quiet",
+			fmt.Sprintf("refs/remotes/origin/%s", branch))
+		if err := cmd.Run(); err == nil {
+			return branch
+		}
+	}
+
+	return "main" // Default fallback
+}
+
+// LoadConfigFromEpicNumber creates a RunConfig from just an epic issue number.
+// It auto-detects the repository from the current directory.
+func LoadConfigFromEpicNumber(epicNumber int, workers int) (*RunConfig, error) {
+	// Detect repo info from current directory
+	repoInfo, err := DetectRepoInfo()
+	if err != nil {
+		return nil, fmt.Errorf("detect repo: %w", err)
+	}
+
+	// Set defaults
+	worktreeBase := filepath.Join(os.TempDir(), fmt.Sprintf("%s-worktrees", repoInfo.Name))
+	branchPrefix := "feature/issue-"
+
+	return LoadConfigFromEpicFull(repoInfo, epicNumber, worktreeBase, branchPrefix, workers)
+}
+
+// LoadConfigFromEpicFull creates a RunConfig from repo info and epic number.
+func LoadConfigFromEpicFull(repoInfo *RepoInfo, epicNumber int, worktreeBase, branchPrefix string, workers int) (*RunConfig, error) {
+	// Fetch the epic issue
+	epic, err := FetchIssueFromPlatform(repoInfo.Owner, repoInfo.Name, epicNumber, repoInfo.Platform)
+	if err != nil {
+		return nil, fmt.Errorf("fetch epic #%d: %w", epicNumber, err)
+	}
+
+	// Parse task list from epic body
+	tasks := ParseTaskList(epic.Body)
+	if len(tasks) == 0 {
+		return nil, fmt.Errorf("no task items found in epic #%d body", epicNumber)
+	}
+
+	// Create config
+	cfg := NewRunConfig()
+	cfg.Project = fmt.Sprintf("%s/%s", repoInfo.Owner, repoInfo.Name)
+
+	if branchPrefix == "" {
+		branchPrefix = "feature/issue-"
+	}
+
+	// Add repo config
+	cfg.Repos["default"] = &RepoConfig{
+		Name:          "default",
+		Path:          repoInfo.LocalPath,
+		WorktreeBase:  worktreeBase,
+		BranchPrefix:  branchPrefix,
+		Platform:      repoInfo.Platform,
+		DefaultBranch: repoInfo.DefaultBranch,
+	}
+
+	// Store epic info for hot-reload
+	cfg.EpicNumber = epicNumber
+	cfg.EpicURL = epic.HTMLURL
+
+	// Process each task item
+	for _, task := range tasks {
+		// Skip completed tasks
+		if task.Completed {
+			continue
+		}
+
+		// Fetch full issue details
+		subIssue, err := FetchIssueFromPlatform(repoInfo.Owner, repoInfo.Name, task.IssueNumber, repoInfo.Platform)
+		if err != nil {
+			LogMsg(fmt.Sprintf("Warning: could not fetch #%d: %v", task.IssueNumber, err))
+			continue
+		}
+
+		issue := &Issue{
+			Number:      task.IssueNumber,
+			Title:       subIssue.Title,
+			Description: subIssue.Body,
+			DependsOn:   task.BlockedBy,
+			Status:      "pending",
+			Repo:        "default",
+		}
+
+		cfg.Issues = append(cfg.Issues, issue)
+	}
+
+	if len(cfg.Issues) == 0 {
+		return nil, fmt.Errorf("no open issues found in epic #%d", epicNumber)
+	}
+
+	// Set workers
+	if workers > 0 {
+		cfg.NumWorkers = workers
+	}
+
+	// Use repo name as tmux session
+	cfg.TmuxSession = repoInfo.Name
+
+	return cfg, nil
+}
+
+// ReloadFromEpic reloads the config from the epic issue.
+// It preserves the status of completed issues.
+func ReloadFromEpic(cfg *RunConfig) error {
+	if cfg.EpicNumber == 0 {
+		return nil // Not an epic-based config
+	}
+
+	repo, _ := cfg.PrimaryRepo()
+	if repo == nil {
+		return fmt.Errorf("no primary repo configured")
+	}
+
+	repoInfo := &RepoInfo{
+		Owner:         extractOwnerFromProject(cfg.Project),
+		Name:          extractRepoFromProject(cfg.Project),
+		Platform:      repo.Platform,
+		LocalPath:     repo.Path,
+		DefaultBranch: repo.DefaultBranch,
+	}
+
+	// Fetch the epic
+	epic, err := FetchIssueFromPlatform(repoInfo.Owner, repoInfo.Name, cfg.EpicNumber, repoInfo.Platform)
+	if err != nil {
+		return fmt.Errorf("fetch epic: %w", err)
+	}
+
+	// Parse tasks
+	tasks := ParseTaskList(epic.Body)
+
+	// Build map of current issue statuses to preserve
+	existingStatus := make(map[int]string)
+	for _, issue := range cfg.Issues {
+		existingStatus[issue.Number] = issue.Status
+	}
+
+	// Rebuild issues list
+	var newIssues []*Issue
+	for _, task := range tasks {
+		// Check if issue already exists
+		status := "pending"
+		if task.Completed {
+			status = "completed"
+		} else if existing, ok := existingStatus[task.IssueNumber]; ok {
+			status = existing // Preserve existing status
+		}
+
+		// Fetch issue details if not completed
+		var title, description string
+		if status != "completed" {
+			subIssue, err := FetchIssueFromPlatform(repoInfo.Owner, repoInfo.Name, task.IssueNumber, repoInfo.Platform)
+			if err != nil {
+				LogMsg(fmt.Sprintf("Warning: could not fetch #%d: %v", task.IssueNumber, err))
+				continue
+			}
+			title = subIssue.Title
+			description = subIssue.Body
+		} else {
+			// For completed, just use task title
+			title = task.Title
+		}
+
+		issue := &Issue{
+			Number:      task.IssueNumber,
+			Title:       title,
+			Description: description,
+			DependsOn:   task.BlockedBy,
+			Status:      status,
+			Repo:        "default",
+		}
+
+		newIssues = append(newIssues, issue)
+	}
+
+	cfg.Issues = newIssues
+	return nil
+}
+
+func extractOwnerFromProject(project string) string {
+	parts := strings.Split(project, "/")
+	if len(parts) >= 1 {
+		return parts[0]
+	}
+	return ""
+}
+
+func extractRepoFromProject(project string) string {
+	parts := strings.Split(project, "/")
+	if len(parts) >= 2 {
+		return parts[1]
+	}
+	return ""
+}
+
 // GitHubIssue represents a GitHub issue from the API.
 type GitHubIssue struct {
 	Number int    `json:"number"`
@@ -27,26 +334,46 @@ type GitHubIssue struct {
 	HTMLURL string `json:"html_url"`
 }
 
-// ParseEpicURL extracts owner, repo, and issue number from a GitHub URL.
+// ParseEpicURL extracts owner, repo, issue number, and platform from a GitHub/GitLab URL.
 // Supports formats:
 //   - https://github.com/owner/repo/issues/123
-//   - owner/repo#123
+//   - https://gitlab.com/owner/repo/-/issues/123
+//   - owner/repo#123 (defaults to GitHub)
+// Returns: owner, repo, number, platform ("github" or "gitlab"), error
 func ParseEpicURL(url string) (owner, repo string, number int, err error) {
-	// Full URL format
+	_, _, _, platform, err := ParseEpicURLWithPlatform(url)
+	if err != nil {
+		return "", "", 0, err
+	}
+	owner, repo, number, _, _ = ParseEpicURLWithPlatform(url)
+	_ = platform // handled by full function
+	return owner, repo, number, nil
+}
+
+// ParseEpicURLWithPlatform extracts owner, repo, issue number, and platform.
+func ParseEpicURLWithPlatform(url string) (owner, repo string, number int, platform string, err error) {
+	// GitHub full URL format
 	re := regexp.MustCompile(`github\.com/([^/]+)/([^/]+)/issues/(\d+)`)
 	if matches := re.FindStringSubmatch(url); matches != nil {
 		number, _ = strconv.Atoi(matches[3])
-		return matches[1], matches[2], number, nil
+		return matches[1], matches[2], number, "github", nil
 	}
 
-	// Short format: owner/repo#123
+	// GitLab full URL format (handles both gitlab.com and self-hosted)
+	re = regexp.MustCompile(`gitlab[^/]*/([^/]+)/([^/]+)/-/issues/(\d+)`)
+	if matches := re.FindStringSubmatch(url); matches != nil {
+		number, _ = strconv.Atoi(matches[3])
+		return matches[1], matches[2], number, "gitlab", nil
+	}
+
+	// Short format: owner/repo#123 (default to GitHub)
 	re = regexp.MustCompile(`^([^/]+)/([^#]+)#(\d+)$`)
 	if matches := re.FindStringSubmatch(url); matches != nil {
 		number, _ = strconv.Atoi(matches[3])
-		return matches[1], matches[2], number, nil
+		return matches[1], matches[2], number, "github", nil
 	}
 
-	return "", "", 0, fmt.Errorf("invalid epic URL format: %s", url)
+	return "", "", 0, "", fmt.Errorf("invalid epic URL format: %s", url)
 }
 
 // FetchGitHubIssue fetches an issue using the gh CLI.
@@ -64,6 +391,50 @@ func FetchGitHubIssue(owner, repo string, number int) (*GitHubIssue, error) {
 		return nil, fmt.Errorf("parse issue JSON: %w", err)
 	}
 	return &issue, nil
+}
+
+// GitLabIssue represents a GitLab issue from the API.
+type GitLabIssue struct {
+	IID         int    `json:"iid"`
+	Title       string `json:"title"`
+	Description string `json:"description"`
+	State       string `json:"state"`
+	WebURL      string `json:"web_url"`
+}
+
+// FetchGitLabIssue fetches an issue using the glab CLI.
+func FetchGitLabIssue(owner, repo string, number int) (*GitHubIssue, error) {
+	cmd := exec.Command("glab", "api",
+		fmt.Sprintf("projects/%s%%2F%s/issues/%d", owner, repo, number),
+	)
+	output, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("glab api failed: %w", err)
+	}
+
+	var glIssue GitLabIssue
+	if err := json.Unmarshal(output, &glIssue); err != nil {
+		return nil, fmt.Errorf("parse issue JSON: %w", err)
+	}
+
+	// Convert to common format
+	return &GitHubIssue{
+		Number:  glIssue.IID,
+		Title:   glIssue.Title,
+		Body:    glIssue.Description,
+		State:   glIssue.State,
+		HTMLURL: glIssue.WebURL,
+	}, nil
+}
+
+// FetchIssueFromPlatform fetches an issue from GitHub or GitLab based on platform.
+func FetchIssueFromPlatform(owner, repo string, number int, platform string) (*GitHubIssue, error) {
+	switch platform {
+	case "gitlab":
+		return FetchGitLabIssue(owner, repo, number)
+	default:
+		return FetchGitHubIssue(owner, repo, number)
+	}
 }
 
 // TaskItem represents a parsed task from an epic's body.
@@ -122,15 +493,15 @@ func ParseTaskList(body string) []TaskItem {
 	return items
 }
 
-// LoadConfigFromEpic creates a RunConfig from a GitHub epic issue.
+// LoadConfigFromEpic creates a RunConfig from a GitHub or GitLab epic issue.
 func LoadConfigFromEpic(epicURL, repoPath, worktreeBase, branchPrefix string, workers int) (*RunConfig, error) {
-	owner, repo, number, err := ParseEpicURL(epicURL)
+	owner, repo, number, platform, err := ParseEpicURLWithPlatform(epicURL)
 	if err != nil {
 		return nil, err
 	}
 
 	// Fetch the epic issue
-	epic, err := FetchGitHubIssue(owner, repo, number)
+	epic, err := FetchIssueFromPlatform(owner, repo, number, platform)
 	if err != nil {
 		return nil, fmt.Errorf("fetch epic #%d: %w", number, err)
 	}
@@ -155,7 +526,7 @@ func LoadConfigFromEpic(epicURL, repoPath, worktreeBase, branchPrefix string, wo
 		Path:         repoPath,
 		WorktreeBase: worktreeBase,
 		BranchPrefix: branchPrefix,
-		Platform:     "github",
+		Platform:     platform,
 	}
 
 	// Process each task item
@@ -166,7 +537,7 @@ func LoadConfigFromEpic(epicURL, repoPath, worktreeBase, branchPrefix string, wo
 		}
 
 		// Fetch full issue details
-		subIssue, err := FetchGitHubIssue(owner, repo, task.IssueNumber)
+		subIssue, err := FetchIssueFromPlatform(owner, repo, task.IssueNumber, platform)
 		if err != nil {
 			LogMsg(fmt.Sprintf("Warning: could not fetch #%d: %v", task.IssueNumber, err))
 			continue
@@ -200,14 +571,15 @@ func LoadConfigFromEpic(epicURL, repoPath, worktreeBase, branchPrefix string, wo
 }
 
 // UpdateEpicCheckbox updates a task checkbox in the epic when an issue completes.
+// Supports both GitHub and GitLab platforms.
 func UpdateEpicCheckbox(epicURL string, issueNumber int, completed bool) error {
-	owner, repo, epicNumber, err := ParseEpicURL(epicURL)
+	owner, repo, epicNumber, platform, err := ParseEpicURLWithPlatform(epicURL)
 	if err != nil {
 		return err
 	}
 
 	// Fetch current epic body
-	epic, err := FetchGitHubIssue(owner, repo, epicNumber)
+	epic, err := FetchIssueFromPlatform(owner, repo, epicNumber, platform)
 	if err != nil {
 		return err
 	}
@@ -229,13 +601,25 @@ func UpdateEpicCheckbox(epicURL string, issueNumber int, completed bool) error {
 		return nil
 	}
 
-	// Update the issue via gh CLI
-	cmd := exec.Command("gh", "issue", "edit", strconv.Itoa(epicNumber),
-		"--repo", fmt.Sprintf("%s/%s", owner, repo),
-		"--body", newBody,
-	)
+	// Update the issue via platform-specific CLI
+	var cmd *exec.Cmd
+	switch platform {
+	case "gitlab":
+		// GitLab uses glab CLI with project API
+		cmd = exec.Command("glab", "api", "-X", "PUT",
+			fmt.Sprintf("projects/%s%%2F%s/issues/%d", owner, repo, epicNumber),
+			"-f", fmt.Sprintf("description=%s", newBody),
+		)
+	default:
+		// GitHub uses gh CLI
+		cmd = exec.Command("gh", "issue", "edit", strconv.Itoa(epicNumber),
+			"--repo", fmt.Sprintf("%s/%s", owner, repo),
+			"--body", newBody,
+		)
+	}
+
 	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("update epic body: %w", err)
+		return fmt.Errorf("update epic body on %s: %w", platform, err)
 	}
 
 	return nil

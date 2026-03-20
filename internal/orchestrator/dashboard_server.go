@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"os/exec"
 	"runtime"
@@ -68,13 +69,17 @@ func (ds *DashboardServer) Start() error {
 	// Dashboard HTML
 	mux.HandleFunc("/", ds.handleDashboard)
 
+	// Find an available port starting from the requested port
+	actualPort := ds.findAvailablePort(ds.port)
+	ds.port = actualPort
+
 	ds.server = &http.Server{
-		Addr:    fmt.Sprintf(":%d", ds.port),
+		Addr:    fmt.Sprintf(":%d", actualPort),
 		Handler: mux,
 	}
 
 	go func() {
-		LogMsg(fmt.Sprintf("Dashboard server starting on http://localhost:%d", ds.port))
+		LogMsg(fmt.Sprintf("Dashboard server starting on http://localhost:%d", actualPort))
 		if err := ds.server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			LogMsg(fmt.Sprintf("Dashboard server error: %v", err))
 		}
@@ -83,10 +88,35 @@ func (ds *DashboardServer) Start() error {
 	// Auto-launch browser after short delay to ensure server is ready
 	go func() {
 		time.Sleep(500 * time.Millisecond)
-		ds.openBrowser(fmt.Sprintf("http://localhost:%d", ds.port))
+		ds.openBrowser(fmt.Sprintf("http://localhost:%d", actualPort))
 	}()
 
 	return nil
+}
+
+// findAvailablePort finds an available port starting from the given port.
+// It tries up to 100 consecutive ports before giving up.
+func (ds *DashboardServer) findAvailablePort(startPort int) int {
+	for port := startPort; port < startPort+100; port++ {
+		listener, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
+		if err == nil {
+			listener.Close()
+			return port
+		}
+	}
+	// Fall back to letting the OS assign a port
+	listener, err := net.Listen("tcp", ":0")
+	if err != nil {
+		return startPort // Give up, return original
+	}
+	port := listener.Addr().(*net.TCPAddr).Port
+	listener.Close()
+	return port
+}
+
+// GetPort returns the actual port the server is running on.
+func (ds *DashboardServer) GetPort() int {
+	return ds.port
 }
 
 // openBrowser opens the specified URL in the default browser.
@@ -204,19 +234,32 @@ func (ds *DashboardServer) buildStateResponse() map[string]any {
 		}
 	}
 
+	// Build repos info
+	repos := make([]map[string]any, 0, len(ds.cfg.Repos))
+	for name, repo := range ds.cfg.Repos {
+		repos = append(repos, map[string]any{
+			"name":           name,
+			"path":           repo.Path,
+			"default_branch": repo.DefaultBranch,
+			"platform":       repo.Platform,
+		})
+	}
+
 	return map[string]any{
-		"phase":          ds.events.GetPhase(),
-		"project":        ds.cfg.Project,
-		"version":        Version,
-		"started_at":     ds.events.GetStartedAt().Format(time.RFC3339),
+		"phase":           ds.events.GetPhase(),
+		"project":         ds.cfg.Project,
+		"version":         Version,
+		"repos":           repos,
+		"config_path":     ds.cfg.ConfigPath,
+		"started_at":      ds.events.GetStartedAt().Format(time.RFC3339),
 		"elapsed_seconds": elapsed,
-		"total_issues":   len(ds.cfg.Issues),
-		"completed":      GetCompletedCount(ds.cfg),
-		"in_progress":    GetInProgressCount(ds.cfg),
-		"pending":        GetPendingCount(ds.cfg),
-		"failed":         GetFailedCount(ds.cfg),
-		"active_workers": activeWorkers,
-		"total_workers":  ds.cfg.NumWorkers,
+		"total_issues":    len(ds.cfg.Issues),
+		"completed":       GetCompletedCount(ds.cfg),
+		"in_progress":     GetInProgressCount(ds.cfg),
+		"pending":         GetPendingCount(ds.cfg),
+		"failed":          GetFailedCount(ds.cfg),
+		"active_workers":  activeWorkers,
+		"total_workers":   ds.cfg.NumWorkers,
 	}
 }
 
@@ -628,7 +671,8 @@ const dashboardHTML = `<!DOCTYPE html>
                 <span class="version" id="version"></span>
             </div>
             <div class="header-right">
-                <div id="project-name"></div>
+                <div id="project-name" style="font-weight: bold; font-size: 16px;"></div>
+                <div id="repos-info" style="font-size: 11px; color: #666;"></div>
                 <div id="runtime"></div>
             </div>
         </div>
@@ -818,6 +862,12 @@ const dashboardHTML = `<!DOCTYPE html>
             document.getElementById('version').textContent = 'v' + (data.version || 'dev');
             document.getElementById('project-name').textContent = data.project || '';
             document.getElementById('runtime').textContent = 'Running ' + formatElapsed(data.elapsed_seconds);
+
+            // Show repos info
+            if (data.repos && data.repos.length > 0) {
+                const reposInfo = data.repos.map(r => r.path).join(', ');
+                document.getElementById('repos-info').textContent = 'Repos: ' + reposInfo;
+            }
 
             if (data.phase) {
                 updatePhaseBar(data.phase);

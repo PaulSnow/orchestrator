@@ -319,7 +319,10 @@ func ReviewIssueSuitability(issue *Issue, cfg *RunConfig, state *StateManager) *
 	return result
 }
 
-// ReviewDependencies checks if all dependencies are satisfied.
+// ReviewDependencies checks if all dependencies are valid (exist in config).
+// Note: This does NOT check if dependencies are completed - that's handled at
+// assignment time by NextAvailableIssue. The review gate only validates that
+// the dependency graph is well-formed.
 func ReviewDependencies(issue *Issue, cfg *RunConfig) *CheckResult {
 	result := &CheckResult{
 		Passed:   true,
@@ -327,40 +330,38 @@ func ReviewDependencies(issue *Issue, cfg *RunConfig) *CheckResult {
 		Warnings: make([]string, 0),
 	}
 
-	completed := make(map[int]bool)
+	// Build set of all issue numbers
+	issueNumbers := make(map[int]bool)
 	for _, i := range cfg.Issues {
-		if i.Status == "completed" {
-			completed[i.Number] = true
+		issueNumbers[i.Number] = true
+	}
+
+	// Check each dependency exists
+	for _, dep := range issue.DependsOn {
+		if !issueNumbers[dep] {
+			result.Passed = false
+			result.Score -= 0.3
+			result.Warnings = append(result.Warnings, fmt.Sprintf("dependency #%d not found in config", dep))
 		}
 	}
 
+	// Check for self-dependency
 	for _, dep := range issue.DependsOn {
-		if !completed[dep] {
-			// Check if the dependency is at least in-progress
-			found := false
-			for _, i := range cfg.Issues {
-				if i.Number == dep {
-					found = true
-					if i.Status == "in_progress" {
-						result.Warnings = append(result.Warnings, fmt.Sprintf("dependency #%d is in-progress", dep))
-						result.Score -= 0.1
-					} else if i.Status == "pending" {
-						result.Passed = false
-						result.Score -= 0.3
-						result.Warnings = append(result.Warnings, fmt.Sprintf("dependency #%d is pending", dep))
-					} else if i.Status == "failed" {
-						result.Passed = false
-						result.Score -= 0.4
-						result.Warnings = append(result.Warnings, fmt.Sprintf("dependency #%d is failed", dep))
-					}
-					break
-				}
-			}
-			if !found {
-				result.Passed = false
-				result.Score -= 0.3
-				result.Warnings = append(result.Warnings, fmt.Sprintf("dependency #%d not found", dep))
-			}
+		if dep == issue.Number {
+			result.Passed = false
+			result.Score -= 0.5
+			result.Warnings = append(result.Warnings, "issue depends on itself")
+		}
+	}
+
+	// Check for circular dependencies (simple cycle detection)
+	if len(issue.DependsOn) > 0 {
+		visited := make(map[int]bool)
+		stack := make(map[int]bool)
+		if hasCycle(issue.Number, cfg, visited, stack) {
+			result.Passed = false
+			result.Score -= 0.5
+			result.Warnings = append(result.Warnings, "circular dependency detected")
 		}
 	}
 
@@ -369,12 +370,36 @@ func ReviewDependencies(issue *Issue, cfg *RunConfig) *CheckResult {
 	}
 
 	if result.Passed {
-		result.Details = "all dependencies satisfied or in-progress"
+		result.Details = "all dependencies are valid"
 	} else {
-		result.Details = "some dependencies are not satisfied"
+		result.Details = "dependency graph has errors"
 	}
 
 	return result
+}
+
+// hasCycle detects circular dependencies using DFS
+func hasCycle(issueNum int, cfg *RunConfig, visited, stack map[int]bool) bool {
+	visited[issueNum] = true
+	stack[issueNum] = true
+
+	issue := cfg.GetIssue(issueNum)
+	if issue == nil {
+		return false
+	}
+
+	for _, dep := range issue.DependsOn {
+		if !visited[dep] {
+			if hasCycle(dep, cfg, visited, stack) {
+				return true
+			}
+		} else if stack[dep] {
+			return true
+		}
+	}
+
+	delete(stack, issueNum)
+	return false
 }
 
 // ReviewAllIssues runs the review gate on all pending issues.

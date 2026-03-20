@@ -62,6 +62,93 @@ func TestParseEpicURL(t *testing.T) {
 	}
 }
 
+func TestParseEpicURLWithPlatform(t *testing.T) {
+	tests := []struct {
+		url      string
+		owner    string
+		repo     string
+		number   int
+		platform string
+		wantErr  bool
+	}{
+		// GitHub URLs
+		{
+			url:      "https://github.com/PaulSnow/orchestrator/issues/2",
+			owner:    "PaulSnow",
+			repo:     "orchestrator",
+			number:   2,
+			platform: "github",
+		},
+		{
+			url:      "https://github.com/owner/repo/issues/123",
+			owner:    "owner",
+			repo:     "repo",
+			number:   123,
+			platform: "github",
+		},
+		// GitLab URLs
+		{
+			url:      "https://gitlab.com/owner/repo/-/issues/123",
+			owner:    "owner",
+			repo:     "repo",
+			number:   123,
+			platform: "gitlab",
+		},
+		{
+			url:      "https://gitlab.example.com/myorg/myproject/-/issues/42",
+			owner:    "myorg",
+			repo:     "myproject",
+			number:   42,
+			platform: "gitlab",
+		},
+		// Short format (defaults to GitHub)
+		{
+			url:      "owner/repo#42",
+			owner:    "owner",
+			repo:     "repo",
+			number:   42,
+			platform: "github",
+		},
+		// Invalid
+		{
+			url:     "invalid",
+			wantErr: true,
+		},
+		{
+			url:     "https://bitbucket.org/owner/repo/issues/1",
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.url, func(t *testing.T) {
+			owner, repo, number, platform, err := ParseEpicURLWithPlatform(tt.url)
+			if tt.wantErr {
+				if err == nil {
+					t.Errorf("expected error for %q", tt.url)
+				}
+				return
+			}
+			if err != nil {
+				t.Errorf("unexpected error: %v", err)
+				return
+			}
+			if owner != tt.owner {
+				t.Errorf("owner = %q, want %q", owner, tt.owner)
+			}
+			if repo != tt.repo {
+				t.Errorf("repo = %q, want %q", repo, tt.repo)
+			}
+			if number != tt.number {
+				t.Errorf("number = %d, want %d", number, tt.number)
+			}
+			if platform != tt.platform {
+				t.Errorf("platform = %q, want %q", platform, tt.platform)
+			}
+		})
+	}
+}
+
 func TestParseTaskList(t *testing.T) {
 	body := `## Implementation Plan
 
@@ -121,5 +208,109 @@ func TestParseTaskListEmpty(t *testing.T) {
 	tasks := ParseTaskList(body)
 	if len(tasks) != 0 {
 		t.Errorf("expected 0 tasks, got %d", len(tasks))
+	}
+}
+
+func TestParseRemoteURL(t *testing.T) {
+	tests := []struct {
+		url      string
+		owner    string
+		repo     string
+		platform string
+		wantErr  bool
+	}{
+		// HTTPS GitHub
+		{
+			url:      "https://github.com/PaulSnow/orchestrator.git",
+			owner:    "PaulSnow",
+			repo:     "orchestrator",
+			platform: "github",
+		},
+		{
+			url:      "https://github.com/owner/repo",
+			owner:    "owner",
+			repo:     "repo",
+			platform: "github",
+		},
+		// SSH GitHub
+		{
+			url:      "git@github.com:PaulSnow/orchestrator.git",
+			owner:    "PaulSnow",
+			repo:     "orchestrator",
+			platform: "github",
+		},
+		// HTTPS GitLab
+		{
+			url:      "https://gitlab.com/myorg/myproject.git",
+			owner:    "myorg",
+			repo:     "myproject",
+			platform: "gitlab",
+		},
+		// SSH GitLab
+		{
+			url:      "git@gitlab.com:myorg/myproject.git",
+			owner:    "myorg",
+			repo:     "myproject",
+			platform: "gitlab",
+		},
+		// Self-hosted GitLab
+		{
+			url:      "https://gitlab.example.com/team/project.git",
+			owner:    "team",
+			repo:     "project",
+			platform: "gitlab",
+		},
+		// Invalid
+		{
+			url:     "not-a-url",
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.url, func(t *testing.T) {
+			owner, repo, platform, err := parseRemoteURL(tt.url)
+			if tt.wantErr {
+				if err == nil {
+					t.Errorf("expected error for %q", tt.url)
+				}
+				return
+			}
+			if err != nil {
+				t.Errorf("unexpected error: %v", err)
+				return
+			}
+			if owner != tt.owner {
+				t.Errorf("owner = %q, want %q", owner, tt.owner)
+			}
+			if repo != tt.repo {
+				t.Errorf("repo = %q, want %q", repo, tt.repo)
+			}
+			if platform != tt.platform {
+				t.Errorf("platform = %q, want %q", platform, tt.platform)
+			}
+		})
+	}
+}
+
+func TestDetectPlatformFromHost(t *testing.T) {
+	tests := []struct {
+		host     string
+		expected string
+	}{
+		{"github.com", "github"},
+		{"gitlab.com", "gitlab"},
+		{"gitlab.example.com", "gitlab"},
+		{"git.example.com", "github"}, // defaults to github
+		{"GITLAB.COM", "gitlab"},      // case insensitive
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.host, func(t *testing.T) {
+			platform := detectPlatformFromHost(tt.host)
+			if platform != tt.expected {
+				t.Errorf("detectPlatformFromHost(%q) = %q, want %q", tt.host, platform, tt.expected)
+			}
+		})
 	}
 }

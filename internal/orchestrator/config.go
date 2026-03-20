@@ -34,6 +34,10 @@ type RunConfig struct {
 	ConfigPath string `json:"-"`
 	OrchRoot   string `json:"-"`
 	StateDir   string `json:"-"`
+
+	// Epic-based config (when using epic issue as source)
+	EpicNumber int    `json:"-"` // Epic issue number (for hot-reload)
+	EpicURL    string `json:"-"` // Epic issue URL
 }
 
 // NewRunConfig creates a RunConfig with defaults.

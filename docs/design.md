@@ -1,207 +1,438 @@
-# Orchestrator Design
+# Orchestrator Design Document
 
 ## Overview
 
-The orchestrator coordinates multiple Claude Code sessions working on GitHub/GitLab issues in parallel. Each worker runs in an isolated git worktree within a tmux window.
+The Orchestrator is a control plane for parallel AI-assisted development. It manages multiple Claude Code workers running in tmux sessions, each working on separate issues in isolated git worktrees.
+
+### Core Concept
+
+An **epic issue** serves as the single source of truth. The epic contains a task list with checkboxes referencing other issues:
+
+```markdown
+## Tasks
+- [ ] #101 - Implement feature A
+- [ ] #102 - Fix bug B (blocked by #101)
+- [x] #103 - Already completed
+```
+
+The orchestrator:
+1. Parses this task list
+2. Assigns issues to workers based on dependencies
+3. Monitors worker progress
+4. Updates checkboxes when issues complete
 
 ## Architecture
 
 ```
+┌─────────────────────────────────────────────────────────────────┐
+│                         Orchestrator                             │
+├─────────────────────────────────────────────────────────────────┤
+│  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────────────┐ │
+│  │ Epic     │  │ Monitor  │  │ Decision │  │ Consistency      │ │
+│  │ Loader   │  │ Loop     │  │ Engine   │  │ Checker          │ │
+│  └──────────┘  └──────────┘  └──────────┘  └──────────────────┘ │
+│  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────────────┐ │
+│  │ Review   │  │ State    │  │ Event    │  │ Dashboard        │ │
+│  │ Gate     │  │ Manager  │  │ Broadcaster│ │ Server           │ │
+│  └──────────┘  └──────────┘  └──────────┘  └──────────────────┘ │
+└─────────────────────────────────────────────────────────────────┘
+                              │
+        ┌─────────────────────┼─────────────────────┐
+        │                     │                     │
+        ▼                     ▼                     ▼
+┌──────────────┐     ┌──────────────┐     ┌──────────────┐
+│   Worker 1   │     │   Worker 2   │     │   Worker N   │
+│ (tmux pane)  │     │ (tmux pane)  │     │ (tmux pane)  │
+│              │     │              │     │              │
+│ ┌──────────┐ │     │ ┌──────────┐ │     │ ┌──────────┐ │
+│ │ Claude   │ │     │ │ Claude   │ │     │ │ Claude   │ │
+│ │ Code     │ │     │ │ Code     │ │     │ │ Code     │ │
+│ └──────────┘ │     │ └──────────┘ │     │ └──────────┘ │
+│ ┌──────────┐ │     │ ┌──────────┐ │     │ ┌──────────┐ │
+│ │ Git      │ │     │ │ Git      │ │     │ │ Git      │ │
+│ │ Worktree │ │     │ │ Worktree │ │     │ │ Worktree │ │
+│ └──────────┘ │     │ └──────────┘ │     │ └──────────┘ │
+└──────────────┘     └──────────────┘     └──────────────┘
+```
+
+### Tmux Session Layout
+
+```
 ┌─────────────────────────────────────────────────────────────┐
-│                    ORCHESTRATOR (Go binary)                  │
-├─────────────────────────────────────────────────────────────┤
-│  cmd/orchestrator/main.go                                   │
-│  ├── CLI parsing, config loading                            │
-│  ├── Review gate coordination                               │
-│  ├── Worker spawning and monitoring                         │
-│  └── Web dashboard server                                   │
-├─────────────────────────────────────────────────────────────┤
 │                    TMUX SESSION                              │
 ├─────────────────────────────────────────────────────────────┤
-│  Window: orchestrator   (monitor process)                   │
+│  Window: orchestrator   (monitor process output)            │
 │  Window: worker-1       (Claude on issue #X)                │
 │  Window: worker-2       (Claude on issue #Y)                │
 │  Window: worker-N       (Claude on issue #Z)                │
 │  Window: dashboard      (live status display)               │
+│  Window: fixer          (auto-launched for fixes)           │
 └─────────────────────────────────────────────────────────────┘
 ```
 
-## Workflow
+## Components
+
+### 1. Epic Loader (`epic.go`)
+
+**Purpose**: Load configuration from a GitHub/GitLab epic issue.
+
+**Key Functions**:
+
+| Function | Description |
+|----------|-------------|
+| `DetectRepoInfo()` | Auto-detect repo from current directory |
+| `LoadConfigFromEpicNumber(num, workers)` | Load config from epic issue number |
+| `ParseTaskList(body)` | Extract tasks from markdown body |
+| `ReloadFromEpic(cfg)` | Hot-reload to pick up changes |
+| `UpdateEpicCheckbox(url, num, done)` | Update checkbox when issue completes |
+
+**Repo Detection**:
+```go
+// Parses git remote URL to extract owner, repo, platform
+// Supports:
+//   https://github.com/owner/repo.git
+//   git@github.com:owner/repo.git
+//   https://gitlab.com/owner/repo.git
+//   git@gitlab.com:owner/repo.git
+```
+
+**Task Parsing**:
+```go
+// Matches patterns like:
+//   - [ ] #123 - Title
+//   - [x] #123 - Title (blocked by #100, #101)
+//   - [ ] #123 Title (depends on #100)
+```
+
+### 2. Monitor Loop (`monitor.go`)
+
+**Purpose**: Main control loop that manages worker lifecycle.
+
+**Cycle Operations** (every 30 seconds):
 
 ```
-1. Load Config          2. Review Gate         3. Create Worktrees
-   (JSON or Epic)          (optional)             (git worktree add)
-        │                      │                        │
-        ▼                      ▼                        ▼
-┌─────────────┐        ┌─────────────┐         ┌─────────────┐
-│ Parse issues│───────▶│ Validate    │────────▶│ Isolated    │
-│ & deps      │        │ completeness│         │ branches    │
-└─────────────┘        └─────────────┘         └─────────────┘
-                              │
-                    ┌─────────┴─────────┐
-                    │                   │
-                 PASS               FAIL
-                    │                   │
-                    ▼                   ▼
-             Continue            Exit with report
+┌─────────────────────────────────────────────────────────┐
+│                    MONITOR CYCLE                         │
+├─────────────────────────────────────────────────────────┤
+│  1. Hot-reload from epic (every 10 cycles)              │
+│     └── Re-fetch epic, update issue list                │
+│                                                         │
+│  2. Consistency checks (every 5 cycles)                 │
+│     ├── Detect state inconsistencies                    │
+│     ├── Auto-fix recoverable issues                     │
+│     └── Launch fixer session if needed                  │
+│                                                         │
+│  3. Collect worker snapshots                            │
+│     ├── Read worker state files                         │
+│     ├── Check signal files (completion markers)         │
+│     └── Examine log files for activity                  │
+│                                                         │
+│  4. Compute decisions                                   │
+│     └── Determine action for each worker                │
+│                                                         │
+│  5. Execute decisions                                   │
+│     ├── Push branches                                   │
+│     ├── Mark issues complete                            │
+│     ├── Reassign workers                                │
+│     └── Restart failed workers                          │
+└─────────────────────────────────────────────────────────┘
+```
 
-4. Launch Workers      5. Monitor Loop        6. Reassign
-   (tmux + claude)        (detect completion)    (next issue)
-        │                      │                     │
-        ▼                      ▼                     ▼
-┌─────────────┐        ┌─────────────┐        ┌─────────────┐
-│ Prompt file │───────▶│ Watch signal│───────▶│ Pick from   │
-│ + log file  │        │ files       │        │ priority Q  │
-└─────────────┘        └─────────────┘        └─────────────┘
+**Worker States**:
+| State | Description |
+|-------|-------------|
+| `idle` | No issue assigned, waiting for work |
+| `running` | Actively working on an issue |
+| `unknown` | State file doesn't exist |
+
+**Decisions**:
+| Decision | When | Action |
+|----------|------|--------|
+| `noop` | Worker running normally | Do nothing |
+| `push` | Worker has commits | Push branch to remote |
+| `mark_complete` | Issue finished successfully | Update status |
+| `reassign` | Worker available | Assign new issue |
+| `restart` | Worker failed | Retry with context |
+| `idle` | No issues available | Wait |
+
+### 3. Decision Engine (`decisions.go`)
+
+**Purpose**: Determine what action to take for each worker.
+
+**Decision Flow**:
+```
+Worker Snapshot
+      │
+      ├─► Status: idle (no issue)
+      │       └─► NextAvailableIssue() → reassign or noop
+      │
+      ├─► Signal file exists (finished)
+      │       ├─► Exit 0 + commits → push + mark_complete + reassign
+      │       ├─► Exit 0, no commits → mark_complete + reassign
+      │       └─► Exit != 0 → retry or mark_failed
+      │
+      ├─► Claude running
+      │       ├─► Log recent → noop
+      │       └─► Log stale → restart
+      │
+      └─► Not running, no signal (crashed)
+              ├─► Has commits → push + restart
+              └─► No commits → restart or fail
+```
+
+**Issue Scheduling**:
+- Sort by wave (lower first), then priority (lower first)
+- Check dependencies are completed
+- Skip issues already in progress
+
+### 4. Consistency Checker (`consistency.go`)
+
+**Purpose**: Detect and fix state inconsistencies automatically.
+
+**Inconsistency Types**:
+
+| Type | Description | Auto-fix |
+|------|-------------|----------|
+| `branch_exists_but_pending` | Branch has commits but issue pending | Mark completed |
+| `branch_exists_but_in_progress` | Branch complete but issue in_progress | Mark completed |
+| `worker_running_no_issue` | Worker "running" with no issue | Set to idle |
+| `worker_idle_with_issue` | Worker idle but has issue | Clear issue |
+| `file_memory_mismatch` | Config file differs from memory | Sync from file |
+| `issue_assigned_to_multiple` | Same issue on multiple workers | Keep first |
+
+**Fixer Session**:
+For complex issues, launches a Claude session in tmux with a detailed prompt describing the problem and suggested fixes.
+
+### 5. State Manager (`state.go`)
+
+**Purpose**: Persist and load worker/issue state.
+
+**Directory Structure**:
+```
+state/<project>/
+├── workers/
+│   ├── worker-1.json      # Worker state
+│   └── worker-2.json
+├── reviews/
+│   └── issue-101.json     # Review results
+├── signals/
+│   └── worker-1.signal    # Completion marker
+├── logs/
+│   └── worker-1.log       # Claude output
+├── prompts/
+│   └── worker-1-prompt.md # Generated prompt
+└── orchestrator-log.jsonl # Event log
+```
+
+**Worker State** (`worker-N.json`):
+```json
+{
+  "worker_id": 1,
+  "issue_number": 101,
+  "status": "running",
+  "stage": "implement",
+  "branch": "feature/issue-101",
+  "worktree": "/tmp/repo-worktrees/issue-101",
+  "started_at": "2024-01-15T10:30:00Z",
+  "retry_count": 0
+}
+```
+
+### 6. Review Gate (`review_gate.go`)
+
+**Purpose**: Validate issues before work begins.
+
+**Checks**:
+
+| Check | What it validates |
+|-------|-------------------|
+| Completeness | Title present, description has criteria |
+| Suitability | Clear scope, testable outcome |
+| Dependencies | All referenced issues exist, no cycles |
+
+**Results**:
+```json
+{
+  "issue_number": 101,
+  "passed": true,
+  "completeness": {"passed": true, "score": 0.85},
+  "suitability": {"passed": true, "score": 0.90},
+  "dependencies": {"passed": true, "warnings": []}
+}
+```
+
+### 7. Dashboard Server (`dashboard_server.go`)
+
+**Purpose**: Real-time web dashboard for monitoring.
+
+**Endpoints**:
+
+| Endpoint | Description |
+|----------|-------------|
+| `GET /` | Dashboard HTML |
+| `GET /api/state` | Project, progress, workers |
+| `GET /api/workers` | Worker details |
+| `GET /api/issues` | Issue list with status |
+| `GET /api/events` | SSE stream |
+| `GET /api/log/{id}` | Worker log tail |
+
+**Dashboard Features**:
+- Real-time updates via SSE
+- Progress bar with completed/in-progress/pending
+- Worker status table with log tails
+- Issue list with dependencies
+- Event log
+
+### 8. Event Broadcaster (`events.go`)
+
+**Purpose**: Broadcast events to dashboard via SSE.
+
+**Event Types**:
+- `worker_assigned` - Worker started issue
+- `worker_completed` - Worker finished issue
+- `worker_failed` - Worker failed
+- `worker_idle` - Worker has no work
+- `issue_status` - Issue status changed
+- `progress_update` - Overall progress
+- `inconsistency` - State problem detected
+
+## CLI Usage
+
+### Launch from Epic (Recommended)
+
+```bash
+cd /path/to/your/repo
+orchestrator launch 42              # Epic issue #42
+orchestrator launch 42 --workers 4  # Custom worker count
+orchestrator launch 42 --review-only # Validate only
+```
+
+### Launch from Config File
+
+```bash
+orchestrator launch --config issues.json
+orchestrator launch --config-dir config/
+```
+
+### Other Commands
+
+```bash
+orchestrator status                 # Show status
+orchestrator review --config file   # Review gate only
+orchestrator cleanup               # Clean worktrees
+orchestrator dashboard             # Open dashboard
 ```
 
 ## Configuration
 
-### JSON Config File
+### RunConfig Structure
 
-```json
-{
-  "project": "my-project",
-  "repos": {
-    "default": {
-      "path": "/home/user/repo",
-      "worktree_base": "/tmp/worktrees",
-      "branch_prefix": "feature/issue-",
-      "default_branch": "main"
-    }
-  },
-  "issues": [
-    {
-      "number": 1,
-      "title": "First issue",
-      "description": "Detailed description for Claude",
-      "priority": 1,
-      "wave": 1,
-      "status": "pending"
-    },
-    {
-      "number": 2,
-      "title": "Second issue",
-      "depends_on": [1],
-      "priority": 2,
-      "wave": 2
-    }
-  ],
-  "num_workers": 5,
-  "stagger_delay": 30
+```go
+type RunConfig struct {
+    Project        string              // "owner/repo"
+    Repos          map[string]*RepoConfig
+    Issues         []*Issue
+    NumWorkers     int                 // Default: 5
+    CycleInterval  int                 // Seconds, default: 30
+    MaxRetries     int                 // Default: 3
+    StallTimeout   int                 // Seconds, default: 600
+    Pipeline       []string            // ["implement", "test"]
+    EpicNumber     int                 // For hot-reload
+    EpicURL        string              // Epic URL
 }
 ```
 
-### Epic Issue as Config
+### Issue Structure
 
-Instead of a JSON file, use a GitHub issue as the config source. The epic body contains a task list:
-
-```markdown
-## Implementation Plan
-
-- [ ] #101 - Add authentication module
-- [ ] #102 - Create user schema (blocked by #101)
-- [x] #103 - Already completed (skipped)
-- [ ] #104 - Build login UI (depends on #101, #102)
+```go
+type Issue struct {
+    Number       int
+    Title        string
+    Description  string
+    Status       string    // pending, in_progress, completed, failed
+    DependsOn    []int     // Blocking issues
+    Wave         int       // Execution order
+    Priority     int       // Within wave
+    Repo         string    // Repo config key
+}
 ```
 
-The orchestrator parses:
-- Issue numbers from `#N` references
-- Completion status from `[x]` vs `[ ]`
-- Dependencies from `(blocked by #N)` or `(depends on #N)`
+### RepoConfig Structure
 
-## Priority and Scheduling
-
-Issues are scheduled based on:
-
-1. **Wave**: Lower wave numbers run first (wave 1 before wave 2)
-2. **Dependencies**: Issues wait for `depends_on` issues to complete
-3. **Priority**: Within a wave, lower priority numbers run first
-4. **Availability**: Only issues with `status: pending` are considered
-
-## State Management
-
-State is stored in `state/` directory:
-
-```
-state/
-├── worker-1.json       # Worker state (issue, status, timestamps)
-├── worker-2.json
-├── logs/
-│   ├── worker-1.log    # Claude session output
-│   └── worker-2.log
-├── prompts/
-│   ├── worker-1.txt    # Generated prompt for Claude
-│   └── worker-2.txt
-└── signals/
-    ├── worker-1.done   # Signal file created on completion
-    └── worker-2.done
+```go
+type RepoConfig struct {
+    Name          string  // Config key
+    Path          string  // Local path
+    WorktreeBase  string  // Where to create worktrees
+    BranchPrefix  string  // e.g., "feature/issue-"
+    DefaultBranch string  // e.g., "main"
+    Platform      string  // "github" or "gitlab"
+}
 ```
 
-## Review Gate
+## Platform Support
 
-Before launching workers, issues are validated:
+### GitHub
+- CLI: `gh`
+- Fetch: `gh api repos/owner/repo/issues/N`
+- Update: `gh issue edit N --body "..."`
 
-1. **Completeness**: Does the issue have enough detail?
-2. **Suitability**: Is this appropriate for Claude to solve?
-3. **Dependencies**: Are dependencies satisfiable?
+### GitLab
+- CLI: `glab`
+- Fetch: `glab api projects/owner%2Frepo/issues/N`
+- Update: `glab api -X PUT .../issues/N -f description="..."`
 
-Options:
-- `--skip-review`: Skip validation (for re-runs)
-- `--review-only`: Validate without launching workers
-- `--post-comments`: Post findings to GitHub/GitLab
-
-## Web Dashboard
-
-HTTP server at `localhost:8123` provides:
-
-- `GET /` - Dashboard HTML with SSE updates
-- `GET /api/status` - Overall status JSON
-- `GET /api/issues` - All issues with state
-- `GET /api/sessions` - Active worker sessions
-
-## Prompt Generation
-
-Each worker receives a prompt with:
-
-1. Issue title and description
-2. Repository context (from CLAUDE.md)
-3. Stage-specific instructions (implement, test, review)
-4. Signal file path (for completion notification)
-
-## Completion Detection
-
-Workers signal completion by creating a file:
-
-```bash
-# Claude writes this when done
-touch /path/to/state/signals/worker-N.done
-```
-
-The monitor detects this and:
-1. Marks the issue as `completed`
-2. Updates the config file
-3. Assigns the worker to the next available issue
+### Detection
+Platform detected from git remote URL hostname:
+- Contains "gitlab" → GitLab
+- Otherwise → GitHub (default)
 
 ## Error Handling
 
-- **Stalled workers**: Watchdog detects log inactivity
-- **Failed issues**: Marked as `failed`, can be retried
-- **Missing dependencies**: Issue blocked until deps complete
+### Worker Failures
+1. Check exit code from signal file
+2. If retries < maxRetries → restart with compressed context
+3. Otherwise → mark issue as failed
+
+### Stall Detection
+1. Monitor log file modification time
+2. If no activity > stallTimeout → restart worker
+3. Include progress summary in restart prompt
+
+### State Recovery
+1. Consistency checker runs every 5 cycles
+2. Auto-fixes common issues
+3. Launches fixer session for complex problems
 
 ## Key Files
 
 ```
-cmd/orchestrator/main.go      # CLI entry point
+cmd/orchestrator/main.go           # CLI entry point
 internal/orchestrator/
-├── config.go                 # Config loading
-├── state.go                  # State management
-├── monitor.go                # Worker monitoring
-├── prompt.go                 # Prompt generation
-├── tmux.go                   # Tmux operations
-├── git.go                    # Git/worktree operations
-├── epic.go                   # Epic issue parsing
-├── review_gate.go            # Review gate logic
-├── webserver.go              # HTTP dashboard
-└── watchdog.go               # Stall detection
+├── config.go                      # Config loading/validation
+├── consistency.go                 # Self-healing checker
+├── dashboard_server.go            # Web dashboard
+├── decisions.go                   # Decision engine
+├── epic.go                        # Epic loading/parsing
+├── events.go                      # SSE broadcaster
+├── git.go                         # Git operations
+├── models.go                      # Data structures
+├── monitor.go                     # Monitor loop
+├── prompt.go                      # Prompt generation
+├── review_gate.go                 # Issue validation
+├── state.go                       # State persistence
+└── tmux.go                        # Tmux operations
+```
+
+## Testing
+
+```bash
+# All tests
+go test ./...
+
+# Specific packages
+go test ./internal/orchestrator/... -v
+
+# Specific test
+go test ./internal/orchestrator/... -v -run TestConsistency
 ```

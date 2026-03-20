@@ -1,117 +1,109 @@
 # Orchestrator
 
-Control plane for AI-assisted development across Accumulate Network repositories.
+Control plane for parallel AI-assisted development using Claude Code workers.
 
-## What This Is
+## What It Does
 
-The orchestrator provides a central point for coordinating development work across 14+ repositories in the Accumulate Network ecosystem. It uses **tmux sessions with parallel Claude Code workers** as its primary execution model for reviews, test development, and multi-branch work.
+The orchestrator coordinates multiple Claude Code sessions working on GitHub/GitLab issues in parallel. Each worker runs in an isolated git worktree within a tmux window.
 
-When Claude Code opens this repo, `claude.md` gives it full context and tools to:
-
-- **Coordinate parallel Claude workers via tmux** -- the core execution mechanism
-- Track and execute tasks across repositories
-- Run builds and tests with stall detection and automatic restart
-- Follow playbooks for common workflows (features, bugs, releases, reviews)
-- Generate status reports
+**Key features:**
+- **Epic-based configuration** - Use a GitHub/GitLab issue as the source of truth
+- **Parallel workers** - Multiple Claude sessions working simultaneously
+- **Dependency tracking** - Issues scheduled based on dependencies
+- **Auto-reassignment** - Workers automatically pick up next issue when done
+- **Self-healing** - Detects and fixes state inconsistencies
+- **Hot-reload** - Picks up new tasks added to the epic
+- **Web dashboard** - Real-time progress monitoring
 
 ## Quick Start
 
 ```bash
-# Build the CLI
-go build -o /tmp/orchestrator ./cmd/orchestrator/
+# Build
+go build -o orchestrator ./cmd/orchestrator
 
-# Check status of all repos
-/tmp/orchestrator status
+# From within your repo, launch workers on epic issue #42
+cd /path/to/your/repo
+./orchestrator launch 42
 
-# Run tests for a specific repo
-/tmp/orchestrator test staking
+# With options
+./orchestrator launch 42 --workers 4
 
-# List tasks
-/tmp/orchestrator task list
+# Dashboard opens automatically at http://localhost:8123
 ```
 
-## Structure
+## Epic Format
 
-```
-config/               - Repository registry, workflows, team info
-  repos.json          - All managed repositories
-  workflows.json      - Templated workflow definitions
-  proof-issues.json   - Issue assignments for parallel workers
-tasks/                - Backlog, active, and completed task lists
-playbooks/            - Step-by-step workflow guides
-state/                - Runtime state (gitignored, rebuilt on demand)
-  workers/            - Per-worker state for tmux sessions
-cmd/                  - CLI tool
-internal/             - Core Go packages
-mcp-server/           - MCP server for Claude Desktop integration
-scripts/
-  proof-workers/      - Python orchestrator package (primary execution model)
-    orchestrator/     - Python package: models, config, prompts, decisions, monitor
-reports/              - Generated reports and templates
-docs/                 - Documentation
+Create a GitHub/GitLab issue with a task list:
+
+```markdown
+## Implementation Plan
+
+- [ ] #101 - Add authentication module
+- [ ] #102 - Create user schema (blocked by #101)
+- [x] #103 - Already completed (skipped)
+- [ ] #104 - Build login UI (depends on #101, #102)
 ```
 
-## Configuration
+The orchestrator parses:
+- Issue numbers from `#N` references
+- Completion status from `[x]` vs `[ ]`
+- Dependencies from `(blocked by #N)` or `(depends on #N)`
 
-All managed repositories are listed in `config/repos.json`. Add or remove repos there.
+## Commands
 
-Workflows (build, test, pull, etc.) are defined in `config/workflows.json`.
+| Command | Description |
+|---------|-------------|
+| `launch <epic-num>` | Start workers on epic issue |
+| `launch --config <file>` | Start workers from JSON config |
+| `status` | Show current status |
+| `review --config <file>` | Validate issues without launching |
+| `cleanup` | Remove worktrees and state |
+| `dashboard` | Open web dashboard |
 
-## Task Management
+## How It Works
 
-Tasks are tracked in markdown files under `tasks/`:
-- `tasks/backlog.md` - Prioritized work items
-- `tasks/active.md` - In-progress work
-- `tasks/completed.md` - Done (append-only log)
+1. **Load epic** - Fetch epic issue, parse task list
+2. **Review gate** - Validate issues have sufficient detail
+3. **Create worktrees** - Isolated git branches for each issue
+4. **Launch workers** - Claude Code sessions in tmux windows
+5. **Monitor loop** - Detect completions, reassign workers
+6. **Update epic** - Check off completed tasks
 
-## Parallel Execution (tmux Workers)
+## Documentation
 
-The orchestrator's primary execution model for multi-branch work:
+- [Design Document](docs/design.md) - Detailed architecture and implementation
+- [Usage Guide](docs/usage.md) - CLI reference and examples
 
-```bash
-# From scripts/proof-workers/:
+## Project Structure
 
-# Dry run — validate config
-python3 -m orchestrator launch --dry-run
-
-# Launch 5 parallel Claude workers in tmux
-python3 -m orchestrator launch
-
-# Attach to monitor progress
-tmux attach -t proof-orchestrator
-# Dashboard: Ctrl-b w, select dashboard
-
-# One-shot status
-python3 -m orchestrator status
-
-# Cleanup when done
-python3 -m orchestrator cleanup
+```
+cmd/orchestrator/          # CLI entry point
+internal/orchestrator/     # Core packages
+  ├── epic.go              # Epic loading/parsing
+  ├── monitor.go           # Monitor loop
+  ├── decisions.go         # Worker decisions
+  ├── consistency.go       # Self-healing
+  ├── dashboard_server.go  # Web dashboard
+  ├── review_gate.go       # Issue validation
+  └── state.go             # State persistence
+docs/                      # Documentation
+config/                    # Example configs
 ```
 
-Each worker runs an independent Claude Code process in its own git worktree, with:
-- Configurable pipeline stages (optimize -> write_tests -> run_tests_fix -> document)
-- Automatic stall detection and restart with compressed progress summaries
-- Signal-file based completion tracking
-- Live dashboard showing worker status, pipeline stage, and log activity
+## Platform Support
 
-## Playbooks
+- **GitHub** - Uses `gh` CLI
+- **GitLab** - Uses `glab` CLI
 
-| Playbook | Purpose |
-|----------|---------|
-| `parallel-proof-work.md` | **Parallel work via tmux** (reviews, tests, multi-branch) |
-| `new-feature.md` | Implement a feature across repos |
-| `bug-fix.md` | Investigate and fix bugs |
-| `release.md` | Coordinate a release |
-| `code-review.md` | Review a single branch |
-| `test-suite.md` | Run tests across repos |
-| `status-report.md` | Generate status reports |
+Platform auto-detected from git remote URL.
 
-## MCP Server
+## Requirements
 
-For Claude Desktop integration, build and configure the MCP server:
+- Go 1.21+
+- tmux
+- `gh` CLI (for GitHub) or `glab` CLI (for GitLab)
+- Claude Code CLI
 
-```bash
-cd mcp-server && go build -o /tmp/orchestrator-mcp .
-```
+## License
 
-See `docs/setup.md` for configuration instructions.
+MIT
