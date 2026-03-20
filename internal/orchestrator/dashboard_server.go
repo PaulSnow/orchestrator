@@ -167,6 +167,12 @@ func (ds *DashboardServer) handleSSE(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintf(w, "event: progress\ndata: %s\n\n", string(data))
 	flusher.Flush()
 
+	// Send current issues
+	issuesData := ds.buildIssuesResponse()
+	data, _ = json.Marshal(issuesData)
+	fmt.Fprintf(w, "event: issues\ndata: %s\n\n", string(data))
+	flusher.Flush()
+
 	// Listen for events
 	for {
 		select {
@@ -320,7 +326,10 @@ func (ds *DashboardServer) buildProgressResponse() map[string]any {
 func (ds *DashboardServer) handleIssues(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Access-Control-Allow-Origin", "*")
+	json.NewEncoder(w).Encode(ds.buildIssuesResponse())
+}
 
+func (ds *DashboardServer) buildIssuesResponse() []map[string]any {
 	issues := make([]map[string]any, 0, len(ds.cfg.Issues))
 	for _, issue := range ds.cfg.Issues {
 		issueData := map[string]any{
@@ -353,7 +362,7 @@ func (ds *DashboardServer) handleIssues(w http.ResponseWriter, r *http.Request) 
 		issues = append(issues, issueData)
 	}
 
-	json.NewEncoder(w).Encode(issues)
+	return issues
 }
 
 // handleEventLog returns recent events.
@@ -565,25 +574,66 @@ const dashboardHTML = `<!DOCTYPE html>
             white-space: nowrap;
         }
 
-        /* Issues grid */
+        /* Issues table */
         .issues-section {
             background: #16213e;
             border-radius: 8px;
             margin-bottom: 20px;
-            overflow: hidden;
+            overflow-x: auto;
         }
-        .issue-row {
-            display: flex;
-            align-items: center;
+        .issues-table { width: 100%; border-collapse: collapse; min-width: 800px; }
+        .issues-table th, .issues-table td {
             padding: 12px;
+            text-align: left;
             border-bottom: 1px solid #0a0a0a;
-            gap: 15px;
         }
-        .issue-row:hover { background: #1a2540; }
-        .issue-number { font-weight: bold; color: #00d9ff; min-width: 60px; }
-        .issue-title { flex: 1; }
-        .issue-status { min-width: 100px; }
-        .issue-worker { min-width: 80px; color: #888; font-size: 12px; }
+        .issues-table th {
+            background: #0f1a2e;
+            font-size: 12px;
+            color: #888;
+            text-transform: uppercase;
+            position: sticky;
+            top: 0;
+        }
+        .issues-table tbody tr { cursor: pointer; transition: background 0.15s; }
+        .issues-table tbody tr:hover { background: #1a2540; }
+        .issues-table tbody tr.selected { background: #1a3050; }
+        .issue-number { font-weight: bold; color: #00d9ff; }
+        .issue-title { max-width: 300px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .issue-wave { color: #888; font-size: 12px; }
+        .issue-priority { color: #888; font-size: 12px; }
+        .issue-worker { color: #888; font-size: 12px; }
+        .dep-badge {
+            display: inline-block;
+            padding: 2px 8px;
+            border-radius: 10px;
+            font-size: 11px;
+            font-weight: bold;
+            background: #333;
+            color: #aaa;
+        }
+        .dep-badge.has-deps { background: #3d3d0a; color: #ffaa00; }
+
+        /* Status colors */
+        .status-pending { background: #44444422; color: #888; }
+        .status-in_progress { background: #00d9ff22; color: #00d9ff; }
+        .status-completed { background: #00ff8822; color: #00ff88; }
+        .status-failed { background: #ff444422; color: #ff4444; }
+
+        /* Responsive adjustments */
+        @media (max-width: 1200px) {
+            .issues-table { min-width: 600px; }
+            .issue-title { max-width: 200px; }
+        }
+        @media (max-width: 768px) {
+            body { padding: 10px; }
+            .header { flex-direction: column; gap: 10px; }
+            .phase-bar { flex-wrap: wrap; }
+            .progress-stats { flex-wrap: wrap; }
+            .issues-table { min-width: 500px; }
+            .issue-title { max-width: 150px; }
+            .hide-mobile { display: none; }
+        }
 
         /* Event log */
         .event-log {
@@ -689,8 +739,23 @@ const dashboardHTML = `<!DOCTYPE html>
         </div>
 
         <h2>Issues</h2>
-        <div class="issues-section" id="issues-list">
-            Loading...
+        <div class="issues-section">
+            <table class="issues-table">
+                <thead>
+                    <tr>
+                        <th>#</th>
+                        <th>Title</th>
+                        <th>Status</th>
+                        <th class="hide-mobile">Wave</th>
+                        <th class="hide-mobile">Priority</th>
+                        <th>Worker</th>
+                        <th class="hide-mobile">Deps</th>
+                    </tr>
+                </thead>
+                <tbody id="issues-table-body">
+                    <tr><td colspan="7">Loading...</td></tr>
+                </tbody>
+            </table>
         </div>
 
         <h2>Event Log</h2>
@@ -770,24 +835,53 @@ const dashboardHTML = `<!DOCTYPE html>
 
         function updateIssues(data) {
             issues = data || [];
-            const container = document.getElementById('issues-list');
+            const tbody = document.getElementById('issues-table-body');
 
             if (issues.length === 0) {
-                container.innerHTML = '<div class="issue-row">No issues</div>';
+                tbody.innerHTML = '<tr><td colspan="7">No issues</td></tr>';
                 return;
             }
 
-            container.innerHTML = issues.map(i => {
+            tbody.innerHTML = issues.map(i => {
                 const statusClass = 'status-' + i.status;
-                const workerStr = i.assigned_worker ? 'Worker ' + i.assigned_worker : '--';
+                const workerStr = i.assigned_worker ? 'W' + i.assigned_worker : '--';
+                const waveStr = i.wave || '--';
+                const priorityStr = i.priority || '--';
+                const deps = i.depends_on || [];
+                const depCount = deps.length;
+                const depBadgeClass = depCount > 0 ? 'dep-badge has-deps' : 'dep-badge';
+                const depStr = depCount > 0 ? depCount + ' dep' + (depCount > 1 ? 's' : '') : 'none';
 
-                return '<div class="issue-row">' +
-                    '<span class="issue-number">#' + i.number + '</span>' +
-                    '<span class="issue-title">' + (i.title || '') + '</span>' +
-                    '<span class="issue-status"><span class="status-badge ' + statusClass + '">' + i.status + '</span></span>' +
-                    '<span class="issue-worker">' + workerStr + '</span>' +
-                '</div>';
+                return '<tr data-issue="' + i.number + '" onclick="selectIssue(' + i.number + ')">' +
+                    '<td class="issue-number">#' + i.number + '</td>' +
+                    '<td class="issue-title" title="' + (i.title || '').replace(/"/g, '&quot;') + '">' + (i.title || '') + '</td>' +
+                    '<td><span class="status-badge ' + statusClass + '">' + i.status + '</span></td>' +
+                    '<td class="issue-wave hide-mobile">' + waveStr + '</td>' +
+                    '<td class="issue-priority hide-mobile">' + priorityStr + '</td>' +
+                    '<td class="issue-worker">' + workerStr + '</td>' +
+                    '<td class="hide-mobile"><span class="' + depBadgeClass + '">' + depStr + '</span></td>' +
+                '</tr>';
             }).join('');
+        }
+
+        let selectedIssue = null;
+
+        function selectIssue(issueNumber) {
+            // Remove previous selection
+            document.querySelectorAll('.issues-table tbody tr.selected').forEach(tr => {
+                tr.classList.remove('selected');
+            });
+
+            // Add selection to clicked row
+            const row = document.querySelector('.issues-table tbody tr[data-issue="' + issueNumber + '"]');
+            if (row) {
+                row.classList.add('selected');
+            }
+
+            selectedIssue = issueNumber;
+
+            // Dispatch event for other components (e.g., detail panel in issue 105)
+            window.dispatchEvent(new CustomEvent('issue-selected', { detail: { issueNumber: issueNumber } }));
         }
 
         function addEvent(type, data) {
@@ -864,6 +958,10 @@ const dashboardHTML = `<!DOCTYPE html>
 
         evtSource.addEventListener('progress', (e) => {
             updateProgress(JSON.parse(e.data));
+        });
+
+        evtSource.addEventListener('issues', (e) => {
+            updateIssues(JSON.parse(e.data));
         });
 
         evtSource.addEventListener('phase_changed', (e) => {
