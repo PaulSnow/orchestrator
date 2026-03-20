@@ -19,6 +19,7 @@ type DashboardServer struct {
 	state       *StateManager
 	events      *EventBroadcaster
 	reviewGate  *ReviewGate
+	claudeAPI   *ClaudeAPIClient
 	server      *http.Server
 	port        int
 	mu          sync.Mutex
@@ -29,11 +30,23 @@ func NewDashboardServer(cfg *RunConfig, state *StateManager, events *EventBroadc
 	if port == 0 {
 		port = 8123
 	}
+
+	// Initialize Claude API client (optional - may fail if no API key)
+	var claudeAPI *ClaudeAPIClient
+	sessionDir := ""
+	if state != nil && cfg != nil && cfg.StateDir != "" {
+		sessionDir = cfg.StateDir + "/claude-sessions"
+	}
+	if client, err := NewClaudeAPIClient(sessionDir); err == nil {
+		claudeAPI = client
+	}
+
 	return &DashboardServer{
-		cfg:    cfg,
-		state:  state,
-		events: events,
-		port:   port,
+		cfg:       cfg,
+		state:     state,
+		events:    events,
+		claudeAPI: claudeAPI,
+		port:      port,
 	}
 }
 
@@ -64,6 +77,11 @@ func (ds *DashboardServer) Start() error {
 	// Review gate endpoints (backward compatibility)
 	mux.HandleFunc("/api/status", ds.handleStatus)
 	mux.HandleFunc("/api/gate-result", ds.handleGateResult)
+
+	// Claude API session endpoints
+	mux.HandleFunc("/api/claude/session", ds.handleClaudeSession)
+	mux.HandleFunc("/api/claude/session/", ds.handleClaudeSessionByID)
+	mux.HandleFunc("/api/claude/sessions", ds.handleClaudeSessions)
 
 	// Dashboard HTML
 	mux.HandleFunc("/", ds.handleDashboard)
@@ -431,6 +449,337 @@ func (ds *DashboardServer) handleGateResult(w http.ResponseWriter, r *http.Reque
 	}
 
 	json.NewEncoder(w).Encode(result)
+}
+
+// handleClaudeSession handles POST /api/claude/session to create a new session
+func (ds *DashboardServer) handleClaudeSession(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
+	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+
+	if r.Method == "OPTIONS" {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+
+	if r.Method != "POST" {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	ds.mu.Lock()
+	claudeAPI := ds.claudeAPI
+	ds.mu.Unlock()
+
+	if claudeAPI == nil {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		json.NewEncoder(w).Encode(map[string]string{
+			"error": "Claude API not available (ANTHROPIC_API_KEY not set)",
+		})
+		return
+	}
+
+	var req struct {
+		Prompt     string `json:"prompt"`
+		WorkingDir string `json:"working_dir"`
+		Context    string `json:"context"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{
+			"error": fmt.Sprintf("Invalid request body: %v", err),
+		})
+		return
+	}
+
+	session, err := claudeAPI.CreateSession(req.WorkingDir, req.Context, req.Prompt)
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{
+			"error": err.Error(),
+		})
+		return
+	}
+
+	json.NewEncoder(w).Encode(map[string]any{
+		"id":          session.ID,
+		"status":      session.Status,
+		"working_dir": session.WorkingDir,
+		"created_at":  session.CreatedAt.Format(time.RFC3339),
+	})
+}
+
+// handleClaudeSessions handles GET /api/claude/sessions to list all sessions
+func (ds *DashboardServer) handleClaudeSessions(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+
+	if r.Method != "GET" {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	ds.mu.Lock()
+	claudeAPI := ds.claudeAPI
+	ds.mu.Unlock()
+
+	if claudeAPI == nil {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		json.NewEncoder(w).Encode(map[string]string{
+			"error": "Claude API not available",
+		})
+		return
+	}
+
+	sessions := claudeAPI.ListSessions()
+	result := make([]map[string]any, 0, len(sessions))
+
+	for _, session := range sessions {
+		result = append(result, map[string]any{
+			"id":            session.ID,
+			"status":        session.Status,
+			"working_dir":   session.WorkingDir,
+			"created_at":    session.CreatedAt.Format(time.RFC3339),
+			"last_activity": session.LastActivity.Format(time.RFC3339),
+			"message_count": len(session.Messages),
+		})
+	}
+
+	json.NewEncoder(w).Encode(result)
+}
+
+// handleClaudeSessionByID handles requests to /api/claude/session/:id/*
+func (ds *DashboardServer) handleClaudeSessionByID(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
+	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+
+	if r.Method == "OPTIONS" {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+
+	ds.mu.Lock()
+	claudeAPI := ds.claudeAPI
+	ds.mu.Unlock()
+
+	if claudeAPI == nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		json.NewEncoder(w).Encode(map[string]string{
+			"error": "Claude API not available",
+		})
+		return
+	}
+
+	// Parse path: /api/claude/session/{id} or /api/claude/session/{id}/stream or /api/claude/session/{id}/message
+	path := strings.TrimPrefix(r.URL.Path, "/api/claude/session/")
+	parts := strings.SplitN(path, "/", 2)
+	if len(parts) == 0 || parts[0] == "" {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{
+			"error": "Session ID required",
+		})
+		return
+	}
+
+	sessionID := parts[0]
+	action := ""
+	if len(parts) > 1 {
+		action = parts[1]
+	}
+
+	switch {
+	case action == "stream" && r.Method == "GET":
+		ds.handleClaudeStream(w, r, claudeAPI, sessionID)
+	case action == "message" && r.Method == "POST":
+		ds.handleClaudeMessage(w, r, claudeAPI, sessionID)
+	case action == "" && r.Method == "GET":
+		ds.handleClaudeGetSession(w, r, claudeAPI, sessionID)
+	case action == "" && r.Method == "DELETE":
+		ds.handleClaudeDeleteSession(w, r, claudeAPI, sessionID)
+	default:
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotFound)
+		json.NewEncoder(w).Encode(map[string]string{
+			"error": "Unknown endpoint",
+		})
+	}
+}
+
+// handleClaudeGetSession returns session details
+func (ds *DashboardServer) handleClaudeGetSession(w http.ResponseWriter, _ *http.Request, claudeAPI *ClaudeAPIClient, sessionID string) {
+	w.Header().Set("Content-Type", "application/json")
+
+	session, err := claudeAPI.GetSession(sessionID)
+	if err != nil {
+		w.WriteHeader(http.StatusNotFound)
+		json.NewEncoder(w).Encode(map[string]string{
+			"error": err.Error(),
+		})
+		return
+	}
+
+	// Build message history for response
+	messages := make([]map[string]any, 0, len(session.Messages))
+	for _, msg := range session.Messages {
+		content := ""
+		for _, block := range msg.Content {
+			if block.Type == "text" {
+				content += block.Text
+			}
+		}
+		messages = append(messages, map[string]any{
+			"role":      msg.Role,
+			"content":   content,
+			"timestamp": msg.Timestamp.Format(time.RFC3339),
+		})
+	}
+
+	json.NewEncoder(w).Encode(map[string]any{
+		"id":            session.ID,
+		"status":        session.Status,
+		"working_dir":   session.WorkingDir,
+		"context":       session.Context,
+		"created_at":    session.CreatedAt.Format(time.RFC3339),
+		"last_activity": session.LastActivity.Format(time.RFC3339),
+		"messages":      messages,
+		"error":         session.Error,
+	})
+}
+
+// handleClaudeDeleteSession cancels and deletes a session
+func (ds *DashboardServer) handleClaudeDeleteSession(w http.ResponseWriter, _ *http.Request, claudeAPI *ClaudeAPIClient, sessionID string) {
+	w.Header().Set("Content-Type", "application/json")
+
+	if err := claudeAPI.DeleteSession(sessionID); err != nil {
+		w.WriteHeader(http.StatusNotFound)
+		json.NewEncoder(w).Encode(map[string]string{
+			"error": err.Error(),
+		})
+		return
+	}
+
+	json.NewEncoder(w).Encode(map[string]string{
+		"status": "deleted",
+	})
+}
+
+// handleClaudeMessage sends a follow-up message to a session
+func (ds *DashboardServer) handleClaudeMessage(w http.ResponseWriter, r *http.Request, claudeAPI *ClaudeAPIClient, sessionID string) {
+	w.Header().Set("Content-Type", "application/json")
+
+	var req struct {
+		Message string `json:"message"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{
+			"error": fmt.Sprintf("Invalid request body: %v", err),
+		})
+		return
+	}
+
+	if req.Message == "" {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{
+			"error": "message is required",
+		})
+		return
+	}
+
+	// Create a channel to collect the full response
+	streamCh := make(chan ClaudeStreamEvent, 100)
+	done := make(chan error, 1)
+
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Minute)
+	defer cancel()
+
+	go func() {
+		done <- claudeAPI.SendMessage(ctx, sessionID, req.Message, streamCh)
+		close(streamCh)
+	}()
+
+	// Collect response content
+	var responseText strings.Builder
+	for event := range streamCh {
+		if event.Delta != nil && event.Delta.Text != "" {
+			responseText.WriteString(event.Delta.Text)
+		}
+	}
+
+	err := <-done
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{
+			"error": err.Error(),
+		})
+		return
+	}
+
+	json.NewEncoder(w).Encode(map[string]any{
+		"response": responseText.String(),
+	})
+}
+
+// handleClaudeStream provides SSE streaming for a session
+func (ds *DashboardServer) handleClaudeStream(w http.ResponseWriter, r *http.Request, claudeAPI *ClaudeAPIClient, sessionID string) {
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "SSE not supported", http.StatusInternalServerError)
+		return
+	}
+
+	// Get message from query parameter
+	message := r.URL.Query().Get("message")
+	if message == "" {
+		fmt.Fprintf(w, "event: error\ndata: {\"error\":\"message query parameter required\"}\n\n")
+		flusher.Flush()
+		return
+	}
+
+	streamCh := make(chan ClaudeStreamEvent, 100)
+	done := make(chan error, 1)
+
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Minute)
+	defer cancel()
+
+	go func() {
+		done <- claudeAPI.SendMessage(ctx, sessionID, message, streamCh)
+		close(streamCh)
+	}()
+
+	// Send connected event
+	fmt.Fprintf(w, "event: connected\ndata: {\"session_id\":\"%s\"}\n\n", sessionID)
+	flusher.Flush()
+
+	// Stream events to client
+	for event := range streamCh {
+		data, err := json.Marshal(event)
+		if err != nil {
+			continue
+		}
+		fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event.Type, string(data))
+		flusher.Flush()
+	}
+
+	// Send completion or error event
+	err := <-done
+	if err != nil {
+		errData, _ := json.Marshal(map[string]string{"error": err.Error()})
+		fmt.Fprintf(w, "event: error\ndata: %s\n\n", string(errData))
+	} else {
+		fmt.Fprintf(w, "event: done\ndata: {\"status\":\"completed\"}\n\n")
+	}
+	flusher.Flush()
 }
 
 // handleDashboard serves the HTML dashboard.
