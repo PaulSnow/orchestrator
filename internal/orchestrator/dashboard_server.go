@@ -23,6 +23,7 @@ type DashboardServer struct {
 	server      *http.Server
 	port        int
 	mu          sync.Mutex
+	registry    *RegistryManager
 }
 
 // NewDashboardServer creates a new dashboard server instance.
@@ -31,10 +32,11 @@ func NewDashboardServer(cfg *RunConfig, state *StateManager, events *EventBroadc
 		port = 8123
 	}
 	return &DashboardServer{
-		cfg:    cfg,
-		state:  state,
-		events: events,
-		port:   port,
+		cfg:      cfg,
+		state:    state,
+		events:   events,
+		port:     port,
+		registry: GetGlobalRegistry(),
 	}
 }
 
@@ -65,6 +67,9 @@ func (ds *DashboardServer) Start() error {
 	// Review gate endpoints (backward compatibility)
 	mux.HandleFunc("/api/status", ds.handleStatus)
 	mux.HandleFunc("/api/gate-result", ds.handleGateResult)
+
+	// Orchestrator registry endpoint
+	mux.HandleFunc("/api/orchestrators", ds.handleOrchestrators)
 
 	// Dashboard HTML
 	mux.HandleFunc("/", ds.handleDashboard)
@@ -476,6 +481,22 @@ func (ds *DashboardServer) handleGateResult(w http.ResponseWriter, r *http.Reque
 	json.NewEncoder(w).Encode(result)
 }
 
+// handleOrchestrators returns all registered orchestrators.
+func (ds *DashboardServer) handleOrchestrators(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+
+	infos, err := ds.registry.GetOrchestratorInfos()
+	if err != nil {
+		json.NewEncoder(w).Encode(map[string]string{
+			"error": err.Error(),
+		})
+		return
+	}
+
+	json.NewEncoder(w).Encode(infos)
+}
+
 // handleDashboard serves the HTML dashboard.
 func (ds *DashboardServer) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html")
@@ -655,6 +676,38 @@ const dashboardHTML = `<!DOCTYPE html>
         .gate-failed { background: #3d0a0a; border: 2px solid #ff4444; }
         .gate-pending { background: #16213e; border: 2px solid #666; }
 
+        /* Orchestrators section */
+        .orchestrators-section {
+            background: #16213e;
+            border-radius: 8px;
+            margin-bottom: 20px;
+            padding: 15px;
+        }
+        .orchestrator-card {
+            display: flex;
+            align-items: center;
+            padding: 12px;
+            background: #0f1a2e;
+            border-radius: 6px;
+            margin-bottom: 8px;
+            gap: 15px;
+        }
+        .orchestrator-card:last-child { margin-bottom: 0; }
+        .orchestrator-card.current { border: 1px solid #00d9ff; }
+        .orchestrator-card:hover { background: #1a2540; }
+        .orch-project { font-weight: bold; color: #00d9ff; min-width: 150px; }
+        .orch-status { min-width: 80px; }
+        .orch-stats { color: #888; font-size: 12px; flex: 1; }
+        .orch-uptime { color: #666; font-size: 12px; min-width: 100px; }
+        .orch-link { min-width: 80px; }
+        .orch-link a {
+            color: #00d9ff;
+            text-decoration: none;
+            font-size: 12px;
+        }
+        .orch-link a:hover { text-decoration: underline; }
+        .no-orchestrators { color: #666; font-style: italic; }
+
         /* Animations */
         @keyframes pulse {
             0%, 100% { opacity: 1; }
@@ -737,6 +790,11 @@ const dashboardHTML = `<!DOCTYPE html>
             Loading...
         </div>
 
+        <h2>Other Orchestrators</h2>
+        <div class="orchestrators-section" id="orchestrators-list">
+            <div class="no-orchestrators">Loading...</div>
+        </div>
+
         <h2>Event Log</h2>
         <div class="event-log" id="event-log">
             Connecting...
@@ -748,6 +806,7 @@ const dashboardHTML = `<!DOCTYPE html>
         let workers = [];
         let issues = [];
         let events = [];
+        let orchestrators = [];
 
         function formatTime(isoString) {
             if (!isoString) return '';
@@ -882,20 +941,61 @@ const dashboardHTML = `<!DOCTYPE html>
             document.getElementById('gate-summary').textContent = data.summary || '';
         }
 
+        function updateOrchestrators(data) {
+            orchestrators = data || [];
+            const container = document.getElementById('orchestrators-list');
+
+            // Filter out the current orchestrator for "Other" section display
+            const otherOrchestrators = orchestrators.filter(o => !o.is_current);
+
+            if (otherOrchestrators.length === 0) {
+                container.innerHTML = '<div class="no-orchestrators">No other orchestrators running</div>';
+                return;
+            }
+
+            container.innerHTML = otherOrchestrators.map(o => {
+                const statusClass = 'status-' + o.status;
+                const statsStr = o.num_workers + ' workers, ' + o.total_issues + ' issues';
+
+                return '<div class="orchestrator-card">' +
+                    '<span class="orch-project">' + o.project + '</span>' +
+                    '<span class="orch-status"><span class="status-badge ' + statusClass + '">' + o.status + '</span></span>' +
+                    '<span class="orch-stats">' + statsStr + '</span>' +
+                    '<span class="orch-uptime">' + (o.uptime || '--') + '</span>' +
+                    '<span class="orch-link"><a href="' + o.dashboard_url + '" target="_blank">Open Dashboard</a></span>' +
+                '</div>';
+            }).join('');
+        }
+
+        function fetchOrchestrators() {
+            fetch('/api/orchestrators')
+                .then(r => r.json())
+                .then(data => {
+                    if (!data.error) {
+                        updateOrchestrators(data);
+                    }
+                })
+                .catch(() => {});
+        }
+
         // Initial data load
         Promise.all([
             fetch('/api/state').then(r => r.json()),
             fetch('/api/workers').then(r => r.json()),
             fetch('/api/issues').then(r => r.json()),
             fetch('/api/progress').then(r => r.json()),
-            fetch('/api/gate-result').then(r => r.json()).catch(() => null)
-        ]).then(([stateData, workersData, issuesData, progressData, gateData]) => {
+            fetch('/api/gate-result').then(r => r.json()).catch(() => null),
+            fetch('/api/orchestrators').then(r => r.json()).catch(() => [])
+        ]).then(([stateData, workersData, issuesData, progressData, gateData, orchestratorsData]) => {
             updateState(stateData);
             updateWorkers(workersData);
             updateIssues(issuesData);
             updateProgress(progressData);
             if (gateData && !gateData.error) {
                 updateGateResult(gateData);
+            }
+            if (orchestratorsData && !orchestratorsData.error) {
+                updateOrchestrators(orchestratorsData);
             }
         });
 
@@ -989,6 +1089,9 @@ const dashboardHTML = `<!DOCTYPE html>
                 document.getElementById('runtime').textContent = 'Running ' + formatElapsed(elapsed);
             }
         }, 1000);
+
+        // Periodic refresh for orchestrators list (every 5 seconds)
+        setInterval(fetchOrchestrators, 5000);
     </script>
 </body>
 </html>`
