@@ -117,6 +117,17 @@ func GetPendingCount(cfg *RunConfig) int {
 	return count
 }
 
+// GetPendingIssueCount returns count of issues with status "pending" only.
+func GetPendingIssueCount(cfg *RunConfig) int {
+	count := 0
+	for _, i := range cfg.Issues {
+		if i.Status == "pending" {
+			count++
+		}
+	}
+	return count
+}
+
 // GetCompletedCount returns count of completed issues.
 func GetCompletedCount(cfg *RunConfig) int {
 	count := 0

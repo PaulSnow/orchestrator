@@ -57,6 +57,7 @@ func (ds *DashboardServer) Start() error {
 	mux.HandleFunc("/api/progress", ds.handleProgress)
 	mux.HandleFunc("/api/issues", ds.handleIssues)
 	mux.HandleFunc("/api/event-log", ds.handleEventLog)
+	mux.HandleFunc("/api/stats", ds.handleStats)
 
 	// Worker log endpoint
 	mux.HandleFunc("/api/log/", ds.handleWorkerLog)
@@ -165,6 +166,12 @@ func (ds *DashboardServer) handleSSE(w http.ResponseWriter, r *http.Request) {
 	progressData := ds.buildProgressResponse()
 	data, _ = json.Marshal(progressData)
 	fmt.Fprintf(w, "event: progress\ndata: %s\n\n", string(data))
+	flusher.Flush()
+
+	// Send current stats
+	statsData := ds.buildStatsResponse()
+	data, _ = json.Marshal(statsData)
+	fmt.Fprintf(w, "event: stats\ndata: %s\n\n", string(data))
 	flusher.Flush()
 
 	// Listen for events
@@ -361,6 +368,77 @@ func (ds *DashboardServer) handleEventLog(w http.ResponseWriter, r *http.Request
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 	json.NewEncoder(w).Encode(ds.events.GetEventLog())
+}
+
+// handleStats returns progress statistics and metrics.
+func (ds *DashboardServer) handleStats(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	json.NewEncoder(w).Encode(ds.buildStatsResponse())
+}
+
+func (ds *DashboardServer) buildStatsResponse() map[string]any {
+	total := len(ds.cfg.Issues)
+	completed := GetCompletedCount(ds.cfg)
+	inProgress := GetInProgressCount(ds.cfg)
+	pending := GetPendingIssueCount(ds.cfg)
+	failed := GetFailedCount(ds.cfg)
+
+	// Calculate percent complete
+	percentComplete := 0.0
+	if total > 0 {
+		percentComplete = float64(completed) / float64(total) * 100
+	}
+
+	// Calculate worker utilization
+	activeWorkers := 0
+	for i := 1; i <= ds.cfg.NumWorkers; i++ {
+		worker := ds.state.LoadWorker(i)
+		if worker != nil && worker.Status == "running" {
+			activeWorkers++
+		}
+	}
+	workerUtilization := 0.0
+	if ds.cfg.NumWorkers > 0 {
+		workerUtilization = float64(activeWorkers) / float64(ds.cfg.NumWorkers) * 100
+	}
+
+	// Get timing metrics
+	avgCompletionTime := ds.events.GetAverageCompletionTime()
+	completionRate := ds.events.GetCompletionRate()
+
+	// Calculate estimated time remaining
+	var estimatedRemaining float64
+	remaining := total - completed
+	if completionRate > 0 && remaining > 0 {
+		estimatedRemaining = float64(remaining) / completionRate * 3600 // seconds
+	} else if avgCompletionTime > 0 && remaining > 0 {
+		estimatedRemaining = avgCompletionTime.Seconds() * float64(remaining)
+	}
+
+	return map[string]any{
+		// Overall progress
+		"total":            total,
+		"completed":        completed,
+		"in_progress":      inProgress,
+		"pending":          pending,
+		"failed":           failed,
+		"percent_complete": percentComplete,
+
+		// Worker utilization
+		"active_workers":     activeWorkers,
+		"total_workers":      ds.cfg.NumWorkers,
+		"worker_utilization": workerUtilization,
+
+		// Timing metrics
+		"avg_completion_seconds": avgCompletionTime.Seconds(),
+		"completion_rate_per_hour": completionRate,
+		"estimated_remaining_seconds": estimatedRemaining,
+
+		// Runtime info
+		"elapsed_seconds": time.Since(ds.events.GetStartedAt()).Seconds(),
+		"started_at":      ds.events.GetStartedAt().Format(time.RFC3339),
+	}
 }
 
 // handleWorkerLog returns the full log for a worker.
@@ -612,6 +690,49 @@ const dashboardHTML = `<!DOCTYPE html>
         .gate-failed { background: #3d0a0a; border: 2px solid #ff4444; }
         .gate-pending { background: #16213e; border: 2px solid #666; }
 
+        /* Stats panel */
+        .stats-panel {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 15px;
+            margin-bottom: 20px;
+        }
+        .stats-card {
+            background: #16213e;
+            border-radius: 8px;
+            padding: 15px;
+        }
+        .stats-card-title {
+            font-size: 11px;
+            color: #888;
+            text-transform: uppercase;
+            margin-bottom: 8px;
+        }
+        .stats-card-value {
+            font-size: 24px;
+            font-weight: bold;
+            color: #00d9ff;
+        }
+        .stats-card-value.green { color: #00ff88; }
+        .stats-card-value.yellow { color: #ffaa00; }
+        .stats-card-sub {
+            font-size: 12px;
+            color: #666;
+            margin-top: 4px;
+        }
+        .utilization-bar {
+            height: 6px;
+            background: #0a0a0a;
+            border-radius: 3px;
+            margin-top: 8px;
+            overflow: hidden;
+        }
+        .utilization-fill {
+            height: 100%;
+            background: #00d9ff;
+            transition: width 0.3s ease;
+        }
+
         /* Animations */
         @keyframes pulse {
             0%, 100% { opacity: 1; }
@@ -643,6 +764,32 @@ const dashboardHTML = `<!DOCTYPE html>
         <div id="gate-result" class="gate-result gate-pending" style="display: none;">
             <h3>Gate Status: <span id="gate-status">Pending</span></h3>
             <p id="gate-summary"></p>
+        </div>
+
+        <div class="stats-panel" id="stats-panel">
+            <div class="stats-card">
+                <div class="stats-card-title">Progress</div>
+                <div class="stats-card-value green" id="stats-progress">0%</div>
+                <div class="stats-card-sub" id="stats-progress-detail">0 / 0 completed</div>
+            </div>
+            <div class="stats-card">
+                <div class="stats-card-title">Completion Rate</div>
+                <div class="stats-card-value" id="stats-rate">0.0</div>
+                <div class="stats-card-sub">issues per hour</div>
+            </div>
+            <div class="stats-card">
+                <div class="stats-card-title">Est. Time Remaining</div>
+                <div class="stats-card-value yellow" id="stats-eta">--</div>
+                <div class="stats-card-sub" id="stats-avg">Avg: --</div>
+            </div>
+            <div class="stats-card">
+                <div class="stats-card-title">Worker Utilization</div>
+                <div class="stats-card-value" id="stats-utilization">0%</div>
+                <div class="utilization-bar">
+                    <div class="utilization-fill" id="stats-utilization-bar" style="width: 0%"></div>
+                </div>
+                <div class="stats-card-sub" id="stats-workers-detail">0 / 0 active</div>
+            </div>
         </div>
 
         <div class="progress-section">
@@ -832,18 +979,53 @@ const dashboardHTML = `<!DOCTYPE html>
             document.getElementById('gate-summary').textContent = data.summary || '';
         }
 
+        function formatDuration(seconds) {
+            if (!seconds || seconds <= 0) return '--';
+            if (seconds < 60) return Math.floor(seconds) + 's';
+            if (seconds < 3600) return Math.floor(seconds / 60) + 'm ' + Math.floor(seconds % 60) + 's';
+            const hours = Math.floor(seconds / 3600);
+            const mins = Math.floor((seconds % 3600) / 60);
+            return hours + 'h ' + mins + 'm';
+        }
+
+        function updateStats(data) {
+            // Progress
+            const percent = data.percent_complete || 0;
+            document.getElementById('stats-progress').textContent = percent.toFixed(1) + '%';
+            document.getElementById('stats-progress-detail').textContent =
+                (data.completed || 0) + ' / ' + (data.total || 0) + ' completed';
+
+            // Completion rate
+            const rate = data.completion_rate_per_hour || 0;
+            document.getElementById('stats-rate').textContent = rate.toFixed(1);
+
+            // ETA
+            document.getElementById('stats-eta').textContent = formatDuration(data.estimated_remaining_seconds);
+            const avgSecs = data.avg_completion_seconds || 0;
+            document.getElementById('stats-avg').textContent = 'Avg: ' + formatDuration(avgSecs);
+
+            // Worker utilization
+            const util = data.worker_utilization || 0;
+            document.getElementById('stats-utilization').textContent = util.toFixed(0) + '%';
+            document.getElementById('stats-utilization-bar').style.width = util + '%';
+            document.getElementById('stats-workers-detail').textContent =
+                (data.active_workers || 0) + ' / ' + (data.total_workers || 0) + ' active';
+        }
+
         // Initial data load
         Promise.all([
             fetch('/api/state').then(r => r.json()),
             fetch('/api/workers').then(r => r.json()),
             fetch('/api/issues').then(r => r.json()),
             fetch('/api/progress').then(r => r.json()),
+            fetch('/api/stats').then(r => r.json()),
             fetch('/api/gate-result').then(r => r.json()).catch(() => null)
-        ]).then(([stateData, workersData, issuesData, progressData, gateData]) => {
+        ]).then(([stateData, workersData, issuesData, progressData, statsData, gateData]) => {
             updateState(stateData);
             updateWorkers(workersData);
             updateIssues(issuesData);
             updateProgress(progressData);
+            updateStats(statsData);
             if (gateData && !gateData.error) {
                 updateGateResult(gateData);
             }
@@ -885,6 +1067,7 @@ const dashboardHTML = `<!DOCTYPE html>
             fetch('/api/workers').then(r => r.json()).then(updateWorkers);
             fetch('/api/issues').then(r => r.json()).then(updateIssues);
             fetch('/api/progress').then(r => r.json()).then(updateProgress);
+            fetch('/api/stats').then(r => r.json()).then(updateStats);
         });
 
         evtSource.addEventListener('worker_failed', (e) => {
@@ -908,6 +1091,14 @@ const dashboardHTML = `<!DOCTYPE html>
 
         evtSource.addEventListener('progress_update', (e) => {
             updateProgress(JSON.parse(e.data));
+        });
+
+        evtSource.addEventListener('stats', (e) => {
+            updateStats(JSON.parse(e.data));
+        });
+
+        evtSource.addEventListener('stats_update', (e) => {
+            updateStats(JSON.parse(e.data));
         });
 
         evtSource.addEventListener('log_update', (e) => {
@@ -939,6 +1130,11 @@ const dashboardHTML = `<!DOCTYPE html>
                 document.getElementById('runtime').textContent = 'Running ' + formatElapsed(elapsed);
             }
         }, 1000);
+
+        // Periodic stats refresh (every 5 seconds)
+        setInterval(() => {
+            fetch('/api/stats').then(r => r.json()).then(updateStats);
+        }, 5000);
     </script>
 </body>
 </html>`

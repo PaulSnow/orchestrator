@@ -37,6 +37,7 @@ const (
 	// Progress events
 	EventLogUpdate      = "log_update"
 	EventProgressUpdate = "progress_update"
+	EventStatsUpdate    = "stats_update"
 
 	// Review gate events (kept for compatibility)
 	EventConnected      = "connected"
@@ -108,17 +109,22 @@ type EventBroadcaster struct {
 	phaseMu     sync.RWMutex
 	startedAt   time.Time
 	project     string
+
+	// Stats tracking for completion metrics
+	completionTimes   []time.Duration // Time taken for each completed issue
+	completionTimesMu sync.RWMutex
 }
 
 // NewEventBroadcaster creates a new event broadcaster.
 func NewEventBroadcaster(project string) *EventBroadcaster {
 	return &EventBroadcaster{
-		clients:    make(map[chan DashboardEvent]bool),
-		eventLog:   make([]DashboardEvent, 0, 100),
-		maxLogSize: 100,
-		phase:      PhaseStartup,
-		startedAt:  time.Now(),
-		project:    project,
+		clients:         make(map[chan DashboardEvent]bool),
+		eventLog:        make([]DashboardEvent, 0, 100),
+		maxLogSize:      100,
+		phase:           PhaseStartup,
+		startedAt:       time.Now(),
+		project:         project,
+		completionTimes: make([]time.Duration, 0),
 	}
 }
 
@@ -296,6 +302,49 @@ func (eb *EventBroadcaster) EmitLogUpdate(workerID int, logTail string) {
 		WorkerID: workerID,
 		LogTail:  logTail,
 	})
+}
+
+// RecordCompletionTime records the time taken to complete an issue.
+func (eb *EventBroadcaster) RecordCompletionTime(duration time.Duration) {
+	eb.completionTimesMu.Lock()
+	defer eb.completionTimesMu.Unlock()
+	eb.completionTimes = append(eb.completionTimes, duration)
+}
+
+// GetAverageCompletionTime returns the average time to complete an issue.
+// Returns 0 if no issues have been completed.
+func (eb *EventBroadcaster) GetAverageCompletionTime() time.Duration {
+	eb.completionTimesMu.RLock()
+	defer eb.completionTimesMu.RUnlock()
+
+	if len(eb.completionTimes) == 0 {
+		return 0
+	}
+
+	var total time.Duration
+	for _, d := range eb.completionTimes {
+		total += d
+	}
+	return total / time.Duration(len(eb.completionTimes))
+}
+
+// GetCompletedCountFromStats returns the number of completed issues tracked.
+func (eb *EventBroadcaster) GetCompletedCountFromStats() int {
+	eb.completionTimesMu.RLock()
+	defer eb.completionTimesMu.RUnlock()
+	return len(eb.completionTimes)
+}
+
+// GetCompletionRate returns issues completed per hour.
+func (eb *EventBroadcaster) GetCompletionRate() float64 {
+	elapsed := time.Since(eb.startedAt).Hours()
+	if elapsed == 0 {
+		return 0
+	}
+	eb.completionTimesMu.RLock()
+	count := len(eb.completionTimes)
+	eb.completionTimesMu.RUnlock()
+	return float64(count) / elapsed
 }
 
 // GetInProgressCount returns the count of in-progress issues.
