@@ -56,6 +56,7 @@ func (ds *DashboardServer) Start() error {
 	mux.HandleFunc("/api/workers", ds.handleWorkers)
 	mux.HandleFunc("/api/progress", ds.handleProgress)
 	mux.HandleFunc("/api/issues", ds.handleIssues)
+	mux.HandleFunc("/api/queue", ds.handleQueue)
 	mux.HandleFunc("/api/event-log", ds.handleEventLog)
 
 	// Worker log endpoint
@@ -363,6 +364,13 @@ func (ds *DashboardServer) handleEventLog(w http.ResponseWriter, r *http.Request
 	json.NewEncoder(w).Encode(ds.events.GetEventLog())
 }
 
+// handleQueue returns the issue queue in priority order with blocked status.
+func (ds *DashboardServer) handleQueue(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	json.NewEncoder(w).Encode(GetIssueQueue(ds.cfg))
+}
+
 // handleWorkerLog returns the full log for a worker.
 func (ds *DashboardServer) handleWorkerLog(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/plain")
@@ -585,6 +593,66 @@ const dashboardHTML = `<!DOCTYPE html>
         .issue-status { min-width: 100px; }
         .issue-worker { min-width: 80px; color: #888; font-size: 12px; }
 
+        /* Queue section */
+        .queue-section {
+            background: #16213e;
+            border-radius: 8px;
+            margin-bottom: 20px;
+            overflow: hidden;
+        }
+        .queue-row {
+            display: flex;
+            align-items: center;
+            padding: 12px;
+            border-bottom: 1px solid #0a0a0a;
+            gap: 15px;
+        }
+        .queue-row:hover { background: #1a2540; }
+        .queue-row.ready { border-left: 4px solid #00ff88; }
+        .queue-row.blocked { border-left: 4px solid #ff4444; opacity: 0.7; }
+        .queue-position {
+            font-weight: bold;
+            color: #888;
+            min-width: 40px;
+            text-align: center;
+        }
+        .queue-issue-number { font-weight: bold; color: #00d9ff; min-width: 60px; }
+        .queue-title { flex: 1; }
+        .queue-wave-priority {
+            font-size: 11px;
+            color: #888;
+            min-width: 80px;
+        }
+        .queue-status {
+            min-width: 80px;
+        }
+        .queue-blocked-info {
+            font-size: 11px;
+            color: #ff8888;
+            max-width: 250px;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+        .ready-badge {
+            display: inline-block;
+            padding: 4px 8px;
+            border-radius: 4px;
+            font-size: 11px;
+            font-weight: bold;
+            background: #00ff8822;
+            color: #00ff88;
+        }
+        .blocked-badge {
+            display: inline-block;
+            padding: 4px 8px;
+            border-radius: 4px;
+            font-size: 11px;
+            font-weight: bold;
+            background: #ff444422;
+            color: #ff4444;
+        }
+
         /* Event log */
         .event-log {
             background: #0a0a0a;
@@ -693,6 +761,11 @@ const dashboardHTML = `<!DOCTYPE html>
             Loading...
         </div>
 
+        <h2>Queue (Upcoming)</h2>
+        <div class="queue-section" id="queue-list">
+            Loading...
+        </div>
+
         <h2>Event Log</h2>
         <div class="event-log" id="event-log">
             Connecting...
@@ -703,6 +776,7 @@ const dashboardHTML = `<!DOCTYPE html>
         let state = {};
         let workers = [];
         let issues = [];
+        let queue = [];
         let events = [];
 
         function formatTime(isoString) {
@@ -790,6 +864,36 @@ const dashboardHTML = `<!DOCTYPE html>
             }).join('');
         }
 
+        function updateQueue(data) {
+            queue = data || [];
+            const container = document.getElementById('queue-list');
+
+            if (queue.length === 0) {
+                container.innerHTML = '<div class="queue-row">No pending issues in queue</div>';
+                return;
+            }
+
+            container.innerHTML = queue.map(q => {
+                const issue = q.issue || {};
+                const rowClass = q.is_ready ? 'ready' : 'blocked';
+                const statusBadge = q.is_ready
+                    ? '<span class="ready-badge">Ready</span>'
+                    : '<span class="blocked-badge">Blocked</span>';
+                const blockedInfo = q.is_blocked && q.blocking_reasons
+                    ? q.blocking_reasons.join(', ')
+                    : '';
+
+                return '<div class="queue-row ' + rowClass + '">' +
+                    '<span class="queue-position">' + q.position + '</span>' +
+                    '<span class="queue-issue-number">#' + issue.number + '</span>' +
+                    '<span class="queue-title">' + (issue.title || '') + '</span>' +
+                    '<span class="queue-wave-priority">W' + (issue.wave || 1) + ' P' + (issue.priority || 1) + '</span>' +
+                    '<span class="queue-status">' + statusBadge + '</span>' +
+                    '<span class="queue-blocked-info" title="' + blockedInfo + '">' + blockedInfo + '</span>' +
+                '</div>';
+            }).join('');
+        }
+
         function addEvent(type, data) {
             const time = new Date().toLocaleTimeString();
             let message = type;
@@ -837,12 +941,14 @@ const dashboardHTML = `<!DOCTYPE html>
             fetch('/api/state').then(r => r.json()),
             fetch('/api/workers').then(r => r.json()),
             fetch('/api/issues').then(r => r.json()),
+            fetch('/api/queue').then(r => r.json()),
             fetch('/api/progress').then(r => r.json()),
             fetch('/api/gate-result').then(r => r.json()).catch(() => null)
-        ]).then(([stateData, workersData, issuesData, progressData, gateData]) => {
+        ]).then(([stateData, workersData, issuesData, queueData, progressData, gateData]) => {
             updateState(stateData);
             updateWorkers(workersData);
             updateIssues(issuesData);
+            updateQueue(queueData);
             updateProgress(progressData);
             if (gateData && !gateData.error) {
                 updateGateResult(gateData);
@@ -877,6 +983,7 @@ const dashboardHTML = `<!DOCTYPE html>
             addEvent('worker_assigned', data);
             fetch('/api/workers').then(r => r.json()).then(updateWorkers);
             fetch('/api/issues').then(r => r.json()).then(updateIssues);
+            fetch('/api/queue').then(r => r.json()).then(updateQueue);
         });
 
         evtSource.addEventListener('worker_completed', (e) => {
@@ -884,6 +991,7 @@ const dashboardHTML = `<!DOCTYPE html>
             addEvent('worker_completed', data);
             fetch('/api/workers').then(r => r.json()).then(updateWorkers);
             fetch('/api/issues').then(r => r.json()).then(updateIssues);
+            fetch('/api/queue').then(r => r.json()).then(updateQueue);
             fetch('/api/progress').then(r => r.json()).then(updateProgress);
         });
 
@@ -903,6 +1011,7 @@ const dashboardHTML = `<!DOCTYPE html>
             const data = JSON.parse(e.data);
             addEvent('issue_status', data);
             fetch('/api/issues').then(r => r.json()).then(updateIssues);
+            fetch('/api/queue').then(r => r.json()).then(updateQueue);
             fetch('/api/progress').then(r => r.json()).then(updateProgress);
         });
 

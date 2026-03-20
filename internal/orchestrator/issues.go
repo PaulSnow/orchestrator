@@ -264,6 +264,85 @@ func NextRetriableIssueGlobal(configs []*RunConfig, claimed []ClaimedIssue) (*Ru
 	return bestCfg, best
 }
 
+// QueueItem represents an issue in the queue with ordering and blocking info.
+type QueueItem struct {
+	Issue           *Issue   `json:"issue"`
+	Position        int      `json:"position"`
+	IsReady         bool     `json:"is_ready"`
+	IsBlocked       bool     `json:"is_blocked"`
+	BlockedBy       []int    `json:"blocked_by,omitempty"`
+	BlockingReasons []string `json:"blocking_reasons,omitempty"`
+}
+
+// GetIssueQueue returns pending issues in priority order with blocked status.
+// Issues are ordered by: wave (ascending), then priority (ascending).
+// Each item includes whether it's ready to start or blocked by dependencies.
+func GetIssueQueue(cfg *RunConfig) []QueueItem {
+	// Build completed set
+	completed := make(map[int]bool)
+	for _, issue := range cfg.Issues {
+		if issue.Status == "completed" {
+			completed[issue.Number] = true
+		}
+	}
+
+	// Collect pending issues
+	var pending []*Issue
+	for _, issue := range cfg.Issues {
+		if issue.Status == "pending" {
+			pending = append(pending, issue)
+		}
+	}
+
+	// Sort by wave then priority
+	sort.Slice(pending, func(i, j int) bool {
+		if pending[i].Wave != pending[j].Wave {
+			return pending[i].Wave < pending[j].Wave
+		}
+		return pending[i].Priority < pending[j].Priority
+	})
+
+	// Build queue items with blocked status
+	queue := make([]QueueItem, 0, len(pending))
+	position := 1
+
+	for _, issue := range pending {
+		item := QueueItem{
+			Issue:    issue,
+			Position: position,
+		}
+
+		// Check dependencies
+		var blockedBy []int
+		var reasons []string
+		for _, depNum := range issue.DependsOn {
+			if !completed[depNum] {
+				blockedBy = append(blockedBy, depNum)
+				// Find the dependency issue for more context
+				for _, dep := range cfg.Issues {
+					if dep.Number == depNum {
+						reasons = append(reasons, fmt.Sprintf("#%d (%s) is %s", depNum, dep.Title, dep.Status))
+						break
+					}
+				}
+			}
+		}
+
+		if len(blockedBy) > 0 {
+			item.IsBlocked = true
+			item.BlockedBy = blockedBy
+			item.BlockingReasons = reasons
+		} else {
+			item.IsReady = true
+		}
+
+		queue = append(queue, item)
+		position++
+	}
+
+	return queue
+}
+
 // NextAvailableCrossProject finds the next available issue from any other project config.
 // Returns (other_cfg, issue) or nil. Skips the config at excludeConfig path.
 func NextAvailableCrossProject(cfg *RunConfig, excludeConfig string, claimed []ClaimedIssue) (*RunConfig, *Issue) {
