@@ -45,6 +45,8 @@ func main() {
 		cmdDashboard(args)
 	case "add-issue":
 		cmdAddIssue(args)
+	case "api-docs":
+		cmdAPIDocs(args)
 	case "version", "-v", "--version":
 		printVersion()
 	case "help", "-h", "--help":
@@ -59,69 +61,79 @@ func main() {
 func printUsage() {
 	fmt.Println(`orchestrator - Parallel Claude Code worker orchestration via tmux
 
-OVERVIEW
-  Orchestrates multiple Claude Code sessions working on GitHub/GitLab issues
-  in parallel. Each worker gets its own git worktree and tmux window.
+================================================================================
+SUMMARY
+================================================================================
 
-WORKFLOW
-  1. Load issues from config file OR GitHub epic issue
-  2. Run review gate (optional) - validates issues are well-specified
-  3. Create git worktrees for each assigned issue
-  4. Launch Claude workers in tmux windows with issue-specific prompts
-  5. Monitor progress, reassign completed workers to next issues
+Orchestrates multiple Claude Code sessions working on GitHub/GitLab issues in
+parallel. Each worker runs in its own git worktree and tmux window, with
+automatic progress monitoring, stall detection, and worker reassignment.
 
-CONFIGURATION
-
-  Option A: JSON Config File
-    Create a JSON file with issues array:
-    {
-      "project": "my-project",
-      "repos": {
-        "default": {
-          "path": "/path/to/repo",
-          "worktree_base": "/path/to/worktrees",
-          "branch_prefix": "feature/issue-"
-        }
-      },
-      "issues": [
-        {"number": 1, "title": "First issue", "priority": 1, "wave": 1},
-        {"number": 2, "title": "Second issue", "depends_on": [1]}
-      ]
-    }
-
-  Option B: GitHub Epic Issue
-    Use a GitHub issue as the config source. The epic body contains a task
-    list with issue references:
-
-    - [ ] #101 - Add authentication module
-    - [ ] #102 - Create user schema (blocked by #101)
-    - [x] #103 - Already completed (skipped)
-
+================================================================================
 COMMANDS
-  launch     Start workers and monitor until completion (main command)
-  review     Run review gate only, don't launch workers
-  cleanup    Kill tmux session and optionally remove worktrees
-  status     Show current progress (one-shot)
-  dashboard  Live terminal dashboard with auto-refresh
-  add-issue  Add an issue to config mid-run
-  version    Show version information
+================================================================================
 
+  launch       Start parallel workers and monitor until all issues complete
+  review       Run review gate only (validates issues are well-specified)
+  cleanup      Kill tmux session and remove worktrees
+  status       Show current orchestration progress (one-shot snapshot)
+  dashboard    Open live terminal dashboard with auto-refresh
+  add-issue    Add an issue to config file mid-run
+  api-docs     Output API documentation for the web dashboard
+  version      Show version information
+  help         Show this help message
+
+================================================================================
+USAGE
+================================================================================
+
+  orchestrator <command> [options]
+  orchestrator launch --config <file>
+  orchestrator launch --epic <github-url> --repo <path> --worktrees <path>
+
+================================================================================
+QUICK START
+================================================================================
+
+  1. Create a config file (config/my-issues.json):
+     {
+       "project": "my-project",
+       "repos": {
+         "default": {
+           "path": "/path/to/repo",
+           "worktree_base": "/tmp/worktrees",
+           "branch_prefix": "feature/issue-"
+         }
+       },
+       "issues": [
+         {"number": 1, "title": "First issue", "priority": 1},
+         {"number": 2, "title": "Second issue", "depends_on": [1]}
+       ]
+     }
+
+  2. Launch workers:
+     orchestrator launch --config config/my-issues.json
+
+  3. Monitor via web dashboard at http://localhost:8123
+
+================================================================================
 EXAMPLES
+================================================================================
 
-  # Launch with config file (most common)
+  # Launch with config file (recommended)
   orchestrator launch --config config/my-issues.json
 
   # Launch from GitHub epic issue
   orchestrator launch --epic https://github.com/owner/repo/issues/42 \
     --repo /path/to/repo --worktrees /tmp/worktrees
 
-  # Review issues without launching (check if issues are well-specified)
+  # Review issues first without launching workers
   orchestrator launch --config config/issues.json --review-only
 
-  # Skip review gate (for re-runs after issues already reviewed)
+  # Skip review gate (for re-runs)
   orchestrator launch --config config/issues.json --skip-review
 
-  # Run with 3 parallel workers instead of default 5
+  # Run with 3 workers instead of default 5
   orchestrator launch --config config/issues.json --workers 3
 
   # Dry run - validate config without making changes
@@ -133,19 +145,46 @@ EXAMPLES
   # Clean up after run
   orchestrator cleanup --config config/issues.json
 
+  # View API documentation
+  orchestrator api-docs
+
+================================================================================
+WORKFLOW
+================================================================================
+
+  1. LOAD CONFIG     Read issues from JSON file or GitHub epic
+  2. REVIEW GATE     Validate issues are well-specified (optional, skippable)
+  3. CREATE WORKTREES  Set up isolated git worktrees for each issue
+  4. LAUNCH WORKERS  Start Claude Code in tmux windows with issue prompts
+  5. MONITOR         Track progress, detect stalls, reassign completed workers
+
+================================================================================
 WEB DASHBOARD
-  By default, a web dashboard runs at http://localhost:8123 showing:
-  - Issue status (pending, in_progress, completed, failed)
-  - Active worker assignments
-  - Real-time progress updates via SSE
+================================================================================
 
-  Disable with --web-port 0
+  Default: http://localhost:8123 (disable with --web-port 0)
 
+  Features:
+  - Real-time issue status (pending, in_progress, completed, failed)
+  - Worker assignments and activity
+  - Progress bar and completion stats
+  - Event log with SSE updates
+
+  API endpoints available - run "orchestrator api-docs" for details.
+
+================================================================================
 TMUX SESSION
-  Workers run in tmux windows. Attach to monitor:
+================================================================================
+
+  Workers run in tmux windows. To attach:
     tmux attach -t <session-name>
 
   Session name defaults to project name from config.
+  Navigate windows: Ctrl+b w (list), Ctrl+b n/p (next/prev)
+
+================================================================================
+OPTIONS
+================================================================================
 
 Use "orchestrator <command> -h" for command-specific options.`)
 }
@@ -165,38 +204,45 @@ func cmdLaunch(args []string) {
 	fs.Usage = func() {
 		fmt.Println(`orchestrator launch - Start parallel Claude workers on issues
 
+================================================================================
+SUMMARY
+================================================================================
+
+Launch Claude Code workers in parallel tmux windows. Each worker gets an
+isolated git worktree and works on one issue at a time. When a worker
+completes, it's automatically assigned the next available issue.
+
+================================================================================
 USAGE
+================================================================================
+
   orchestrator launch --config <file>
   orchestrator launch --epic <url> --repo <path> --worktrees <path>
+  orchestrator launch --config-dir <dir>
 
-DESCRIPTION
-  Launches Claude Code workers in parallel tmux windows. Each worker gets
-  an isolated git worktree and works on one issue at a time. When a worker
-  completes, it's automatically assigned the next available issue.
+================================================================================
+INPUT SOURCES
+================================================================================
 
-INPUT SOURCES (pick one)
+Choose ONE of these input methods:
 
-  --config <file>       JSON config file with issues array
+  --config <file>       JSON config file with issues array (most common)
   --config-dir <dir>    Directory containing *-issues.json files (merges all)
   --epic <url>          GitHub epic issue URL - parses task list from body
 
-  Epic URL formats supported:
-    https://github.com/owner/repo/issues/123
-    owner/repo#123
+Epic URL formats:
+  - https://github.com/owner/repo/issues/123
+  - owner/repo#123
 
-EPIC MODE REQUIREMENTS
-  When using --epic, you must also specify:
-    --repo <path>        Path to the git repository
-    --worktrees <path>   Directory for creating worktrees
+When using --epic, also specify:
+  --repo <path>         Path to the git repository (required)
+  --worktrees <path>    Directory for creating worktrees (required)
 
-REVIEW GATE
-  By default, issues are reviewed before work begins to ensure they are
-  well-specified. Use --skip-review for re-runs or --review-only to check
-  issues without launching workers.
-
+================================================================================
 EXAMPLES
+================================================================================
 
-  # Standard launch with config file
+  # Launch with config file (recommended)
   orchestrator launch --config config/my-issues.json
 
   # Launch from GitHub epic
@@ -205,16 +251,30 @@ EXAMPLES
     --repo /home/paul/go/src/github.com/PaulSnow/myrepo \
     --worktrees /tmp/myrepo-worktrees
 
-  # Review only - validate issues are ready
+  # Merge multiple config files
+  orchestrator launch --config-dir config/
+
+  # Review issues first (validate before launching)
   orchestrator launch --config issues.json --review-only
 
-  # Quick re-run, skip review
+  # Skip review gate (for re-runs)
   orchestrator launch --config issues.json --skip-review
 
-  # Custom worker count and session name
-  orchestrator launch --config issues.json --workers 3 --session mywork
+  # Custom worker count
+  orchestrator launch --config issues.json --workers 3
 
-OPTIONS`)
+  # Custom tmux session name
+  orchestrator launch --config issues.json --session my-project
+
+  # Dry run (validate config, don't execute)
+  orchestrator launch --config issues.json --dry-run
+
+  # Disable web dashboard
+  orchestrator launch --config issues.json --web-port 0
+
+================================================================================
+OPTIONS
+================================================================================`)
 		fs.PrintDefaults()
 	}
 	dryRun := fs.Bool("dry-run", false, "Validate config and show plan without making changes")
@@ -573,6 +633,53 @@ OPTIONS`)
 
 func cmdReview(args []string) {
 	fs := flag.NewFlagSet("review", flag.ExitOnError)
+	fs.Usage = func() {
+		fmt.Println(`orchestrator review - Run review gate without launching workers
+
+================================================================================
+SUMMARY
+================================================================================
+
+Validate that issues are well-specified before committing to work. The review
+gate checks each issue for clarity, acceptance criteria, and actionability.
+
+================================================================================
+USAGE
+================================================================================
+
+  orchestrator review --config <file>
+  orchestrator review --config-dir <dir>
+
+================================================================================
+OUTPUT
+================================================================================
+
+For each issue:
+  - PASSED: Issue is well-specified and ready for work
+  - FAILED: Issue needs clarification (reasons listed)
+
+Gate result:
+  - PASSED: All issues passed review
+  - FAILED: One or more issues failed (blocks launch)
+
+================================================================================
+EXAMPLES
+================================================================================
+
+  # Review issues from config file
+  orchestrator review --config config/my-issues.json
+
+  # Review and post comments to failing issues
+  orchestrator review --config config/my-issues.json --post-comments
+
+  # Keep web dashboard running after review
+  orchestrator review --config config/my-issues.json --keep-server
+
+================================================================================
+OPTIONS
+================================================================================`)
+		fs.PrintDefaults()
+	}
 	configDir := fs.String("config-dir", "", "Directory with *-issues.json configs")
 	config := fs.String("config", "", "Single config file")
 	postComments := fs.Bool("post-comments", false, "Post comments to failing issues")
@@ -659,17 +766,40 @@ func cmdCleanup(args []string) {
 	fs.Usage = func() {
 		fmt.Println(`orchestrator cleanup - Clean up tmux session and worktrees
 
-DESCRIPTION
-  Stops all workers and cleans up resources:
-  - Kills the tmux session
-  - Removes git worktrees (unless --keep-worktrees)
-  - Clears state files
+================================================================================
+SUMMARY
+================================================================================
 
+Stop all workers and clean up resources created during orchestration.
+
+================================================================================
 USAGE
+================================================================================
+
   orchestrator cleanup --config <file>
   orchestrator cleanup --config <file> --keep-worktrees
 
-OPTIONS`)
+================================================================================
+WHAT IT DOES
+================================================================================
+
+  1. Kills the tmux session (stops all workers)
+  2. Removes git worktrees (unless --keep-worktrees)
+  3. Clears state files in state/workers/
+
+================================================================================
+EXAMPLES
+================================================================================
+
+  # Full cleanup (remove worktrees)
+  orchestrator cleanup --config config/my-issues.json
+
+  # Keep worktrees for inspection
+  orchestrator cleanup --config config/my-issues.json --keep-worktrees
+
+================================================================================
+OPTIONS
+================================================================================`)
 		fs.PrintDefaults()
 	}
 	keepWorktrees := fs.Bool("keep-worktrees", false, "Keep worktrees (don't delete)")
@@ -685,15 +815,47 @@ func cmdStatus(args []string) {
 	fs.Usage = func() {
 		fmt.Println(`orchestrator status - Show current orchestration progress
 
-DESCRIPTION
-  Displays a snapshot of:
-  - Issues completed/pending/failed per project
-  - Current worker assignments and status
+================================================================================
+SUMMARY
+================================================================================
 
+Display a one-shot snapshot of the current orchestration state.
+
+================================================================================
 USAGE
-  orchestrator status --config <file>
+================================================================================
 
-OPTIONS`)
+  orchestrator status --config <file>
+  orchestrator status --config-dir <dir>
+
+================================================================================
+OUTPUT
+================================================================================
+
+Shows for each project:
+  - Total issues
+  - Completed count
+  - Pending count
+  - Failed count
+
+Shows for each worker:
+  - Worker ID
+  - Assigned issue number
+  - Current status (running, idle, completed, failed)
+
+================================================================================
+EXAMPLES
+================================================================================
+
+  # Check status of single project
+  orchestrator status --config config/my-issues.json
+
+  # Check status across all projects
+  orchestrator status --config-dir config/
+
+================================================================================
+OPTIONS
+================================================================================`)
 		fs.PrintDefaults()
 	}
 	workers := fs.Int("workers", defaultNumWorkers, "Number of workers")
@@ -733,6 +895,47 @@ OPTIONS`)
 
 func cmdDashboard(args []string) {
 	fs := flag.NewFlagSet("dashboard", flag.ExitOnError)
+	fs.Usage = func() {
+		fmt.Println(`orchestrator dashboard - Live terminal dashboard
+
+================================================================================
+SUMMARY
+================================================================================
+
+Display a live-updating terminal dashboard showing orchestration progress.
+Auto-refreshes to show current worker status and issue completion.
+
+================================================================================
+USAGE
+================================================================================
+
+  orchestrator dashboard --config <file>
+  orchestrator dashboard --config-dir <dir>
+
+================================================================================
+DISPLAY
+================================================================================
+
+The dashboard shows:
+  - Project summary with completion stats
+  - Per-worker status (issue, stage, state)
+  - Real-time updates as workers progress
+
+================================================================================
+EXAMPLES
+================================================================================
+
+  # Open dashboard for single project
+  orchestrator dashboard --config config/my-issues.json
+
+  # Open dashboard with custom worker count
+  orchestrator dashboard --config config/my-issues.json --workers 3
+
+================================================================================
+OPTIONS
+================================================================================`)
+		fs.PrintDefaults()
+	}
 	workers := fs.Int("workers", defaultNumWorkers, "Number of workers")
 	configDir := fs.String("config-dir", "", "Config directory")
 	config := fs.String("config", "", "Config file")
@@ -743,6 +946,266 @@ func cmdDashboard(args []string) {
 	primaryCfg.NumWorkers = *workers
 	state := orchestrator.NewStateManager(primaryCfg)
 	orchestrator.RunDashboard(primaryCfg, state)
+}
+
+func cmdAPIDocs(args []string) {
+	fs := flag.NewFlagSet("api-docs", flag.ExitOnError)
+	fs.Usage = func() {
+		fmt.Println(`orchestrator api-docs - Output API documentation
+
+================================================================================
+SUMMARY
+================================================================================
+
+Print documentation for all web dashboard API endpoints. Useful for AI agents
+or scripts that need to interact with the orchestrator programmatically.
+
+================================================================================
+USAGE
+================================================================================
+
+  orchestrator api-docs
+
+================================================================================
+OPTIONS
+================================================================================`)
+		fs.PrintDefaults()
+	}
+	fs.Parse(args)
+	printAPIDocs()
+}
+
+func printAPIDocs() {
+	fmt.Println(`================================================================================
+ORCHESTRATOR WEB DASHBOARD API
+================================================================================
+
+Base URL: http://localhost:8123 (configurable via --web-port)
+
+All endpoints return JSON unless otherwise noted. CORS is enabled for all
+endpoints (Access-Control-Allow-Origin: *).
+
+================================================================================
+ENDPOINTS
+================================================================================
+
+GET /
+--------------------------------------------------------------------------------
+SUMMARY: Serves the HTML dashboard UI
+CONTENT-TYPE: text/html
+DESCRIPTION: Returns the single-page dashboard application with real-time
+  updates via SSE.
+
+GET /api/events
+--------------------------------------------------------------------------------
+SUMMARY: Server-Sent Events stream for real-time updates
+CONTENT-TYPE: text/event-stream
+DESCRIPTION: Opens a persistent connection that streams events as they occur.
+
+EVENT TYPES:
+  connected        - Initial connection established
+  state            - Full state update (phase, project, stats)
+  workers          - Worker list update
+  progress         - Progress stats update
+  phase_changed    - Orchestration phase changed
+  worker_assigned  - Worker assigned to issue
+  worker_completed - Worker finished issue
+  worker_failed    - Worker failed on issue
+  worker_idle      - Worker has no work
+  issue_status     - Issue status changed
+  progress_update  - Progress percentage update
+  log_update       - Worker log updated
+  gate_result      - Review gate result available
+  reviewing_issue  - Issue being reviewed
+  issue_review     - Individual issue review complete
+
+EXAMPLE:
+  curl -N http://localhost:8123/api/events
+
+GET /api/state
+--------------------------------------------------------------------------------
+SUMMARY: Get current orchestrator state
+CONTENT-TYPE: application/json
+RESPONSE:
+  {
+    "phase": "implementing",       // review, implementing, testing, completed, failed
+    "project": "my-project",
+    "version": "1.0.0",
+    "started_at": "2024-01-15T10:30:00Z",
+    "elapsed_seconds": 125.5,
+    "total_issues": 10,
+    "completed": 3,
+    "in_progress": 2,
+    "pending": 4,
+    "failed": 1,
+    "active_workers": 2,
+    "total_workers": 5
+  }
+
+EXAMPLE:
+  curl http://localhost:8123/api/state
+
+GET /api/workers
+--------------------------------------------------------------------------------
+SUMMARY: Get status of all workers
+CONTENT-TYPE: application/json
+RESPONSE: Array of worker objects
+  [
+    {
+      "worker_id": 1,
+      "status": "running",         // running, idle, completed, failed, unknown
+      "stage": "implement",        // Current pipeline stage
+      "retry_count": 0,
+      "branch": "feature/issue-42",
+      "worktree": "/tmp/worktrees/issue-42",
+      "issue_number": 42,
+      "issue_title": "Add authentication",
+      "started_at": "2024-01-15T10:31:00Z",
+      "elapsed_seconds": 95.2,
+      "log_tail": "Running tests..."
+    }
+  ]
+
+EXAMPLE:
+  curl http://localhost:8123/api/workers
+
+GET /api/progress
+--------------------------------------------------------------------------------
+SUMMARY: Get completion progress stats
+CONTENT-TYPE: application/json
+RESPONSE:
+  {
+    "total": 10,
+    "completed": 3,
+    "in_progress": 2,
+    "pending": 4,
+    "failed": 1,
+    "percent_complete": 30.0
+  }
+
+EXAMPLE:
+  curl http://localhost:8123/api/progress
+
+GET /api/issues
+--------------------------------------------------------------------------------
+SUMMARY: Get all issues with their current status
+CONTENT-TYPE: application/json
+RESPONSE: Array of issue objects
+  [
+    {
+      "number": 42,
+      "title": "Add authentication",
+      "status": "in_progress",     // pending, in_progress, completed, failed
+      "priority": 1,
+      "wave": 1,
+      "pipeline_stage": 0,
+      "assigned_worker": 1,        // null if not assigned
+      "depends_on": [41],          // empty if no dependencies
+      "review": {                  // present if reviewed
+        "passed": true,
+        "reasons": []
+      }
+    }
+  ]
+
+EXAMPLE:
+  curl http://localhost:8123/api/issues
+
+GET /api/event-log
+--------------------------------------------------------------------------------
+SUMMARY: Get recent event history
+CONTENT-TYPE: application/json
+RESPONSE: Array of recent events (newest first, max 100)
+  [
+    {
+      "type": "worker_assigned",
+      "timestamp": "2024-01-15T10:31:00Z",
+      "data": {"worker_id": 1, "issue_number": 42}
+    }
+  ]
+
+EXAMPLE:
+  curl http://localhost:8123/api/event-log
+
+GET /api/log/{worker_id}
+--------------------------------------------------------------------------------
+SUMMARY: Get worker log output
+CONTENT-TYPE: text/plain
+PARAMETERS:
+  worker_id (path)  - Worker ID (1-N)
+  lines (query)     - Number of lines to return (default: 100)
+RESPONSE: Plain text log output (last N lines)
+
+EXAMPLE:
+  curl "http://localhost:8123/api/log/1?lines=50"
+
+GET /api/status
+--------------------------------------------------------------------------------
+SUMMARY: Get basic status (legacy endpoint)
+CONTENT-TYPE: application/json
+RESPONSE:
+  {
+    "project": "my-project",
+    "timestamp": "2024-01-15T10:35:00Z",
+    "issues": 10,
+    "completed": 3,
+    "pending": 4,
+    "failed": 1,
+    "num_workers": 5
+  }
+
+EXAMPLE:
+  curl http://localhost:8123/api/status
+
+GET /api/gate-result
+--------------------------------------------------------------------------------
+SUMMARY: Get review gate result
+CONTENT-TYPE: application/json
+RESPONSE:
+  {
+    "passed": false,
+    "summary": "3 of 10 issues failed review",
+    "total_issues": 10,
+    "passed_issues": 7,
+    "failed_issues": 3,
+    "skipped_issues": 0,
+    "results": [
+      {
+        "issue_number": 42,
+        "title": "Add feature",
+        "passed": false,
+        "reasons": ["Missing acceptance criteria"]
+      }
+    ]
+  }
+
+EXAMPLE:
+  curl http://localhost:8123/api/gate-result
+
+================================================================================
+COMMON CURL EXAMPLES
+================================================================================
+
+  # Watch events in real-time
+  curl -N http://localhost:8123/api/events
+
+  # Get overall progress as JSON
+  curl -s http://localhost:8123/api/progress | jq .
+
+  # Get failed issues only
+  curl -s http://localhost:8123/api/issues | jq '[.[] | select(.status == "failed")]'
+
+  # Get worker 1's recent log
+  curl "http://localhost:8123/api/log/1?lines=20"
+
+  # Check if orchestration is complete
+  curl -s http://localhost:8123/api/state | jq -r '.phase'
+
+  # Poll until complete (bash)
+  while [ "$(curl -s localhost:8123/api/state | jq -r .phase)" != "completed" ]; do
+    sleep 10
+  done
+  echo "Done!"`)
 }
 
 func cmdAddIssue(args []string) {

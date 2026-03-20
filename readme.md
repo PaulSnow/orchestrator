@@ -1,18 +1,18 @@
 # Orchestrator
 
-Control plane for AI-assisted development across Accumulate Network repositories.
+Control plane for AI-assisted parallel development via Claude Code workers.
 
 ## What This Is
 
-The orchestrator provides a central point for coordinating development work across 14+ repositories in the Accumulate Network ecosystem. It uses **tmux sessions with parallel Claude Code workers** as its primary execution model for reviews, test development, and multi-branch work.
+The orchestrator coordinates multiple Claude Code sessions working on GitHub/GitLab issues in parallel. Each worker runs in its own git worktree and tmux window, with automatic progress monitoring, stall detection, and worker reassignment.
 
-When Claude Code opens this repo, `claude.md` gives it full context and tools to:
-
-- **Coordinate parallel Claude workers via tmux** -- the core execution mechanism
-- Track and execute tasks across repositories
-- Run builds and tests with stall detection and automatic restart
-- Follow playbooks for common workflows (features, bugs, releases, reviews)
-- Generate status reports
+Key features:
+- **Parallel Claude workers** — Multiple Claude Code sessions working simultaneously
+- **Git worktree isolation** — Each worker gets its own clean working copy
+- **Real-time dashboard** — Web UI with SSE updates at http://localhost:8123
+- **Review gate** — Validates issues are well-specified before work begins
+- **Automatic reassignment** — Completed workers pick up the next available issue
+- **Stall detection** — Monitors log activity and restarts stalled workers
 
 ## Quick Start
 
@@ -20,15 +20,65 @@ When Claude Code opens this repo, `claude.md` gives it full context and tools to
 # Build the CLI
 go build -o /tmp/orchestrator ./cmd/orchestrator/
 
-# Check status of all repos
-/tmp/orchestrator status
+# Launch workers on issues from config file
+/tmp/orchestrator launch --config config/my-issues.json
 
-# Run tests for a specific repo
-/tmp/orchestrator test staking
+# Or from a GitHub epic issue
+/tmp/orchestrator launch \
+  --epic https://github.com/owner/repo/issues/42 \
+  --repo /path/to/repo \
+  --worktrees /tmp/worktrees
 
-# List tasks
-/tmp/orchestrator task list
+# Check status
+/tmp/orchestrator status --config config/my-issues.json
+
+# View API documentation
+/tmp/orchestrator api-docs
+
+# Clean up when done
+/tmp/orchestrator cleanup --config config/my-issues.json
 ```
+
+## Commands
+
+| Command | Description |
+|---------|-------------|
+| `launch` | Start parallel workers and monitor until all issues complete |
+| `review` | Run review gate only (validates issues are well-specified) |
+| `cleanup` | Kill tmux session and remove worktrees |
+| `status` | Show current orchestration progress (one-shot) |
+| `dashboard` | Open live terminal dashboard |
+| `add-issue` | Add an issue to config file mid-run |
+| `api-docs` | Output API documentation for the web dashboard |
+| `version` | Show version information |
+| `help` | Show help message |
+
+Run `orchestrator <command> -h` for command-specific help.
+
+## Web Dashboard
+
+By default, a web dashboard runs at http://localhost:8123 showing:
+- Real-time issue status (pending, in_progress, completed, failed)
+- Worker assignments and activity
+- Progress bar with completion percentage
+- Live event log via Server-Sent Events
+
+Disable with `--web-port 0`.
+
+### Dashboard API
+
+The dashboard exposes a REST API for programmatic access:
+
+| Endpoint | Description |
+|----------|-------------|
+| `GET /api/state` | Current orchestrator state |
+| `GET /api/workers` | Status of all workers |
+| `GET /api/progress` | Completion progress stats |
+| `GET /api/issues` | All issues with status |
+| `GET /api/events` | SSE stream for real-time updates |
+| `GET /api/log/{id}` | Worker log output |
+
+See [docs/api.md](docs/api.md) or run `orchestrator api-docs` for full documentation.
 
 ## Structure
 
@@ -49,6 +99,7 @@ scripts/
     orchestrator/     - Python package: models, config, prompts, decisions, monitor
 reports/              - Generated reports and templates
 docs/                 - Documentation
+  api.md              - Web dashboard API documentation
 ```
 
 ## Configuration
@@ -64,35 +115,65 @@ Tasks are tracked in markdown files under `tasks/`:
 - `tasks/active.md` - In-progress work
 - `tasks/completed.md` - Done (append-only log)
 
-## Parallel Execution (tmux Workers)
+## Configuration
 
-The orchestrator's primary execution model for multi-branch work:
+### JSON Config File (recommended)
 
-```bash
-# From scripts/proof-workers/:
+Create a config file defining your issues:
 
-# Dry run — validate config
-python3 -m orchestrator launch --dry-run
-
-# Launch 5 parallel Claude workers in tmux
-python3 -m orchestrator launch
-
-# Attach to monitor progress
-tmux attach -t proof-orchestrator
-# Dashboard: Ctrl-b w, select dashboard
-
-# One-shot status
-python3 -m orchestrator status
-
-# Cleanup when done
-python3 -m orchestrator cleanup
+```json
+{
+  "project": "my-project",
+  "repos": {
+    "default": {
+      "path": "/path/to/repo",
+      "worktree_base": "/tmp/worktrees",
+      "branch_prefix": "feature/issue-",
+      "default_branch": "main"
+    }
+  },
+  "issues": [
+    {"number": 1, "title": "First issue", "priority": 1},
+    {"number": 2, "title": "Second issue", "depends_on": [1]}
+  ]
+}
 ```
 
+### GitHub Epic Issue
+
+Alternatively, use a GitHub issue as the config source. The epic body should contain a task list:
+
+```markdown
+- [ ] #101 - Add authentication module
+- [ ] #102 - Create user schema (blocked by #101)
+- [x] #103 - Already completed (skipped)
+```
+
+Launch with:
+```bash
+orchestrator launch --epic https://github.com/owner/repo/issues/42 \
+  --repo /path/to/repo --worktrees /tmp/worktrees
+```
+
+## Parallel Execution
+
 Each worker runs an independent Claude Code process in its own git worktree, with:
-- Configurable pipeline stages (optimize -> write_tests -> run_tests_fix -> document)
-- Automatic stall detection and restart with compressed progress summaries
+- Configurable pipeline stages
+- Automatic stall detection and restart
 - Signal-file based completion tracking
-- Live dashboard showing worker status, pipeline stage, and log activity
+- Live dashboard showing worker status and activity
+
+### Tmux Session
+
+Workers run in tmux windows. To attach:
+```bash
+tmux attach -t <session-name>
+```
+
+Navigate windows:
+- `Ctrl+b w` — List all windows
+- `Ctrl+b n/p` — Next/previous window
+- `Ctrl+b 0-9` — Jump to window by number
 
 ## Playbooks
 
