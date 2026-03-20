@@ -43,6 +43,9 @@ const (
 	EventReviewingIssue = "reviewing_issue"
 	EventIssueReview    = "issue_review"
 	EventGateResult     = "gate_result"
+
+	// Commit events
+	EventCommitsUpdated = "commits_updated"
 )
 
 // DashboardEvent represents a server-sent event for the dashboard.
@@ -295,6 +298,22 @@ func (eb *EventBroadcaster) EmitLogUpdate(workerID int, logTail string) {
 	eb.BroadcastType(EventLogUpdate, WorkerEventData{
 		WorkerID: workerID,
 		LogTail:  logTail,
+	})
+}
+
+// CommitsUpdatedData contains data for commit update events.
+type CommitsUpdatedData struct {
+	IssueNumber int          `json:"issue_number"`
+	Commits     []CommitInfo `json:"commits"`
+	Total       int          `json:"total"`
+}
+
+// EmitCommitsUpdated broadcasts a commits updated event for an issue.
+func (eb *EventBroadcaster) EmitCommitsUpdated(issueNumber int, commits []CommitInfo) {
+	eb.BroadcastType(EventCommitsUpdated, CommitsUpdatedData{
+		IssueNumber: issueNumber,
+		Commits:     commits,
+		Total:       len(commits),
 	})
 }
 

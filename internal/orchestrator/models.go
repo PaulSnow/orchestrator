@@ -209,3 +209,16 @@ type GateDecision struct {
 	Recommendation string `json:"recommendation"` // approve, reject, needs_revision
 	Reason         string `json:"reason,omitempty"`
 }
+
+// CommitInfo holds information about a single git commit.
+type CommitInfo struct {
+	Hash         string `json:"hash"`
+	ShortHash    string `json:"short_hash"`
+	Message      string `json:"message"`
+	Author       string `json:"author"`
+	AuthorEmail  string `json:"author_email"`
+	Timestamp    string `json:"timestamp"`
+	FilesChanged int    `json:"files_changed"`
+	Insertions   int    `json:"insertions"`
+	Deletions    int    `json:"deletions"`
+}

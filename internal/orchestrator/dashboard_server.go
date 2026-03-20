@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
 	"os/exec"
 	"runtime"
 	"strconv"
@@ -60,6 +61,9 @@ func (ds *DashboardServer) Start() error {
 
 	// Worker log endpoint
 	mux.HandleFunc("/api/log/", ds.handleWorkerLog)
+
+	// Issue commits endpoint
+	mux.HandleFunc("/api/issues/", ds.handleIssueCommits)
 
 	// Review gate endpoints (backward compatibility)
 	mux.HandleFunc("/api/status", ds.handleStatus)
@@ -388,6 +392,95 @@ func (ds *DashboardServer) handleWorkerLog(w http.ResponseWriter, r *http.Reques
 	w.Write([]byte(logTail))
 }
 
+// handleIssueCommits returns commits for a specific issue's branch.
+// URL: /api/issues/:id/commits
+func (ds *DashboardServer) handleIssueCommits(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+
+	// Parse issue number from path: /api/issues/123/commits
+	path := strings.TrimPrefix(r.URL.Path, "/api/issues/")
+	parts := strings.Split(path, "/")
+	if len(parts) < 2 || parts[1] != "commits" {
+		http.Error(w, "invalid path", http.StatusBadRequest)
+		return
+	}
+
+	issueNumber, err := strconv.Atoi(parts[0])
+	if err != nil {
+		http.Error(w, "invalid issue number", http.StatusBadRequest)
+		return
+	}
+
+	// Find the issue
+	var issue *Issue
+	for _, i := range ds.cfg.Issues {
+		if i.Number == issueNumber {
+			issue = i
+			break
+		}
+	}
+	if issue == nil {
+		json.NewEncoder(w).Encode(map[string]any{
+			"error":   "issue not found",
+			"commits": []CommitInfo{},
+		})
+		return
+	}
+
+	// Get the repo config for this issue
+	repoCfg := ds.cfg.RepoForIssue(issue)
+	if repoCfg == nil {
+		json.NewEncoder(w).Encode(map[string]any{
+			"error":   "no repo configured for issue",
+			"commits": []CommitInfo{},
+		})
+		return
+	}
+
+	// Determine the worktree path
+	worktreePath := repoCfg.WorktreeBase + "/issue-" + strconv.Itoa(issue.Number)
+
+	// Check if worktree exists
+	if _, err := os.Stat(worktreePath); os.IsNotExist(err) {
+		// Worktree doesn't exist - issue hasn't started or was cleaned up
+		json.NewEncoder(w).Encode(map[string]any{
+			"commits": []CommitInfo{},
+			"message": "no worktree found for issue",
+		})
+		return
+	}
+
+	// Get limit from query params
+	limit := 50
+	if limitParam := r.URL.Query().Get("limit"); limitParam != "" {
+		if l, err := strconv.Atoi(limitParam); err == nil && l > 0 {
+			limit = l
+		}
+	}
+
+	// Get base ref (default to origin/main or configured default branch)
+	baseRef := "origin/" + repoCfg.DefaultBranch
+
+	// Get commits
+	commits, err := GetBranchCommits(worktreePath, limit, baseRef)
+	if err != nil {
+		json.NewEncoder(w).Encode(map[string]any{
+			"error":   err.Error(),
+			"commits": []CommitInfo{},
+		})
+		return
+	}
+
+	json.NewEncoder(w).Encode(map[string]any{
+		"issue_number": issueNumber,
+		"branch":       repoCfg.BranchPrefix + strconv.Itoa(issue.Number),
+		"base_ref":     baseRef,
+		"commits":      commits,
+		"total":        len(commits),
+	})
+}
+
 // handleStatus returns basic status (backward compatibility).
 func (ds *DashboardServer) handleStatus(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
@@ -578,12 +671,97 @@ const dashboardHTML = `<!DOCTYPE html>
             padding: 12px;
             border-bottom: 1px solid #0a0a0a;
             gap: 15px;
+            cursor: pointer;
         }
         .issue-row:hover { background: #1a2540; }
+        .issue-row.selected { background: #1a2540; border-left: 3px solid #00d9ff; }
         .issue-number { font-weight: bold; color: #00d9ff; min-width: 60px; }
         .issue-title { flex: 1; }
         .issue-status { min-width: 100px; }
         .issue-worker { min-width: 80px; color: #888; font-size: 12px; }
+        .issue-commits-count {
+            min-width: 60px;
+            font-size: 11px;
+            color: #888;
+        }
+        .issue-commits-count .count { color: #00d9ff; font-weight: bold; }
+
+        /* Issue detail panel */
+        .issue-detail {
+            background: #0f1a2e;
+            border-radius: 8px;
+            margin-bottom: 20px;
+            padding: 15px;
+            display: none;
+        }
+        .issue-detail.visible { display: block; }
+        .issue-detail-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 15px;
+            padding-bottom: 10px;
+            border-bottom: 1px solid #1a2540;
+        }
+        .issue-detail-title {
+            font-size: 16px;
+            font-weight: bold;
+            color: #00d9ff;
+        }
+        .issue-detail-close {
+            cursor: pointer;
+            color: #888;
+            font-size: 18px;
+        }
+        .issue-detail-close:hover { color: #fff; }
+
+        /* Commit list */
+        .commits-list {
+            max-height: 300px;
+            overflow-y: auto;
+        }
+        .commit-item {
+            display: flex;
+            align-items: flex-start;
+            padding: 10px;
+            border-bottom: 1px solid #1a2540;
+            gap: 12px;
+        }
+        .commit-item:last-child { border-bottom: none; }
+        .commit-hash {
+            font-family: monospace;
+            font-size: 12px;
+            color: #ffaa00;
+            min-width: 70px;
+        }
+        .commit-hash a {
+            color: #ffaa00;
+            text-decoration: none;
+        }
+        .commit-hash a:hover { text-decoration: underline; }
+        .commit-info { flex: 1; }
+        .commit-message {
+            color: #eee;
+            font-size: 13px;
+            margin-bottom: 4px;
+        }
+        .commit-meta {
+            font-size: 11px;
+            color: #888;
+        }
+        .commit-stats {
+            font-family: monospace;
+            font-size: 11px;
+            min-width: 100px;
+            text-align: right;
+        }
+        .commit-stats .additions { color: #00ff88; }
+        .commit-stats .deletions { color: #ff4444; }
+        .no-commits {
+            color: #888;
+            padding: 20px;
+            text-align: center;
+        }
 
         /* Event log */
         .event-log {
@@ -693,6 +871,16 @@ const dashboardHTML = `<!DOCTYPE html>
             Loading...
         </div>
 
+        <div class="issue-detail" id="issue-detail">
+            <div class="issue-detail-header">
+                <span class="issue-detail-title" id="detail-title">Issue #0</span>
+                <span class="issue-detail-close" onclick="closeIssueDetail()">&times;</span>
+            </div>
+            <div class="commits-list" id="commits-list">
+                Loading commits...
+            </div>
+        </div>
+
         <h2>Event Log</h2>
         <div class="event-log" id="event-log">
             Connecting...
@@ -768,6 +956,9 @@ const dashboardHTML = `<!DOCTYPE html>
             }).join('');
         }
 
+        let selectedIssue = null;
+        let issueCommits = {};
+
         function updateIssues(data) {
             issues = data || [];
             const container = document.getElementById('issues-list');
@@ -780,15 +971,99 @@ const dashboardHTML = `<!DOCTYPE html>
             container.innerHTML = issues.map(i => {
                 const statusClass = 'status-' + i.status;
                 const workerStr = i.assigned_worker ? 'Worker ' + i.assigned_worker : '--';
+                const selectedClass = selectedIssue === i.number ? 'selected' : '';
+                const commitCount = issueCommits[i.number] ? issueCommits[i.number].length : 0;
+                const commitStr = commitCount > 0 ? '<span class="count">' + commitCount + '</span> commits' : '';
 
-                return '<div class="issue-row">' +
+                return '<div class="issue-row ' + selectedClass + '" onclick="selectIssue(' + i.number + ', \'' + escapeHtml(i.title || '') + '\')">' +
                     '<span class="issue-number">#' + i.number + '</span>' +
-                    '<span class="issue-title">' + (i.title || '') + '</span>' +
+                    '<span class="issue-title">' + escapeHtml(i.title || '') + '</span>' +
+                    '<span class="issue-commits-count">' + commitStr + '</span>' +
                     '<span class="issue-status"><span class="status-badge ' + statusClass + '">' + i.status + '</span></span>' +
                     '<span class="issue-worker">' + workerStr + '</span>' +
                 '</div>';
             }).join('');
         }
+
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+
+        function selectIssue(issueNumber, title) {
+            selectedIssue = issueNumber;
+            updateIssues(issues);
+            showIssueDetail(issueNumber, title);
+        }
+
+        function closeIssueDetail() {
+            selectedIssue = null;
+            updateIssues(issues);
+            document.getElementById('issue-detail').classList.remove('visible');
+        }
+
+        function showIssueDetail(issueNumber, title) {
+            const detailPanel = document.getElementById('issue-detail');
+            const titleEl = document.getElementById('detail-title');
+            const commitsEl = document.getElementById('commits-list');
+
+            titleEl.textContent = '#' + issueNumber + ' - ' + title;
+            commitsEl.innerHTML = '<div class="no-commits">Loading commits...</div>';
+            detailPanel.classList.add('visible');
+
+            fetchCommits(issueNumber);
+        }
+
+        function fetchCommits(issueNumber) {
+            fetch('/api/issues/' + issueNumber + '/commits')
+                .then(r => r.json())
+                .then(data => {
+                    if (data.commits) {
+                        issueCommits[issueNumber] = data.commits;
+                        renderCommits(issueNumber, data.commits, data.branch);
+                        updateIssues(issues);
+                    }
+                })
+                .catch(err => {
+                    document.getElementById('commits-list').innerHTML =
+                        '<div class="no-commits">Error loading commits</div>';
+                });
+        }
+
+        function renderCommits(issueNumber, commits, branch) {
+            const commitsEl = document.getElementById('commits-list');
+
+            if (!commits || commits.length === 0) {
+                commitsEl.innerHTML = '<div class="no-commits">No commits yet on this branch</div>';
+                return;
+            }
+
+            commitsEl.innerHTML = commits.map(c => {
+                const date = new Date(c.timestamp);
+                const timeStr = date.toLocaleDateString() + ' ' + date.toLocaleTimeString();
+                const statsStr = (c.insertions > 0 || c.deletions > 0) ?
+                    '<span class="additions">+' + c.insertions + '</span> ' +
+                    '<span class="deletions">-' + c.deletions + '</span>' :
+                    (c.files_changed > 0 ? c.files_changed + ' files' : '');
+
+                return '<div class="commit-item">' +
+                    '<span class="commit-hash"><a href="#" title="' + c.hash + '">' + c.short_hash + '</a></span>' +
+                    '<div class="commit-info">' +
+                        '<div class="commit-message">' + escapeHtml(c.message) + '</div>' +
+                        '<div class="commit-meta">' + escapeHtml(c.author) + ' - ' + timeStr + '</div>' +
+                    '</div>' +
+                    '<span class="commit-stats">' + statsStr + '</span>' +
+                '</div>';
+            }).join('');
+        }
+
+        // Refresh commits for selected issue periodically
+        setInterval(() => {
+            if (selectedIssue) {
+                fetchCommits(selectedIssue);
+            }
+        }, 30000);
 
         function addEvent(type, data) {
             const time = new Date().toLocaleTimeString();
@@ -925,6 +1200,17 @@ const dashboardHTML = `<!DOCTYPE html>
 
         evtSource.addEventListener('issue_review', (e) => {
             addEvent('issue_review', JSON.parse(e.data));
+        });
+
+        evtSource.addEventListener('commits_updated', (e) => {
+            const data = JSON.parse(e.data);
+            if (data.commits) {
+                issueCommits[data.issue_number] = data.commits;
+                updateIssues(issues);
+                if (selectedIssue === data.issue_number) {
+                    renderCommits(data.issue_number, data.commits);
+                }
+            }
         });
 
         evtSource.onerror = () => {

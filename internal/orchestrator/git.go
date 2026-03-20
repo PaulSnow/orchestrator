@@ -170,6 +170,86 @@ func IsClaudeRunning(panePID *int) bool {
 	return err == nil
 }
 
+// GetBranchCommits returns commit information for a branch compared to a base ref.
+// Returns commits in reverse chronological order (most recent first).
+func GetBranchCommits(worktreePath string, count int, baseRef string) ([]CommitInfo, error) {
+	if baseRef == "" {
+		baseRef = "origin/main"
+	}
+	if count == 0 {
+		count = 50
+	}
+
+	// Format: hash|short_hash|author|email|timestamp|message
+	format := "%H|%h|%an|%ae|%aI|%s"
+	out, err := runGit(worktreePath, "log", fmt.Sprintf("-%d", count), fmt.Sprintf("--format=%s", format), baseRef+"..HEAD")
+	if err != nil {
+		// If no commits, return empty list
+		return []CommitInfo{}, nil
+	}
+
+	lines := strings.Split(strings.TrimSpace(out), "\n")
+	commits := make([]CommitInfo, 0, len(lines))
+
+	for _, line := range lines {
+		if line == "" {
+			continue
+		}
+
+		parts := strings.SplitN(line, "|", 6)
+		if len(parts) < 6 {
+			continue
+		}
+
+		commit := CommitInfo{
+			Hash:        parts[0],
+			ShortHash:   parts[1],
+			Author:      parts[2],
+			AuthorEmail: parts[3],
+			Timestamp:   parts[4],
+			Message:     parts[5],
+		}
+
+		// Get file stats for this commit
+		statOut, err := runGit(worktreePath, "show", "--stat", "--format=", commit.Hash)
+		if err == nil {
+			files, ins, del := parseGitStatSummary(statOut)
+			commit.FilesChanged = files
+			commit.Insertions = ins
+			commit.Deletions = del
+		}
+
+		commits = append(commits, commit)
+	}
+
+	return commits, nil
+}
+
+// parseGitStatSummary parses the summary line from git show --stat output.
+// Example: " 3 files changed, 45 insertions(+), 12 deletions(-)"
+func parseGitStatSummary(statOutput string) (files, insertions, deletions int) {
+	lines := strings.Split(statOutput, "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		line := strings.TrimSpace(lines[i])
+		if strings.Contains(line, "changed") {
+			// Parse the summary line
+			parts := strings.Split(line, ",")
+			for _, part := range parts {
+				part = strings.TrimSpace(part)
+				if strings.Contains(part, "file") {
+					fmt.Sscanf(part, "%d", &files)
+				} else if strings.Contains(part, "insertion") {
+					fmt.Sscanf(part, "%d", &insertions)
+				} else if strings.Contains(part, "deletion") {
+					fmt.Sscanf(part, "%d", &deletions)
+				}
+			}
+			break
+		}
+	}
+	return
+}
+
 // GetWorktreeMtime gets the most recent file modification time in a worktree.
 // Scans common working directories to detect if Claude is actively writing files.
 // Returns Unix timestamp of most recent modification, or nil if nothing found.
