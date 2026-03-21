@@ -4,8 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
+	"net/http/httputil"
+	"net/url"
 	"os/exec"
 	"runtime"
 	"strconv"
@@ -72,6 +75,9 @@ func (ds *DashboardServer) Start() error {
 
 	// Orchestrator registry endpoint
 	mux.HandleFunc("/api/orchestrators", ds.handleOrchestrators)
+
+	// Proxy endpoints for viewing other orchestrators
+	mux.HandleFunc("/proxy/", ds.handleProxy)
 
 	// Metrics and activity endpoints
 	mux.HandleFunc("/api/metrics", ds.handleMetrics)
@@ -621,6 +627,116 @@ func (ds *DashboardServer) handleReload(w http.ResponseWriter, r *http.Request) 
 	})
 }
 
+// handleProxy proxies requests to another orchestrator's dashboard.
+// This allows viewing other orchestrators without knowing their ports.
+func (ds *DashboardServer) handleProxy(w http.ResponseWriter, r *http.Request) {
+	// Parse the path: /proxy/{project}/...
+	path := strings.TrimPrefix(r.URL.Path, "/proxy/")
+	parts := strings.SplitN(path, "/", 2)
+	if len(parts) == 0 || parts[0] == "" {
+		http.Error(w, "missing project name in path", http.StatusBadRequest)
+		return
+	}
+
+	projectName := parts[0]
+	remainingPath := "/"
+	if len(parts) > 1 {
+		remainingPath = "/" + parts[1]
+	}
+
+	// Find the orchestrator by project name
+	entry, err := ds.registry.GetOrchestratorByProject(projectName)
+	if err != nil {
+		http.Error(w, "error looking up orchestrator: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if entry == nil {
+		http.Error(w, "orchestrator not found: "+projectName, http.StatusNotFound)
+		return
+	}
+
+	// Create proxy to forward the request
+	targetURL := &url.URL{
+		Scheme: "http",
+		Host:   fmt.Sprintf("localhost:%d", entry.Port),
+	}
+
+	proxy := httputil.NewSingleHostReverseProxy(targetURL)
+
+	// Customize the director to set the correct path
+	originalDirector := proxy.Director
+	proxy.Director = func(req *http.Request) {
+		originalDirector(req)
+		req.URL.Path = remainingPath
+		req.URL.RawQuery = r.URL.RawQuery
+		req.Host = targetURL.Host
+	}
+
+	// Add CORS headers for API endpoints
+	if strings.HasPrefix(remainingPath, "/api/") {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+	}
+
+	proxy.ServeHTTP(w, r)
+}
+
+// handleProxySSE handles SSE connections to a proxied orchestrator.
+// This is a special case because SSE requires streaming.
+func (ds *DashboardServer) handleProxySSE(w http.ResponseWriter, r *http.Request, targetPort int) {
+	targetURL := fmt.Sprintf("http://localhost:%d/api/events", targetPort)
+
+	// Create an HTTP client for the SSE connection
+	client := &http.Client{
+		Timeout: 0, // No timeout for SSE
+	}
+
+	req, err := http.NewRequestWithContext(r.Context(), "GET", targetURL, nil)
+	if err != nil {
+		http.Error(w, "failed to create request", http.StatusInternalServerError)
+		return
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		http.Error(w, "failed to connect to target orchestrator", http.StatusBadGateway)
+		return
+	}
+	defer resp.Body.Close()
+
+	// Set SSE headers
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "SSE not supported", http.StatusInternalServerError)
+		return
+	}
+
+	// Stream the response
+	buf := make([]byte, 4096)
+	for {
+		select {
+		case <-r.Context().Done():
+			return
+		default:
+			n, err := resp.Body.Read(buf)
+			if n > 0 {
+				w.Write(buf[:n])
+				flusher.Flush()
+			}
+			if err == io.EOF {
+				return
+			}
+			if err != nil {
+				return
+			}
+		}
+	}
+}
+
 // handleDashboard serves the HTML dashboard.
 func (ds *DashboardServer) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html")
@@ -650,6 +766,108 @@ const dashboardHTML = `<!DOCTYPE html>
         .container { max-width: 1400px; margin: 0 auto; }
         h1 { color: #00d9ff; margin: 0 0 20px 0; }
         h2 { color: #aaa; font-size: 14px; text-transform: uppercase; margin: 20px 0 10px 0; }
+
+        /* Breadcrumb navigation */
+        .breadcrumb {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 10px 15px;
+            background: #0f1a2e;
+            border-radius: 6px;
+            margin-bottom: 15px;
+            font-size: 13px;
+        }
+        .breadcrumb a {
+            color: #00d9ff;
+            text-decoration: none;
+        }
+        .breadcrumb a:hover {
+            text-decoration: underline;
+        }
+        .breadcrumb .separator {
+            color: #555;
+        }
+        .breadcrumb .current {
+            color: #fff;
+            font-weight: bold;
+        }
+        .breadcrumb .viewing-badge {
+            background: #00d9ff22;
+            color: #00d9ff;
+            padding: 2px 8px;
+            border-radius: 4px;
+            font-size: 11px;
+            margin-left: 8px;
+        }
+
+        /* Orchestrator switcher dropdown */
+        .orchestrator-switcher {
+            position: relative;
+            display: inline-block;
+        }
+        .switcher-btn {
+            background: #16213e;
+            border: 1px solid #00d9ff;
+            color: #00d9ff;
+            padding: 6px 12px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 12px;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+        .switcher-btn:hover {
+            background: #1a2540;
+        }
+        .switcher-dropdown {
+            display: none;
+            position: absolute;
+            top: 100%;
+            left: 0;
+            background: #16213e;
+            border: 1px solid #333;
+            border-radius: 6px;
+            min-width: 280px;
+            z-index: 1000;
+            margin-top: 4px;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+        }
+        .switcher-dropdown.open {
+            display: block;
+        }
+        .switcher-item {
+            padding: 10px 15px;
+            cursor: pointer;
+            border-bottom: 1px solid #0a0a0a;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        .switcher-item:last-child {
+            border-bottom: none;
+        }
+        .switcher-item:hover {
+            background: #1a2540;
+        }
+        .switcher-item.current {
+            background: #00d9ff11;
+            border-left: 3px solid #00d9ff;
+        }
+        .switcher-item-name {
+            font-weight: bold;
+            color: #eee;
+        }
+        .switcher-item-info {
+            font-size: 11px;
+            color: #888;
+        }
+        .switcher-item-stats {
+            text-align: right;
+            font-size: 11px;
+            color: #666;
+        }
 
         /* Header */
         .header {
@@ -884,10 +1102,26 @@ const dashboardHTML = `<!DOCTYPE html>
 </head>
 <body>
     <div class="container">
+        <!-- Breadcrumb navigation (shown when viewing other orchestrator) -->
+        <div class="breadcrumb" id="breadcrumb" style="display: none;">
+            <a href="/" onclick="returnToHub(); return false;">Hub</a>
+            <span class="separator">›</span>
+            <span class="current" id="breadcrumb-current"></span>
+            <span class="viewing-badge">viewing via proxy</span>
+        </div>
+
         <div class="header">
             <div class="header-left">
                 <h1>Orchestrator Dashboard</h1>
                 <span class="version" id="version"></span>
+                <!-- Orchestrator switcher -->
+                <div class="orchestrator-switcher" id="orch-switcher">
+                    <button class="switcher-btn" onclick="toggleSwitcher()">
+                        <span id="switcher-current">Select Orchestrator</span>
+                        <span>▼</span>
+                    </button>
+                    <div class="switcher-dropdown" id="switcher-dropdown"></div>
+                </div>
             </div>
             <div class="header-right">
                 <div id="project-name" style="font-weight: bold; font-size: 16px;"></div>
@@ -1192,7 +1426,10 @@ const dashboardHTML = `<!DOCTYPE html>
                     '<span class="orch-status"><span class="status-badge ' + statusClass + '">' + o.status + '</span></span>' +
                     '<span class="orch-stats">' + statsStr + '</span>' +
                     '<span class="orch-uptime">' + (o.uptime || '--') + '</span>' +
-                    '<span class="orch-link"><a href="' + o.dashboard_url + '" target="_blank">Open Dashboard</a></span>' +
+                    '<span class="orch-link">' +
+                        '<a href="#" onclick="switchToOrchestrator(\'' + o.project + '\', false); return false;">View Here</a>' +
+                        ' | <a href="' + o.dashboard_url + '" target="_blank">New Tab</a>' +
+                    '</span>' +
                 '</div>';
             }).join('');
         }
@@ -1320,6 +1557,256 @@ const dashboardHTML = `<!DOCTYPE html>
 
         // Periodic refresh for orchestrators list (every 5 seconds)
         setInterval(fetchOrchestrators, 5000);
+
+        // ========================================
+        // Orchestrator Switching Functions
+        // ========================================
+
+        // Track which orchestrator we're viewing (null = current/hub)
+        let viewingOrchestrator = null;
+        let hubEvtSource = null; // SSE from hub orchestrator
+
+        // Toggle the switcher dropdown
+        function toggleSwitcher() {
+            const dropdown = document.getElementById('switcher-dropdown');
+            dropdown.classList.toggle('open');
+        }
+
+        // Close dropdown when clicking outside
+        document.addEventListener('click', function(e) {
+            const switcher = document.getElementById('orch-switcher');
+            if (!switcher.contains(e.target)) {
+                document.getElementById('switcher-dropdown').classList.remove('open');
+            }
+        });
+
+        // Update the switcher dropdown with available orchestrators
+        function updateSwitcherDropdown(orchestrators) {
+            const dropdown = document.getElementById('switcher-dropdown');
+            const switcherBtn = document.getElementById('switcher-current');
+
+            if (!orchestrators || orchestrators.length === 0) {
+                dropdown.innerHTML = '<div class="switcher-item" style="color:#666">No orchestrators found</div>';
+                switcherBtn.textContent = 'No orchestrators';
+                return;
+            }
+
+            // Find current orchestrator (from hub perspective)
+            const current = orchestrators.find(o => o.is_current);
+            const currentProject = viewingOrchestrator || (current ? current.project : 'Hub');
+            switcherBtn.textContent = currentProject;
+
+            dropdown.innerHTML = orchestrators.map(o => {
+                const isViewing = viewingOrchestrator ? (o.project === viewingOrchestrator) : o.is_current;
+                const currentClass = isViewing ? 'current' : '';
+                const stats = o.total_issues > 0 ? o.total_issues + ' issues' : 'no issues';
+
+                return '<div class="switcher-item ' + currentClass + '" onclick="switchToOrchestrator(\'' + o.project + '\', ' + o.is_current + ')">' +
+                    '<div>' +
+                        '<div class="switcher-item-name">' + o.project + '</div>' +
+                        '<div class="switcher-item-info">' + o.status + ' · ' + o.uptime + '</div>' +
+                    '</div>' +
+                    '<div class="switcher-item-stats">' + stats + '</div>' +
+                '</div>';
+            }).join('');
+        }
+
+        // Switch to viewing a different orchestrator's dashboard
+        function switchToOrchestrator(project, isHub) {
+            document.getElementById('switcher-dropdown').classList.remove('open');
+
+            if (isHub) {
+                // Return to hub view
+                returnToHub();
+                return;
+            }
+
+            viewingOrchestrator = project;
+
+            // Show breadcrumb
+            const breadcrumb = document.getElementById('breadcrumb');
+            const breadcrumbCurrent = document.getElementById('breadcrumb-current');
+            breadcrumb.style.display = 'flex';
+            breadcrumbCurrent.textContent = project;
+
+            // Update switcher button
+            document.getElementById('switcher-current').textContent = project;
+
+            // Close current SSE connection and start proxied one
+            if (evtSource) {
+                evtSource.close();
+            }
+
+            // Clear current state
+            events = [];
+            document.getElementById('event-log').innerHTML = 'Connecting to ' + project + '...';
+
+            // Fetch proxied state
+            const proxyBase = '/proxy/' + encodeURIComponent(project);
+
+            Promise.all([
+                fetch(proxyBase + '/api/state').then(r => r.json()),
+                fetch(proxyBase + '/api/workers').then(r => r.json()),
+                fetch(proxyBase + '/api/issues').then(r => r.json()),
+                fetch(proxyBase + '/api/progress').then(r => r.json())
+            ]).then(([stateData, workersData, issuesData, progressData]) => {
+                updateState(stateData);
+                updateWorkers(workersData);
+                updateIssues(issuesData);
+                updateProgress(progressData);
+                addEvent('connected', { project: project, proxied: true });
+            }).catch(err => {
+                addEvent('proxy_error', { error: err.message });
+            });
+
+            // Start proxied SSE connection
+            const proxyEvtSource = new EventSource(proxyBase + '/api/events');
+
+            proxyEvtSource.addEventListener('connected', () => addEvent('connected', { proxied: true }));
+            proxyEvtSource.addEventListener('state', (e) => updateState(JSON.parse(e.data)));
+            proxyEvtSource.addEventListener('workers', (e) => updateWorkers(JSON.parse(e.data)));
+            proxyEvtSource.addEventListener('progress', (e) => updateProgress(JSON.parse(e.data)));
+            proxyEvtSource.addEventListener('phase_changed', (e) => {
+                const data = JSON.parse(e.data);
+                updatePhaseBar(data.new_phase);
+                addEvent('phase_changed', data);
+            });
+            proxyEvtSource.addEventListener('worker_assigned', (e) => {
+                const data = JSON.parse(e.data);
+                addEvent('worker_assigned', data);
+                fetch(proxyBase + '/api/workers').then(r => r.json()).then(updateWorkers);
+                fetch(proxyBase + '/api/issues').then(r => r.json()).then(updateIssues);
+            });
+            proxyEvtSource.addEventListener('worker_completed', (e) => {
+                const data = JSON.parse(e.data);
+                addEvent('worker_completed', data);
+                fetch(proxyBase + '/api/workers').then(r => r.json()).then(updateWorkers);
+                fetch(proxyBase + '/api/issues').then(r => r.json()).then(updateIssues);
+                fetch(proxyBase + '/api/progress').then(r => r.json()).then(updateProgress);
+            });
+            proxyEvtSource.addEventListener('worker_failed', (e) => {
+                addEvent('worker_failed', JSON.parse(e.data));
+                fetch(proxyBase + '/api/workers').then(r => r.json()).then(updateWorkers);
+            });
+            proxyEvtSource.addEventListener('worker_idle', (e) => {
+                addEvent('worker_idle', JSON.parse(e.data));
+                fetch(proxyBase + '/api/workers').then(r => r.json()).then(updateWorkers);
+            });
+            proxyEvtSource.addEventListener('issue_status', (e) => {
+                const data = JSON.parse(e.data);
+                addEvent('issue_status', data);
+                fetch(proxyBase + '/api/issues').then(r => r.json()).then(updateIssues);
+                fetch(proxyBase + '/api/progress').then(r => r.json()).then(updateProgress);
+            });
+            proxyEvtSource.addEventListener('progress_update', (e) => updateProgress(JSON.parse(e.data)));
+            proxyEvtSource.addEventListener('log_update', (e) => {
+                fetch(proxyBase + '/api/workers').then(r => r.json()).then(updateWorkers);
+            });
+            proxyEvtSource.onerror = () => addEvent('connection_error', { proxied: true });
+
+            // Store the proxied event source
+            window.currentProxyEvtSource = proxyEvtSource;
+
+            // Update switcher dropdown to show correct current
+            updateSwitcherDropdown(orchestrators);
+        }
+
+        // Return to hub view (the orchestrator we're running in)
+        function returnToHub() {
+            viewingOrchestrator = null;
+
+            // Hide breadcrumb
+            document.getElementById('breadcrumb').style.display = 'none';
+
+            // Close proxied SSE connection
+            if (window.currentProxyEvtSource) {
+                window.currentProxyEvtSource.close();
+                window.currentProxyEvtSource = null;
+            }
+
+            // Clear events
+            events = [];
+            document.getElementById('event-log').innerHTML = 'Reconnecting to hub...';
+
+            // Reconnect to hub SSE
+            const newEvtSource = new EventSource('/api/events');
+            newEvtSource.addEventListener('connected', () => addEvent('connected', null));
+            newEvtSource.addEventListener('state', (e) => updateState(JSON.parse(e.data)));
+            newEvtSource.addEventListener('workers', (e) => updateWorkers(JSON.parse(e.data)));
+            newEvtSource.addEventListener('progress', (e) => updateProgress(JSON.parse(e.data)));
+            newEvtSource.addEventListener('phase_changed', (e) => {
+                const data = JSON.parse(e.data);
+                updatePhaseBar(data.new_phase);
+                addEvent('phase_changed', data);
+            });
+            newEvtSource.addEventListener('worker_assigned', (e) => {
+                const data = JSON.parse(e.data);
+                addEvent('worker_assigned', data);
+                fetch('/api/workers').then(r => r.json()).then(updateWorkers);
+                fetch('/api/issues').then(r => r.json()).then(updateIssues);
+            });
+            newEvtSource.addEventListener('worker_completed', (e) => {
+                const data = JSON.parse(e.data);
+                addEvent('worker_completed', data);
+                fetch('/api/workers').then(r => r.json()).then(updateWorkers);
+                fetch('/api/issues').then(r => r.json()).then(updateIssues);
+                fetch('/api/progress').then(r => r.json()).then(updateProgress);
+            });
+            newEvtSource.addEventListener('worker_failed', (e) => {
+                addEvent('worker_failed', JSON.parse(e.data));
+                fetch('/api/workers').then(r => r.json()).then(updateWorkers);
+            });
+            newEvtSource.addEventListener('worker_idle', (e) => {
+                addEvent('worker_idle', JSON.parse(e.data));
+                fetch('/api/workers').then(r => r.json()).then(updateWorkers);
+            });
+            newEvtSource.addEventListener('issue_status', (e) => {
+                const data = JSON.parse(e.data);
+                addEvent('issue_status', data);
+                fetch('/api/issues').then(r => r.json()).then(updateIssues);
+                fetch('/api/progress').then(r => r.json()).then(updateProgress);
+            });
+            newEvtSource.addEventListener('progress_update', (e) => updateProgress(JSON.parse(e.data)));
+            newEvtSource.addEventListener('log_update', (e) => {
+                fetch('/api/workers').then(r => r.json()).then(updateWorkers);
+            });
+            newEvtSource.addEventListener('gate_result', (e) => {
+                updateGateResult(JSON.parse(e.data));
+                addEvent('gate_result', JSON.parse(e.data));
+            });
+            newEvtSource.addEventListener('reviewing_issue', (e) => addEvent('reviewing_issue', JSON.parse(e.data)));
+            newEvtSource.addEventListener('issue_review', (e) => addEvent('issue_review', JSON.parse(e.data)));
+            newEvtSource.onerror = () => addEvent('connection_error', null);
+
+            // Refresh hub state
+            refreshState();
+
+            // Update current display
+            const current = orchestrators.find(o => o.is_current);
+            document.getElementById('switcher-current').textContent = current ? current.project : 'Hub';
+            updateSwitcherDropdown(orchestrators);
+        }
+
+        // Enhance fetchOrchestrators to also update the switcher
+        const originalFetchOrchestrators = fetchOrchestrators;
+        function fetchOrchestrators() {
+            fetch('/api/orchestrators')
+                .then(r => r.json())
+                .then(data => {
+                    if (!data.error) {
+                        orchestrators = data;
+                        updateOrchestrators(data);
+                        updateControlPanel(data);
+                        updateSwitcherDropdown(data);
+                    }
+                })
+                .catch(() => {});
+        }
+
+        // Initial switcher update
+        if (orchestrators && orchestrators.length > 0) {
+            updateSwitcherDropdown(orchestrators);
+        }
     </script>
 </body>
 </html>`
