@@ -1,5 +1,7 @@
 package orchestrator
 
+import "time"
+
 // ProjectContext holds project-specific context injected into prompts.
 type ProjectContext struct {
 	Language     string   `json:"language,omitempty"`
@@ -100,21 +102,80 @@ func (i *Issue) Init() {
 	}
 }
 
+// Worker status constants for more granular state tracking.
+const (
+	WorkerStatusIdle      = "idle"      // No issue assigned
+	WorkerStatusStarting  = "starting"  // Issue assigned, Claude not yet launched
+	WorkerStatusRunning   = "running"   // Claude process active AND producing output
+	WorkerStatusWaiting   = "waiting"   // Claude launched but no recent output (thinking)
+	WorkerStatusCompleted = "completed" // Finished successfully
+	WorkerStatusFailed    = "failed"    // Exceeded retries
+)
+
+// WaitingThreshold is the duration without output after which a worker is considered "waiting"
+const WaitingThreshold = 30 // seconds
+
 // Worker holds the state of a single worker.
 type Worker struct {
-	WorkerID      int      `json:"worker_id"`
-	IssueNumber   *int     `json:"issue_number,omitempty"`
-	Branch        string   `json:"branch,omitempty"`
-	Worktree      string   `json:"worktree,omitempty"`
-	Status        string   `json:"status,omitempty"` // pending | running | idle | failed
-	StartedAt     string   `json:"started_at,omitempty"`
-	LastLogSize   int64    `json:"last_log_size,omitempty"`
-	LastLogUpdate string   `json:"last_log_update,omitempty"`
-	RetryCount    int      `json:"retry_count,omitempty"`
-	Commits       []string `json:"commits,omitempty"`
-	ClaudePID     *int     `json:"claude_pid,omitempty"`
-	Stage         string   `json:"stage,omitempty"`
-	SourceConfig  string   `json:"source_config,omitempty"`
+	WorkerID       int      `json:"worker_id"`
+	IssueNumber    *int     `json:"issue_number,omitempty"`
+	Branch         string   `json:"branch,omitempty"`
+	Worktree       string   `json:"worktree,omitempty"`
+	Status         string   `json:"status,omitempty"` // idle | starting | running | waiting | completed | failed
+	StartedAt      string   `json:"started_at,omitempty"`
+	LastLogSize    int64    `json:"last_log_size,omitempty"`
+	LastLogUpdate  string   `json:"last_log_update,omitempty"`
+	LastOutputTime string   `json:"last_output_time,omitempty"` // Timestamp of last log output
+	ProcessStarted bool     `json:"process_started,omitempty"`  // True when Claude process has been launched
+	RetryCount     int      `json:"retry_count,omitempty"`
+	Commits        []string `json:"commits,omitempty"`
+	ClaudePID      *int     `json:"claude_pid,omitempty"`
+	Stage          string   `json:"stage,omitempty"`
+	SourceConfig   string   `json:"source_config,omitempty"`
+}
+
+// ComputeEffectiveStatus computes the worker's effective status based on
+// issue assignment, process state, and output activity.
+// This provides a more accurate representation of what the worker is doing.
+func (w *Worker) ComputeEffectiveStatus(claudeRunning bool, lastOutputTime *float64) string {
+	// If explicit completed/failed status, return as-is
+	if w.Status == WorkerStatusCompleted || w.Status == WorkerStatusFailed {
+		return w.Status
+	}
+
+	// No issue assigned -> idle
+	if w.IssueNumber == nil {
+		return WorkerStatusIdle
+	}
+
+	// Issue assigned but process not yet launched -> starting
+	if !w.ProcessStarted {
+		return WorkerStatusStarting
+	}
+
+	// Process not running (finished or crashed) -> use stored status
+	if !claudeRunning {
+		if w.Status != "" {
+			return w.Status
+		}
+		return WorkerStatusIdle
+	}
+
+	// Process is running - check for recent output
+	if lastOutputTime != nil {
+		now := float64(nowUnix())
+		timeSinceOutput := now - *lastOutputTime
+		if timeSinceOutput > float64(WaitingThreshold) {
+			return WorkerStatusWaiting
+		}
+	}
+
+	return WorkerStatusRunning
+}
+
+// nowUnix returns current unix timestamp. Defined as a variable to allow testing.
+var nowUnix = func() int64 {
+	return time.Now().Unix()
 }
 
 // Decision is a decision made by the orchestrator.

@@ -371,8 +371,10 @@ func ExecuteDecision(decision *Decision, cfg *RunConfig, state *StateManager) {
 			// Mark worker as idle so it gets another issue next cycle
 			worker := state.LoadWorker(workerID)
 			if worker != nil {
-				worker.Status = "idle"
+				worker.Status = WorkerStatusIdle
 				worker.IssueNumber = nil
+				worker.ProcessStarted = false
+				worker.LastOutputTime = ""
 				state.SaveWorker(worker)
 			}
 			return
@@ -393,18 +395,27 @@ func ExecuteDecision(decision *Decision, cfg *RunConfig, state *StateManager) {
 		// Create worktree if needed
 		CreateWorktree(repo.Path, newWt, newBranch, "origin/"+repo.DefaultBranch)
 
-		// Update worker state
+		// Determine pipeline stage
+		stageName := "implement"
+		if len(cfg.Pipeline) > newIssue.PipelineStage {
+			stageName = cfg.Pipeline[newIssue.PipelineStage]
+		}
+
+		// Update worker state - initially set ProcessStarted = false (starting state)
 		worker := state.LoadWorker(workerID)
 		if worker != nil {
 			worker.IssueNumber = newIssueNum
 			worker.Branch = newBranch
 			worker.Worktree = newWt
-			worker.Status = "running"
+			worker.Status = WorkerStatusStarting
 			worker.StartedAt = NowISO()
 			worker.RetryCount = 0
 			worker.LastLogSize = 0
 			worker.Commits = nil
 			worker.SourceConfig = ""
+			worker.ProcessStarted = false
+			worker.LastOutputTime = ""
+			worker.Stage = stageName
 			state.SaveWorker(worker)
 		}
 
@@ -414,17 +425,6 @@ func ExecuteDecision(decision *Decision, cfg *RunConfig, state *StateManager) {
 		// Clear signal and truncate log
 		state.ClearSignal(workerID)
 		state.TruncateLog(workerID)
-
-		// Determine pipeline stage
-		stageName := "implement"
-		if len(cfg.Pipeline) > newIssue.PipelineStage {
-			stageName = cfg.Pipeline[newIssue.PipelineStage]
-		}
-
-		if worker != nil {
-			worker.Stage = stageName
-			state.SaveWorker(worker)
-		}
 
 		// Generate prompt and launch worker
 		promptPath := state.PromptPath(workerID)
@@ -437,6 +437,12 @@ func ExecuteDecision(decision *Decision, cfg *RunConfig, state *StateManager) {
 		// Launch worker as direct subprocess
 		if err := LaunchWorkerProcess(newWt, promptPath, logFile, signalFile, workerID, *newIssueNum, stageName, false); err != nil {
 			LogMsg(fmt.Sprintf("WARNING: failed to launch worker %d: %v", workerID, err))
+		} else if worker != nil {
+			// Mark process as started on successful launch
+			worker.ProcessStarted = true
+			worker.Status = WorkerStatusRunning
+			worker.LastOutputTime = NowISO()
+			state.SaveWorker(worker)
 		}
 
 		state.LogEvent(map[string]any{"action": "reassign", "worker": workerID, "new_issue": newIssueNum})
@@ -472,9 +478,11 @@ func ExecuteDecision(decision *Decision, cfg *RunConfig, state *StateManager) {
 		if CheckWorkAlreadyDone(issueNum, effCfg, effState) {
 			LogMsg(fmt.Sprintf("Worker %d: issue #%d already complete, no restart needed", workerID, issueNum))
 			// Mark worker as idle so it gets another issue next cycle
-			worker.Status = "idle"
+			worker.Status = WorkerStatusIdle
 			worker.IssueNumber = nil
 			worker.SourceConfig = ""
+			worker.ProcessStarted = false
+			worker.LastOutputTime = ""
 			state.SaveWorker(worker)
 			state.ClearSignal(workerID)
 			return
@@ -498,9 +506,12 @@ func ExecuteDecision(decision *Decision, cfg *RunConfig, state *StateManager) {
 		prompt, _ := GeneratePrompt(stageName, issue, workerID, worker.Worktree, repo, effCfg, effState, decision.Continuation, "")
 		os.WriteFile(promptPath, []byte(prompt), 0644)
 
+		// Mark as starting before launching
 		worker.RetryCount++
-		worker.Status = "running"
+		worker.Status = WorkerStatusStarting
 		worker.Stage = stageName
+		worker.ProcessStarted = false
+		worker.LastOutputTime = ""
 		state.SaveWorker(worker)
 
 		// Stop the current worker process
@@ -515,6 +526,12 @@ func ExecuteDecision(decision *Decision, cfg *RunConfig, state *StateManager) {
 		// Launch worker as direct subprocess
 		if err := LaunchWorkerProcess(worker.Worktree, promptPath, logFile, signalFile, workerID, issueNum, stageName, false); err != nil {
 			LogMsg(fmt.Sprintf("WARNING: failed to restart worker %d: %v", workerID, err))
+		} else {
+			// Mark process as started on successful launch
+			worker.ProcessStarted = true
+			worker.Status = WorkerStatusRunning
+			worker.LastOutputTime = NowISO()
+			state.SaveWorker(worker)
 		}
 
 		state.LogEvent(map[string]any{
@@ -570,10 +587,13 @@ func ExecuteDecision(decision *Decision, cfg *RunConfig, state *StateManager) {
 		nextStage := effCfg.Pipeline[issue.PipelineStage]
 		LogMsg(fmt.Sprintf("Worker %d: advancing issue #%d from %s to %s", workerID, *issueNum, oldStage, nextStage))
 
-		worker.Status = "running"
+		// Mark as starting before launching
+		worker.Status = WorkerStatusStarting
 		worker.StartedAt = NowISO()
 		worker.RetryCount = 0
 		worker.Stage = nextStage
+		worker.ProcessStarted = false
+		worker.LastOutputTime = ""
 		state.SaveWorker(worker)
 
 		state.ClearSignal(workerID)
@@ -588,6 +608,12 @@ func ExecuteDecision(decision *Decision, cfg *RunConfig, state *StateManager) {
 		// Launch worker as direct subprocess
 		if err := LaunchWorkerProcess(worker.Worktree, promptPath, logFile, signalFile, workerID, *issueNum, nextStage, true); err != nil {
 			LogMsg(fmt.Sprintf("WARNING: failed to advance worker %d: %v", workerID, err))
+		} else {
+			// Mark process as started on successful launch
+			worker.ProcessStarted = true
+			worker.Status = WorkerStatusRunning
+			worker.LastOutputTime = NowISO()
+			state.SaveWorker(worker)
 		}
 
 		state.LogEvent(map[string]any{
@@ -626,10 +652,12 @@ func ExecuteDecision(decision *Decision, cfg *RunConfig, state *StateManager) {
 			LogMsg(fmt.Sprintf("Worker %d: issue #%d work was actually completed — avoiding false failure", workerID, *issueNum))
 			state.ClearSignal(workerID)
 			if worker != nil {
-				worker.Status = "idle"
+				worker.Status = WorkerStatusIdle
 				worker.IssueNumber = nil
 				worker.Stage = ""
 				worker.SourceConfig = ""
+				worker.ProcessStarted = false
+				worker.LastOutputTime = ""
 				state.SaveWorker(worker)
 			}
 			state.LogEvent(map[string]any{"action": "auto_complete", "worker": workerID, "issue": issueNum})
@@ -646,10 +674,12 @@ func ExecuteDecision(decision *Decision, cfg *RunConfig, state *StateManager) {
 		state.ClearSignal(workerID)
 
 		if worker != nil {
-			worker.Status = "idle"
+			worker.Status = WorkerStatusIdle
 			worker.IssueNumber = nil
 			worker.Stage = ""
 			worker.SourceConfig = ""
+			worker.ProcessStarted = false
+			worker.LastOutputTime = ""
 			state.SaveWorker(worker)
 		}
 
@@ -683,9 +713,11 @@ func ExecuteDecision(decision *Decision, cfg *RunConfig, state *StateManager) {
 			// Mark worker as idle so it gets another issue next cycle
 			worker := state.LoadWorker(workerID)
 			if worker != nil {
-				worker.Status = "idle"
+				worker.Status = WorkerStatusIdle
 				worker.IssueNumber = nil
 				worker.SourceConfig = ""
+				worker.ProcessStarted = false
+				worker.LastOutputTime = ""
 				state.SaveWorker(worker)
 			}
 			return
@@ -705,17 +737,27 @@ func ExecuteDecision(decision *Decision, cfg *RunConfig, state *StateManager) {
 
 		CreateWorktree(repo.Path, newWt, newBranch, "origin/"+repo.DefaultBranch)
 
+		// Determine pipeline stage
+		stageName := "implement"
+		if len(otherCfg.Pipeline) > newIssue.PipelineStage {
+			stageName = otherCfg.Pipeline[newIssue.PipelineStage]
+		}
+
+		// Update worker state - initially set ProcessStarted = false (starting state)
 		worker := state.LoadWorker(workerID)
 		if worker != nil {
 			worker.IssueNumber = newIssueNum
 			worker.Branch = newBranch
 			worker.Worktree = newWt
-			worker.Status = "running"
+			worker.Status = WorkerStatusStarting
 			worker.StartedAt = NowISO()
 			worker.RetryCount = 0
 			worker.LastLogSize = 0
 			worker.Commits = nil
 			worker.SourceConfig = sourceConfigPath
+			worker.ProcessStarted = false
+			worker.LastOutputTime = ""
+			worker.Stage = stageName
 			state.SaveWorker(worker)
 		}
 
@@ -724,16 +766,6 @@ func ExecuteDecision(decision *Decision, cfg *RunConfig, state *StateManager) {
 
 		state.ClearSignal(workerID)
 		state.TruncateLog(workerID)
-
-		stageName := "implement"
-		if len(otherCfg.Pipeline) > newIssue.PipelineStage {
-			stageName = otherCfg.Pipeline[newIssue.PipelineStage]
-		}
-
-		if worker != nil {
-			worker.Stage = stageName
-			state.SaveWorker(worker)
-		}
 
 		promptPath := state.PromptPath(workerID)
 		prompt, _ := GeneratePrompt(stageName, newIssue, workerID, newWt, repo, otherCfg, otherState, false, "")
@@ -745,6 +777,12 @@ func ExecuteDecision(decision *Decision, cfg *RunConfig, state *StateManager) {
 		// Launch worker as direct subprocess
 		if err := LaunchWorkerProcess(newWt, promptPath, logFile, signalFile, workerID, *newIssueNum, stageName, false); err != nil {
 			LogMsg(fmt.Sprintf("WARNING: failed to launch worker %d: %v", workerID, err))
+		} else if worker != nil {
+			// Mark process as started on successful launch
+			worker.ProcessStarted = true
+			worker.Status = WorkerStatusRunning
+			worker.LastOutputTime = NowISO()
+			state.SaveWorker(worker)
 		}
 
 		state.LogEvent(map[string]any{
@@ -778,10 +816,12 @@ func ExecuteDecision(decision *Decision, cfg *RunConfig, state *StateManager) {
 		state.ClearSignal(workerID)
 		worker := state.LoadWorker(workerID)
 		if worker != nil {
-			worker.Status = "idle"
+			worker.Status = WorkerStatusIdle
 			worker.IssueNumber = nil
 			worker.Stage = ""
 			worker.SourceConfig = ""
+			worker.ProcessStarted = false
+			worker.LastOutputTime = ""
 			state.SaveWorker(worker)
 		}
 
@@ -819,18 +859,21 @@ func ExecuteDecision(decision *Decision, cfg *RunConfig, state *StateManager) {
 		otherState.UpdateIssueStatus(*newIssueNum, "in_progress", &workerID)
 		otherState.UpdateIssueStage(*newIssueNum, 0)
 
+		// Update worker state - initially set ProcessStarted = false (starting state)
 		worker := state.LoadWorker(workerID)
 		if worker != nil {
 			worker.IssueNumber = newIssueNum
 			worker.Branch = newBranch
 			worker.Worktree = newWt
-			worker.Status = "running"
+			worker.Status = WorkerStatusStarting
 			worker.StartedAt = NowISO()
 			worker.RetryCount = 0
 			worker.LastLogSize = 0
 			worker.Commits = nil
 			worker.SourceConfig = sourceConfigPath
 			worker.Stage = "retry_analyze"
+			worker.ProcessStarted = false
+			worker.LastOutputTime = ""
 			state.SaveWorker(worker)
 		}
 
@@ -851,6 +894,12 @@ func ExecuteDecision(decision *Decision, cfg *RunConfig, state *StateManager) {
 		// Launch worker as direct subprocess
 		if err := LaunchWorkerProcess(newWt, promptPath, logFile, signalFile, workerID, *newIssueNum, "retry_analyze", false); err != nil {
 			LogMsg(fmt.Sprintf("WARNING: failed to launch worker %d for retry_analyze: %v", workerID, err))
+		} else if worker != nil {
+			// Mark process as started on successful launch
+			worker.ProcessStarted = true
+			worker.Status = WorkerStatusRunning
+			worker.LastOutputTime = NowISO()
+			state.SaveWorker(worker)
 		}
 
 		state.LogEvent(map[string]any{
@@ -863,10 +912,12 @@ func ExecuteDecision(decision *Decision, cfg *RunConfig, state *StateManager) {
 		state.ClearSignal(workerID)
 		worker := state.LoadWorker(workerID)
 		if worker != nil {
-			worker.Status = "idle"
+			worker.Status = WorkerStatusIdle
 			worker.IssueNumber = nil
 			worker.Stage = ""
 			worker.SourceConfig = ""
+			worker.ProcessStarted = false
+			worker.LastOutputTime = ""
 			state.SaveWorker(worker)
 		}
 		// Emit worker idle event
@@ -913,7 +964,11 @@ func HandleRetryPhase(workerID int, cfg *RunConfig, state *StateManager, _ strin
 		LogMsg(fmt.Sprintf("Worker %d: analysis done, sending explore-options prompt", workerID))
 		state.ClearSignal(workerID)
 
+		// Mark as starting before launching
 		worker.Stage = "retry_explore"
+		worker.Status = WorkerStatusStarting
+		worker.ProcessStarted = false
+		worker.LastOutputTime = ""
 		state.SaveWorker(worker)
 
 		promptPath := state.PromptPath(workerID)
@@ -926,6 +981,12 @@ func HandleRetryPhase(workerID int, cfg *RunConfig, state *StateManager, _ strin
 		// Launch worker as direct subprocess for retry_explore
 		if err := LaunchWorkerProcess(worker.Worktree, promptPath, logFile, signalFile, workerID, *worker.IssueNumber, "retry_explore", true); err != nil {
 			LogMsg(fmt.Sprintf("WARNING: failed to launch worker %d for retry_explore: %v", workerID, err))
+		} else {
+			// Mark process as started on successful launch
+			worker.ProcessStarted = true
+			worker.Status = WorkerStatusRunning
+			worker.LastOutputTime = NowISO()
+			state.SaveWorker(worker)
 		}
 
 		state.LogEvent(map[string]any{
@@ -942,7 +1003,11 @@ func HandleRetryPhase(workerID int, cfg *RunConfig, state *StateManager, _ strin
 		if len(effCfg.Pipeline) > issue.PipelineStage {
 			stageName = effCfg.Pipeline[issue.PipelineStage]
 		}
+		// Mark as starting before launching
 		worker.Stage = stageName
+		worker.Status = WorkerStatusStarting
+		worker.ProcessStarted = false
+		worker.LastOutputTime = ""
 		state.SaveWorker(worker)
 
 		logFile := state.LogPath(workerID)
@@ -957,6 +1022,12 @@ func HandleRetryPhase(workerID int, cfg *RunConfig, state *StateManager, _ strin
 		// Launch worker as direct subprocess
 		if err := LaunchWorkerProcess(worker.Worktree, promptPath, logFile, signalFile, workerID, *worker.IssueNumber, stageName, true); err != nil {
 			LogMsg(fmt.Sprintf("WARNING: failed to launch worker %d for %s: %v", workerID, stageName, err))
+		} else {
+			// Mark process as started on successful launch
+			worker.ProcessStarted = true
+			worker.Status = WorkerStatusRunning
+			worker.LastOutputTime = NowISO()
+			state.SaveWorker(worker)
 		}
 
 		state.LogEvent(map[string]any{
