@@ -177,3 +177,163 @@ func TestFormatUptime(t *testing.T) {
 		}
 	}
 }
+
+func TestGetOrchestratorInfoByProject(t *testing.T) {
+	tmpDir := t.TempDir()
+	testRegistryPath := filepath.Join(tmpDir, "registry.json")
+
+	rm := &RegistryManager{
+		registryPath: testRegistryPath,
+	}
+
+	// Register an orchestrator
+	err := rm.Register("test-project", 9001, "/config.json", 4, 12)
+	if err != nil {
+		t.Fatalf("Register failed: %v", err)
+	}
+	defer rm.Deregister()
+
+	// Get info by project
+	info, err := rm.GetOrchestratorInfoByProject("test-project")
+	if err != nil {
+		t.Fatalf("GetOrchestratorInfoByProject failed: %v", err)
+	}
+
+	if info == nil {
+		t.Fatal("Expected info, got nil")
+	}
+
+	if info.Project != "test-project" {
+		t.Errorf("Expected project 'test-project', got '%s'", info.Project)
+	}
+	if info.Port != 9001 {
+		t.Errorf("Expected port 9001, got %d", info.Port)
+	}
+	if info.NumWorkers != 4 {
+		t.Errorf("Expected 4 workers, got %d", info.NumWorkers)
+	}
+	if info.TotalIssues != 12 {
+		t.Errorf("Expected 12 issues, got %d", info.TotalIssues)
+	}
+	if info.DashboardURL != "http://localhost:9001" {
+		t.Errorf("Expected dashboard URL 'http://localhost:9001', got '%s'", info.DashboardURL)
+	}
+	if !info.IsCurrent {
+		t.Error("Expected IsCurrent to be true")
+	}
+
+	// Test non-existent project
+	info, err = rm.GetOrchestratorInfoByProject("non-existent")
+	if err != nil {
+		t.Fatalf("GetOrchestratorInfoByProject failed: %v", err)
+	}
+	if info != nil {
+		t.Error("Expected nil for non-existent project")
+	}
+}
+
+func TestForceDeregisterByProject(t *testing.T) {
+	tmpDir := t.TempDir()
+	testRegistryPath := filepath.Join(tmpDir, "registry.json")
+
+	rm := &RegistryManager{
+		registryPath: testRegistryPath,
+	}
+
+	// Register an orchestrator
+	err := rm.Register("force-deregister-test", 9002, "/config.json", 2, 5)
+	if err != nil {
+		t.Fatalf("Register failed: %v", err)
+	}
+
+	// Verify it exists
+	entries, _ := rm.ListOrchestrators()
+	if len(entries) != 1 {
+		t.Fatalf("Expected 1 entry, got %d", len(entries))
+	}
+
+	// Force deregister
+	removed, err := rm.ForceDeregisterByProject("force-deregister-test")
+	if err != nil {
+		t.Fatalf("ForceDeregisterByProject failed: %v", err)
+	}
+	if !removed {
+		t.Error("Expected removed to be true")
+	}
+
+	// Verify it's gone
+	entries, _ = rm.ListOrchestrators()
+	if len(entries) != 0 {
+		t.Errorf("Expected 0 entries after force deregister, got %d", len(entries))
+	}
+
+	// Try to deregister non-existent project
+	removed, err = rm.ForceDeregisterByProject("non-existent")
+	if err != nil {
+		t.Fatalf("ForceDeregisterByProject failed: %v", err)
+	}
+	if removed {
+		t.Error("Expected removed to be false for non-existent project")
+	}
+}
+
+func TestListOrchestratorsByStatus(t *testing.T) {
+	tmpDir := t.TempDir()
+	testRegistryPath := filepath.Join(tmpDir, "registry.json")
+
+	rm := &RegistryManager{
+		registryPath: testRegistryPath,
+	}
+
+	// Register an orchestrator
+	err := rm.Register("status-filter-test", 9003, "/config.json", 3, 8)
+	if err != nil {
+		t.Fatalf("Register failed: %v", err)
+	}
+	defer rm.Deregister()
+
+	// Filter by running status
+	infos, err := rm.ListOrchestratorsByStatus(StatusRunning)
+	if err != nil {
+		t.Fatalf("ListOrchestratorsByStatus failed: %v", err)
+	}
+	if len(infos) != 1 {
+		t.Errorf("Expected 1 running orchestrator, got %d", len(infos))
+	}
+
+	// Filter by completed status (should be empty)
+	infos, err = rm.ListOrchestratorsByStatus(StatusCompleted)
+	if err != nil {
+		t.Fatalf("ListOrchestratorsByStatus failed: %v", err)
+	}
+	if len(infos) != 0 {
+		t.Errorf("Expected 0 completed orchestrators, got %d", len(infos))
+	}
+
+	// No filter (should return all)
+	infos, err = rm.ListOrchestratorsByStatus("")
+	if err != nil {
+		t.Fatalf("ListOrchestratorsByStatus failed: %v", err)
+	}
+	if len(infos) != 1 {
+		t.Errorf("Expected 1 orchestrator with no filter, got %d", len(infos))
+	}
+
+	// Update status and verify filter works
+	rm.UpdateStatus(StatusCompleted)
+	infos, err = rm.ListOrchestratorsByStatus(StatusCompleted)
+	if err != nil {
+		t.Fatalf("ListOrchestratorsByStatus failed: %v", err)
+	}
+	if len(infos) != 1 {
+		t.Errorf("Expected 1 completed orchestrator, got %d", len(infos))
+	}
+
+	infos, err = rm.ListOrchestratorsByStatus(StatusRunning)
+	if err != nil {
+		t.Fatalf("ListOrchestratorsByStatus failed: %v", err)
+	}
+	if len(infos) != 0 {
+		t.Errorf("Expected 0 running orchestrators after status change, got %d", len(infos))
+	}
+}
