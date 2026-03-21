@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/PaulSnow/orchestrator/internal/daemon"
 	"github.com/PaulSnow/orchestrator/internal/orchestrator"
 )
 
@@ -49,6 +50,8 @@ func main() {
 		cmdActivity(args)
 	case "add-issue":
 		cmdAddIssue(args)
+	case "daemon":
+		cmdDaemon(args)
 	case "version", "-v", "--version":
 		printVersion()
 	case "help", "-h", "--help":
@@ -110,6 +113,7 @@ COMMANDS
   metrics    Show productivity metrics and trends
   activity   Show recent activity log
   add-issue  Add an issue to config mid-run
+  daemon     Manage the orchestrator daemon (start, stop, status)
   version    Show version information
 
 EXAMPLES
@@ -353,6 +357,15 @@ OPTIONS`)
 	if *dryRun {
 		fmt.Println("*** DRY RUN MODE -- no changes will be made ***")
 		fmt.Println()
+	}
+
+	// Ensure daemon is running (auto-start if not)
+	if !*dryRun {
+		if err := daemon.EnsureRunning(); err != nil {
+			fmt.Printf("  Note: Could not start daemon: %v\n", err)
+		} else if daemon.IsRunning() {
+			fmt.Printf("  Daemon: http://localhost:%d\n", daemon.DefaultPort)
+		}
 	}
 
 	// Create dashboard server (runs throughout entire lifecycle)
@@ -677,6 +690,13 @@ func cmdReview(args []string) {
 
 	reviewGate := orchestrator.NewReviewGate(primaryCfg, state)
 	reviewGate.EnsureReviewDirs()
+
+	// Ensure daemon is running (auto-start if not)
+	if err := daemon.EnsureRunning(); err != nil {
+		fmt.Printf("Note: Could not start daemon: %v\n", err)
+	} else if daemon.IsRunning() {
+		fmt.Printf("Daemon: http://localhost:%d\n", daemon.DefaultPort)
+	}
 
 	// Start dashboard server if enabled
 	var dashboardServer *orchestrator.DashboardServer
@@ -1015,4 +1035,148 @@ func getValidStages() []string {
 		stages = append(stages, s)
 	}
 	return stages
+}
+
+func cmdDaemon(args []string) {
+	if len(args) == 0 {
+		printDaemonUsage()
+		os.Exit(1)
+	}
+
+	subCmd := args[0]
+	subArgs := args[1:]
+
+	switch subCmd {
+	case "start":
+		cmdDaemonStart(subArgs)
+	case "stop":
+		cmdDaemonStop(subArgs)
+	case "status":
+		cmdDaemonStatus(subArgs)
+	case "help", "-h", "--help":
+		printDaemonUsage()
+	default:
+		fmt.Fprintf(os.Stderr, "Unknown daemon subcommand: %s\n", subCmd)
+		printDaemonUsage()
+		os.Exit(1)
+	}
+}
+
+func printDaemonUsage() {
+	fmt.Println(`orchestrator daemon - Manage the orchestrator daemon process
+
+DESCRIPTION
+  The daemon provides a central coordination point for multiple orchestrators.
+  It runs on a fixed port (8100) and provides:
+  - Aggregated view of all running orchestrators
+  - Central activity log
+  - Unified dashboard
+
+  Any orchestrator can start the daemon if it's not already running.
+
+SUBCOMMANDS
+  start      Start the daemon (runs in foreground)
+  stop       Stop a running daemon gracefully
+  status     Check if daemon is running and show info
+
+EXAMPLES
+
+  # Start the daemon in foreground
+  orchestrator daemon start
+
+  # Start daemon in background (daemonize)
+  nohup orchestrator daemon start > /tmp/daemon.log 2>&1 &
+
+  # Check daemon status
+  orchestrator daemon status
+
+  # Stop the daemon
+  orchestrator daemon stop
+
+NOTES
+  - The daemon runs on port 8100 by default
+  - Dashboard available at http://localhost:8100
+  - Orchestrators automatically register with the daemon`)
+}
+
+func cmdDaemonStart(args []string) {
+	fs := flag.NewFlagSet("daemon start", flag.ExitOnError)
+	port := fs.Int("port", daemon.DefaultPort, "Port to listen on")
+	fs.Parse(args)
+
+	// Check if already running
+	if daemon.IsRunningOnPort(*port) {
+		fmt.Printf("Daemon is already running on port %d\n", *port)
+		fmt.Printf("Dashboard: http://localhost:%d\n", *port)
+		os.Exit(0)
+	}
+
+	cfg := &daemon.Config{
+		Port: *port,
+	}
+
+	d, err := daemon.New(cfg)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error creating daemon: %v\n", err)
+		os.Exit(1)
+	}
+
+	fmt.Printf("Starting orchestrator daemon on port %d...\n", *port)
+	fmt.Printf("Dashboard: http://localhost:%d\n", *port)
+	fmt.Println("Press Ctrl+C to stop")
+	fmt.Println()
+
+	if err := d.Run(); err != nil {
+		fmt.Fprintf(os.Stderr, "Daemon error: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+func cmdDaemonStop(_ []string) {
+	if !daemon.IsRunning() {
+		fmt.Println("Daemon is not running")
+		os.Exit(0)
+	}
+
+	fmt.Println("Stopping daemon...")
+	if err := daemon.StopDaemon(); err != nil {
+		fmt.Fprintf(os.Stderr, "Error stopping daemon: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Println("Daemon stopped")
+}
+
+func cmdDaemonStatus(_ []string) {
+	if !daemon.IsRunning() {
+		fmt.Println("Daemon is not running")
+		os.Exit(1)
+	}
+
+	client := daemon.NewClient()
+	status, err := client.Status()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error getting status: %v\n", err)
+		os.Exit(1)
+	}
+
+	fmt.Println("Daemon Status")
+	fmt.Println(strings.Repeat("=", 40))
+
+	if daemonInfo, ok := status["daemon"].(map[string]any); ok {
+		fmt.Printf("  Port:       %v\n", daemonInfo["port"])
+		fmt.Printf("  Uptime:     %v\n", daemonInfo["uptime"])
+		fmt.Printf("  Started:    %v\n", daemonInfo["started_at"])
+	}
+
+	if orchInfo, ok := status["orchestrators"].(map[string]any); ok {
+		fmt.Printf("  Running:    %v orchestrators\n", orchInfo["running"])
+	}
+
+	if aggInfo, ok := status["aggregate"].(map[string]any); ok {
+		fmt.Printf("  Workers:    %v total\n", aggInfo["total_workers"])
+		fmt.Printf("  Issues:     %v total\n", aggInfo["total_issues"])
+	}
+
+	fmt.Println()
+	fmt.Printf("Dashboard: http://localhost:%d\n", daemon.DefaultPort)
 }

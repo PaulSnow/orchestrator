@@ -122,8 +122,10 @@ func CalculateMetrics(period MetricPeriod, startDate, endDate time.Time) (*Produ
 
 	// Calculate derived metrics
 	if metrics.TotalRuns > 0 {
-		metrics.AvgDuration = metrics.TotalDuration / time.Duration(metrics.SuccessfulRuns)
 		metrics.SuccessRate = float64(metrics.SuccessfulRuns) / float64(metrics.TotalRuns) * 100
+	}
+	if metrics.SuccessfulRuns > 0 {
+		metrics.AvgDuration = metrics.TotalDuration / time.Duration(metrics.SuccessfulRuns)
 	}
 
 	// Calculate issues per hour
