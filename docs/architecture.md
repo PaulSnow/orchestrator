@@ -137,6 +137,69 @@ tmux session: "proof-orchestrator"
 - `/tmp/proof-worker-N.log` -- worker output (Claude Code session transcript)
 - `/tmp/orchestrator-signal-N` -- completion signal (exit code)
 
+## Supervisor
+
+The Supervisor is an adaptive monitoring layer that catches problems existing alarms miss and documents what should have fired.
+
+### Purpose
+
+Existing alarms in `decisions.go` detect problems like:
+- Log file not updating (stall detection)
+- API crash patterns in output
+- Process exit with non-zero code
+
+But these alarms have blind spots. The Supervisor catches what they miss and generates improvement reports.
+
+### Detection Capabilities
+
+| Problem Type | Description | Why Alarms Miss It |
+|--------------|-------------|-------------------|
+| `thinking_loop` | Claude says "thinking..." repeatedly but makes no progress | Log mtime updates (not stale), but content is filler |
+| `error_loop` | Same error appears 3+ times | `logHasErrors()` checks IF error exists, not repetition |
+| `silent_stall` | Log active but no code changes for 10+ min | Pre-stall window before timeout fires |
+| `circular_work` | Edit-revert cycles with no net changes | Worktree mtime updates even when changes reverted |
+
+### Adaptive Polling
+
+The Supervisor adjusts its polling interval based on intervention rate:
+
+| Recent Interventions | Polling Interval | Interpretation |
+|---------------------|------------------|----------------|
+| >10 per hour | 15 seconds | Alarms broken, poll fast |
+| 5-10 per hour | 30 seconds | Alarms need work |
+| 2-5 per hour | 1 minute | Occasional misses |
+| 1-2 per hour | 2 minutes | Alarms mostly working |
+| 0 per hour | 5 minutes | Alarms working well |
+
+### Alarm Miss Reports
+
+When the Supervisor catches a problem, it records:
+- What problem was detected
+- Which alarm should have fired
+- Why that alarm didn't fire
+- Suggested code fix with file location
+
+Daily reports are generated to `~/.orchestrator/improvements/YYYY-MM-DD.md`.
+
+### Files
+
+```
+internal/orchestrator/
+  supervisor.go          Main loop, adaptive polling, AlarmMiss type
+  supervisor_detect.go   Problem detection: isThinkingLoop, isErrorLoop, etc.
+  supervisor_report.go   Daily markdown report generation
+```
+
+### Integration
+
+The Supervisor runs as a goroutine in `RunMonitorLoop()` and `RunMonitorLoopGlobal()`:
+
+```go
+supervisor := NewSupervisor(cfg, state)
+supervisor.Start()
+defer supervisor.Stop()
+```
+
 ## Data Flow
 
 ```
