@@ -1396,8 +1396,8 @@ const dashboardHTML = `<!DOCTYPE html>
 
         <div class="header">
             <div class="header-left">
-                <h1>Orchestrator Dashboard</h1>
-                <span class="version" id="version"></span>
+                <h1 id="project-name" style="color: #58a6ff; font-size: 24px;"></h1>
+                <div id="repos-info" style="font-size: 12px; color: #888;"></div>
                 <!-- Orchestrator switcher -->
                 <div class="orchestrator-switcher" id="orch-switcher">
                     <button class="switcher-btn" onclick="toggleSwitcher()">
@@ -1408,8 +1408,8 @@ const dashboardHTML = `<!DOCTYPE html>
                 </div>
             </div>
             <div class="header-right">
-                <div id="project-name" style="font-weight: bold; font-size: 16px;"></div>
-                <div id="repos-info" style="font-size: 11px; color: #666;"></div>
+                <div style="font-size: 14px; color: #666;">Orchestrator</div>
+                <span class="version" id="version"></span>
                 <div id="runtime"></div>
             </div>
         </div>
