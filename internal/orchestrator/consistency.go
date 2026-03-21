@@ -112,8 +112,7 @@ func (cc *ConsistencyChecker) ScanAndFixCompletedWork() int {
 			worker := cc.state.LoadWorker(i)
 			if worker != nil && worker.IssueNumber != nil && *worker.IssueNumber == issue.Number {
 				// Worker is assigned - check if it's actually running Claude
-				panePID := GetPanePID(cc.cfg.TmuxSession, fmt.Sprintf("worker-%d", i))
-				if IsClaudeRunning(panePID) {
+				if IsClaudeRunningDirect(i) {
 					hasActiveWorker = true
 					break
 				}
@@ -575,8 +574,10 @@ func (cc *ConsistencyChecker) AutoFix(inc Inconsistency) error {
 	return nil
 }
 
-// LaunchFixerSession launches a Claude session to diagnose and fix issues.
-func (cc *ConsistencyChecker) LaunchFixerSession(inconsistencies []Inconsistency, tmuxSession string) error {
+// LaunchFixerSession logs inconsistencies that need manual attention.
+// Previously this launched a tmux-based Claude session; now it writes to a file for manual review.
+// Note: tmuxSession parameter is deprecated and unused.
+func (cc *ConsistencyChecker) LaunchFixerSession(inconsistencies []Inconsistency, _ string) error {
 	if len(inconsistencies) == 0 {
 		return nil
 	}
@@ -596,7 +597,6 @@ func (cc *ConsistencyChecker) LaunchFixerSession(inconsistencies []Inconsistency
 	}
 
 	promptPath := filepath.Join(promptDir, "fixer-prompt.md")
-	logPath := filepath.Join(promptDir, "fixer.log")
 
 	// Build the prompt
 	var sb strings.Builder
@@ -635,42 +635,8 @@ func (cc *ConsistencyChecker) LaunchFixerSession(inconsistencies []Inconsistency
 		return fmt.Errorf("write fixer prompt: %w", err)
 	}
 
-	// Create or use existing fixer window in tmux
-	windowName := "fixer"
-
-	// Check if window exists
-	checkCmd := exec.Command("tmux", "list-windows", "-t", tmuxSession, "-F", "#{window_name}")
-	output, _ := checkCmd.Output()
-	windowExists := strings.Contains(string(output), windowName)
-
-	if !windowExists {
-		// Create new window
-		createCmd := exec.Command("tmux", "new-window", "-t", tmuxSession, "-n", windowName)
-		if err := createCmd.Run(); err != nil {
-			return fmt.Errorf("create fixer window: %w", err)
-		}
-	}
-
-	// Build the claude command - use -p to run in print mode with the prompt file content
-	workDir := cc.cfg.OrchRoot
-	if workDir == "" {
-		workDir = "."
-	}
-	claudeCmd := fmt.Sprintf(
-		"cd %s && claude -p \"$(cat %s)\" 2>&1 | tee %s",
-		workDir,
-		promptPath,
-		logPath,
-	)
-
-	// Send command to the fixer window
-	sendCmd := exec.Command("tmux", "send-keys", "-t", fmt.Sprintf("%s:%s", tmuxSession, windowName),
-		claudeCmd, "Enter")
-	if err := sendCmd.Run(); err != nil {
-		return fmt.Errorf("send fixer command: %w", err)
-	}
-
-	LogMsg(fmt.Sprintf("[consistency] Launched fixer session in tmux window '%s'", windowName))
+	LogMsg(fmt.Sprintf("[consistency] Wrote %d inconsistencies to %s for manual review", len(inconsistencies), promptPath))
+	LogMsg("[consistency] Run: claude -p \"$(cat " + promptPath + ")\" to analyze and fix")
 	return nil
 }
 

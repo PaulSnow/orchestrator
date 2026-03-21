@@ -61,17 +61,17 @@ func main() {
 }
 
 func printUsage() {
-	fmt.Println(`orchestrator - Parallel Claude Code worker orchestration via tmux
+	fmt.Println(`orchestrator - Parallel Claude Code worker orchestration
 
 OVERVIEW
   Orchestrates multiple Claude Code sessions working on GitHub/GitLab issues
-  in parallel. Each worker gets its own git worktree and tmux window.
+  in parallel. Each worker gets its own git worktree and runs as a subprocess.
 
 WORKFLOW
   1. Load issues from config file OR GitHub epic issue
   2. Run review gate (optional) - validates issues are well-specified
   3. Create git worktrees for each assigned issue
-  4. Launch Claude workers in tmux windows with issue-specific prompts
+  4. Launch Claude workers as subprocesses with issue-specific prompts
   5. Monitor progress, reassign completed workers to next issues
 
 CONFIGURATION
@@ -104,7 +104,7 @@ CONFIGURATION
 COMMANDS
   launch     Start workers and monitor until completion (main command)
   review     Run review gate only, don't launch workers
-  cleanup    Kill tmux session and optionally remove worktrees
+  cleanup    Stop workers and optionally remove worktrees
   status     Show current progress (one-shot)
   dashboard  Live terminal dashboard with auto-refresh
   metrics    Show productivity metrics and trends
@@ -147,11 +147,9 @@ WEB DASHBOARD
 
   Disable with --web-port 0
 
-TMUX SESSION
-  Workers run in tmux windows. Attach to monitor:
-    tmux attach -t <session-name>
-
-  Session name defaults to project name from config.
+WORKER PROCESSES
+  Workers run as direct subprocesses. View logs in the state directory:
+    tail -f <state-dir>/workers/worker-N.log
 
 Use "orchestrator <command> -h" for command-specific options.`)
 }
@@ -176,7 +174,7 @@ USAGE
   orchestrator launch --config <file>        # Legacy - uses JSON config file
 
 DESCRIPTION
-  Launches Claude Code workers in parallel tmux windows. Each worker gets
+  Launches Claude Code workers as parallel subprocesses. Each worker gets
   an isolated git worktree and works on one issue at a time. When a worker
   completes, it's automatically assigned the next available issue.
 
@@ -226,7 +224,6 @@ OPTIONS`)
 	}
 	dryRun := fs.Bool("dry-run", false, "Validate config and show plan without making changes")
 	workers := fs.Int("workers", defaultNumWorkers, "Number of parallel Claude workers")
-	session := fs.String("session", "", "Tmux session name (default: project name from config)")
 	configDir := fs.String("config-dir", "", "Directory with *-issues.json configs (merges all)")
 	config := fs.String("config", "", "JSON config file with issues array")
 	epic := fs.String("epic", "", "GitHub epic issue URL to use as config source")
@@ -302,14 +299,6 @@ OPTIONS`)
 		os.Exit(1)
 	}
 	numWorkers := *workers
-	// Default session name to project name
-	tmuxSession := *session
-	if tmuxSession == "" && len(configs) > 0 {
-		tmuxSession = configs[0].Project
-		if tmuxSession == "" {
-			tmuxSession = "orchestrator"
-		}
-	}
 	staggerDelay := 30
 	for _, c := range configs {
 		if c.StaggerDelay > staggerDelay {
@@ -335,7 +324,6 @@ OPTIONS`)
 
 	primaryCfg := configs[0]
 	primaryCfg.NumWorkers = numWorkers
-	primaryCfg.TmuxSession = tmuxSession
 	state := orchestrator.NewStateManager(primaryCfg)
 
 	// Create shared event broadcaster
@@ -437,7 +425,7 @@ OPTIONS`)
 	// Check prerequisites
 	fmt.Println("Checking prerequisites...")
 	var missing []string
-	for _, cmd := range []string{"tmux", "claude"} {
+	for _, cmd := range []string{"claude"} {
 		if _, err := exec.LookPath(cmd); err != nil {
 			missing = append(missing, cmd)
 		}
@@ -456,7 +444,6 @@ OPTIONS`)
 		fmt.Printf("  %s: %d issues (%d done, %d pending, %d failed)\n", cfg.Project, total, completed, pending, failed)
 	}
 	fmt.Printf("  Workers: %d\n", numWorkers)
-	fmt.Printf("  Session: %s\n", tmuxSession)
 	fmt.Println()
 
 	// Fetch origin
@@ -552,21 +539,11 @@ OPTIONS`)
 	}
 	fmt.Println()
 
-	// Create tmux session
-	fmt.Println("-- Creating tmux session --")
-	if !*dryRun && orchestrator.SessionExists(tmuxSession) {
-		fmt.Fprintf(os.Stderr, "ERROR: tmux session '%s' already exists.\n", tmuxSession)
-		os.Exit(1)
-	}
-
-	if !*dryRun {
-		orchestrator.CreateSession(tmuxSession, "orchestrator", primaryCfg.OrchRoot)
-		for _, a := range assignments {
-			orchestrator.NewWindow(tmuxSession, fmt.Sprintf("worker-%d", a.workerID), primaryCfg.OrchRoot)
-		}
-		orchestrator.NewWindow(tmuxSession, "dashboard", primaryCfg.OrchRoot)
-	}
-	fmt.Printf("  %d windows created\n", len(assignments)+2)
+	// Initialize process manager
+	fmt.Println("-- Initializing process manager --")
+	pm := orchestrator.GetProcessManager()
+	_ = pm // process manager ready
+	fmt.Printf("  Process manager ready for %d workers\n", len(assignments))
 	fmt.Println()
 
 	// Launch workers
@@ -599,8 +576,11 @@ OPTIONS`)
 			}
 
 			issueState.UpdateIssueStatus(a.issue.Number, "in_progress", &a.workerID)
-			orchestrator.SendCommand(tmuxSession, fmt.Sprintf("worker-%d", a.workerID),
-				orchestrator.BuildClaudeCmd(wtPath, promptPath, logFile, signalFile, a.workerID, a.issue.Number, stageName, false))
+
+			// Launch worker as direct subprocess (no tmux)
+			if err := orchestrator.LaunchWorkerProcess(wtPath, promptPath, logFile, signalFile, a.workerID, a.issue.Number, stageName, false); err != nil {
+				fmt.Fprintf(os.Stderr, "WARNING: failed to launch worker %d: %v\n", a.workerID, err)
+			}
 
 			// Emit worker assigned event
 			events.EmitWorkerAssigned(a.workerID, a.issue.Number, a.issue.Title, stageName)
@@ -615,7 +595,7 @@ OPTIONS`)
 
 	fmt.Println(strings.Repeat("=", 60))
 	fmt.Println("  All workers launched.")
-	fmt.Printf("  Attach: tmux attach -t %s\n", tmuxSession)
+	fmt.Printf("  View logs: tail -f %s/workers/worker-*.log\n", primaryCfg.StateDir)
 	fmt.Println(strings.Repeat("=", 60))
 
 	// Run monitor loop in-process (blocks until all issues complete)
@@ -623,15 +603,14 @@ OPTIONS`)
 		fmt.Println()
 		fmt.Println("-- Starting Monitor Loop --")
 
-		// Set all configs to use this tmux session and worker count
+		// Set worker count for all configs
 		for _, cfg := range configs {
-			cfg.TmuxSession = tmuxSession
 			cfg.NumWorkers = numWorkers
 		}
 
 		if len(configs) > 1 {
 			// Multi-project mode
-			orchestrator.RunMonitorLoopGlobal(configs, state, numWorkers, tmuxSession, false)
+			orchestrator.RunMonitorLoopGlobal(configs, state, numWorkers, "", false)
 		} else {
 			// Single project mode
 			orchestrator.RunMonitorLoop(primaryCfg, state, false)
@@ -743,11 +722,11 @@ func cmdReview(args []string) {
 func cmdCleanup(args []string) {
 	fs := flag.NewFlagSet("cleanup", flag.ExitOnError)
 	fs.Usage = func() {
-		fmt.Println(`orchestrator cleanup - Clean up tmux session and worktrees
+		fmt.Println(`orchestrator cleanup - Stop workers and clean up resources
 
 DESCRIPTION
   Stops all workers and cleans up resources:
-  - Kills the tmux session
+  - Stops all running worker processes
   - Removes git worktrees (unless --keep-worktrees)
   - Clears state files
 
