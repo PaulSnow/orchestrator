@@ -202,6 +202,7 @@ type PRLifecycleResult struct {
 	Error         error
 }
 
+<<<<<<< HEAD
 // RebaseResult represents the outcome of a rebase attempt.
 type RebaseResult struct {
 	Success      bool
@@ -305,6 +306,68 @@ func RebaseAndRetry(worktreePath, branchName, baseBranch string) bool {
 
 	LogMsg(fmt.Sprintf("[auto-rebase] Successfully rebased and pushed %s", branchName))
 	return true
+}
+
+// RetryPRPendingMerges attempts to merge all issues that are in pr_pending state.
+// Returns the number of issues successfully merged.
+func RetryPRPendingMerges(cfg *RunConfig, state *StateManager) int {
+	prPendingIssues := GetPRPendingIssues(cfg)
+	if len(prPendingIssues) == 0 {
+		return 0
+	}
+
+	merged := 0
+	for _, issue := range prPendingIssues {
+		branchName := issue.BranchName
+		if branchName == "" {
+			// Fallback: construct branch name from issue number
+			repo, _ := cfg.PrimaryRepo()
+			if repo != nil {
+				branchName = repo.BranchPrefix + fmt.Sprintf("%d", issue.Number)
+			}
+		}
+		if branchName == "" {
+			continue
+		}
+
+		LogMsg(fmt.Sprintf("[pr-retry] Attempting to merge PR for issue #%d (branch: %s)", issue.Number, branchName))
+		mergeResult := MergePRForIssue(issue.Number, branchName, cfg)
+
+		if mergeResult.Success {
+			// Mark as completed
+			state.UpdateIssueStatus(issue.Number, "completed", nil)
+			LogMsg(fmt.Sprintf("[pr-retry] Issue #%d merged successfully", issue.Number))
+			merged++
+
+			// Update epic checkbox if applicable
+			if cfg.EpicNumber > 0 && cfg.EpicURL != "" {
+				if err := UpdateEpicCheckbox(cfg.EpicURL, issue.Number, true); err != nil {
+					LogMsg(fmt.Sprintf("WARNING: failed to update epic checkbox for #%d: %v", issue.Number, err))
+				}
+			}
+
+			// Log completion
+			GetActivityLogger().LogIssueCompleted(issue.Number, 0)
+			if eb := GetGlobalEventBroadcaster(); eb != nil {
+				eb.EmitIssueStatus(issue.Number, issue.Title, "completed", nil)
+			}
+		} else if mergeResult.Conflicts {
+			// Merge conflict - need worker intervention
+			LogMsg(fmt.Sprintf("[pr-retry] Issue #%d has merge conflicts, reverting to pending", issue.Number))
+			if err := ReopenIssueForMergeConflict(issue.Number, branchName, mergeResult.MergeError, cfg); err != nil {
+				LogMsg(fmt.Sprintf("WARNING: failed to reopen issue #%d: %v", issue.Number, err))
+			}
+			state.UpdateIssueStatus(issue.Number, "pending", nil)
+			if eb := GetGlobalEventBroadcaster(); eb != nil {
+				eb.EmitIssueStatus(issue.Number, issue.Title, "pending", nil)
+			}
+		} else {
+			// Other merge error - keep as pr_pending for retry
+			LogMsg(fmt.Sprintf("[pr-retry] Issue #%d merge failed (will retry): %s", issue.Number, mergeResult.MergeError))
+		}
+	}
+
+	return merged
 }
 
 // CreateAndMergePR handles the full PR lifecycle for a completed issue:

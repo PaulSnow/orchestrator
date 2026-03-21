@@ -210,12 +210,14 @@ func TestMonitorCycle_ExecutesDecisions(t *testing.T) {
 	ExecuteDecision(decision, cfg, state)
 
 	// Verify issue status was updated
+	// Without a primary repo, PR creation fails, so status should be pr_pending
+	// (completed only happens when PR is actually merged)
 	issue := cfg.GetIssue(1)
 	if issue == nil {
 		t.Fatal("Issue not found after ExecuteDecision")
 	}
-	if issue.Status != "completed" {
-		t.Errorf("Expected issue status 'completed', got '%s'", issue.Status)
+	if issue.Status != "pr_pending" {
+		t.Errorf("Expected issue status 'pr_pending' (no repo for PR merge), got '%s'", issue.Status)
 	}
 
 	// Test idle decision
@@ -329,13 +331,14 @@ func TestMonitorCycle_CompletesIssue(t *testing.T) {
 		ExecuteDecision(d, cfg, state)
 	}
 
-	// Verify issue is completed
+	// Verify issue is pr_pending (without a primary repo, PR creation fails)
+	// The status only becomes "completed" when PR is actually merged
 	issue := cfg.GetIssue(42)
 	if issue == nil {
 		t.Fatal("Issue 42 not found")
 	}
-	if issue.Status != "completed" {
-		t.Errorf("Expected issue status 'completed', got '%s'", issue.Status)
+	if issue.Status != "pr_pending" {
+		t.Errorf("Expected issue status 'pr_pending' (no repo for PR merge), got '%s'", issue.Status)
 	}
 
 	// Signal file should be cleared
