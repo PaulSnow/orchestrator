@@ -196,7 +196,7 @@ func TestDaemonHandleDeleteOrchestrator(t *testing.T) {
 	}
 
 	// Verify it was actually removed
-	entries, _ := rm.ListAllOrchestratorsRaw()
+	entries, _ := rm.ListOrchestrators()
 	if len(entries) != 0 {
 		t.Errorf("Expected 0 entries after removal, got %d", len(entries))
 	}

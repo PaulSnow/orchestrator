@@ -173,17 +173,18 @@ func TestConnectivityStatus_Constants(t *testing.T) {
 
 func TestOrchestratorInfo_NewFields(t *testing.T) {
 	// Test that OrchestratorInfo has the new fields
+	testTime, _ := time.Parse(time.RFC3339, "2024-01-15T10:30:00Z")
 	info := OrchestratorInfo{
 		Project:      "test",
 		Connectivity: ConnectivityOnline,
-		LastSeen:     "2024-01-15T10:30:00Z",
+		LastSeen:     testTime,
 	}
 
 	if info.Connectivity != ConnectivityOnline {
 		t.Errorf("Expected connectivity to be online, got %v", info.Connectivity)
 	}
 
-	if info.LastSeen != "2024-01-15T10:30:00Z" {
+	if info.LastSeen.IsZero() {
 		t.Errorf("Expected last_seen to be set")
 	}
 
@@ -265,8 +266,9 @@ func TestConnectivityChecker_EnrichInfos(t *testing.T) {
 	for i := range infos {
 		connectivity, lastSeen := cc.GetStatus(infos[i].Project)
 		infos[i].Connectivity = connectivity
-		if connectivity == ConnectivityOffline && !lastSeen.IsZero() {
-			infos[i].LastSeen = lastSeen.Format(time.RFC3339)
+		infos[i].IsOnline = connectivity == ConnectivityOnline
+		if !lastSeen.IsZero() {
+			infos[i].LastSeen = lastSeen
 		}
 	}
 

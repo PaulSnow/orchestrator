@@ -559,8 +559,9 @@ func (ds *DashboardServer) enrichWithConnectivity(infos []OrchestratorInfo) {
 	for i := range infos {
 		connectivity, lastSeen := ds.connectivityChecker.GetStatus(infos[i].Project)
 		infos[i].Connectivity = connectivity
-		if connectivity == ConnectivityOffline && !lastSeen.IsZero() {
-			infos[i].LastSeen = lastSeen.Format(time.RFC3339)
+		infos[i].IsOnline = connectivity == ConnectivityOnline
+		if !lastSeen.IsZero() {
+			infos[i].LastSeen = lastSeen
 		}
 	}
 }

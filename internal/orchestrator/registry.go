@@ -309,13 +309,17 @@ func (rm *RegistryManager) ListOrchestrators() ([]OrchestratorEntry, error) {
 }
 
 // GetOrchestratorByProject finds an orchestrator by project name.
+// This loads the registry directly without auto-cleanup, allowing lookup of offline orchestrators.
 func (rm *RegistryManager) GetOrchestratorByProject(project string) (*OrchestratorEntry, error) {
-	entries, err := rm.ListOrchestrators()
+	rm.mu.RLock()
+	defer rm.mu.RUnlock()
+
+	reg, err := rm.loadRegistry()
 	if err != nil {
 		return nil, err
 	}
 
-	for _, entry := range entries {
+	for _, entry := range reg.Orchestrators {
 		if entry.Project == project {
 			return &entry, nil
 		}
@@ -334,6 +338,7 @@ func (rm *RegistryManager) GetOrchestratorInfoByProject(project string) (*Orches
 	}
 
 	currentPID := os.Getpid()
+	isOnline := isProcessRunning(entry.PID)
 	info := &OrchestratorInfo{
 		Project:      entry.Project,
 		Port:         entry.Port,
@@ -345,6 +350,15 @@ func (rm *RegistryManager) GetOrchestratorInfoByProject(project string) (*Orches
 		TotalIssues:  entry.TotalIssues,
 		DashboardURL: fmt.Sprintf("http://localhost:%d", entry.Port),
 		IsCurrent:    entry.PID == currentPID,
+		IsOnline:     isOnline,
+		Connectivity: ConnectivityOffline,
+		LastSeen:     time.Time{},
+	}
+
+	// Set connectivity based on process status
+	if isOnline {
+		info.Connectivity = ConnectivityOnline
+		info.LastSeen = time.Now()
 	}
 
 	// Calculate uptime
@@ -555,6 +569,9 @@ type OrchestratorInfo struct {
 	DashboardURL string             `json:"dashboard_url"`
 	Uptime       string             `json:"uptime"`
 	IsCurrent    bool               `json:"is_current"`
+	IsOnline     bool               `json:"is_online"`
+	Connectivity ConnectivityStatus `json:"connectivity"`
+	LastSeen     time.Time          `json:"last_seen"`
 }
 
 // GetOrchestratorInfos returns enriched orchestrator information.
@@ -579,6 +596,15 @@ func (rm *RegistryManager) GetOrchestratorInfos() ([]OrchestratorInfo, error) {
 			TotalIssues:  entry.TotalIssues,
 			DashboardURL: fmt.Sprintf("http://localhost:%d", entry.Port),
 			IsCurrent:    entry.PID == currentPID,
+			IsOnline:     isProcessRunning(entry.PID),
+			Connectivity: ConnectivityOffline,
+			LastSeen:     time.Time{},
+		}
+
+		// Set connectivity based on process status
+		if info.IsOnline {
+			info.Connectivity = ConnectivityOnline
+			info.LastSeen = time.Now()
 		}
 
 		// Calculate uptime

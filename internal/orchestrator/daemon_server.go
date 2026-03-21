@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -210,6 +211,10 @@ func (ds *DaemonServer) handleOrchestratorByProject(w http.ResponseWriter, r *ht
 			"error": "project name required",
 		})
 		return
+	}
+	// URL-decode the project name (e.g., "owner%2Frepo" -> "owner/repo")
+	if decoded, err := url.PathUnescape(project); err == nil {
+		project = decoded
 	}
 
 	switch r.Method {
