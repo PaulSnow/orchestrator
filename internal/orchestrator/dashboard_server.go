@@ -812,6 +812,19 @@ func (ds *DashboardServer) handleProxy(w http.ResponseWriter, r *http.Request) {
 		remainingPath = "/" + parts[1]
 	}
 
+	// Block /api/stop via proxy - orchestrators can only be stopped from their own dashboard
+	// This enforces the "switch-to" requirement: you must be viewing the orchestrator directly
+	if remainingPath == "/api/stop" {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.WriteHeader(http.StatusForbidden)
+		json.NewEncoder(w).Encode(map[string]any{
+			"success": false,
+			"error":   "Cannot stop orchestrator remotely. Switch to its dashboard first.",
+		})
+		return
+	}
+
 	// Find the orchestrator by project name
 	entry, err := ds.registry.GetOrchestratorByProject(projectName)
 	if err != nil {
@@ -2043,7 +2056,24 @@ const dashboardHTML = `<!DOCTYPE html>
             proxyEvtSource.addEventListener('log_update', (e) => {
                 fetch(proxyBase + '/api/workers').then(r => r.json()).then(updateWorkers);
             });
-            proxyEvtSource.onerror = () => addEvent('connection_error', { proxied: true });
+            proxyEvtSource.addEventListener('orchestrator_stopping', (e) => {
+                const data = JSON.parse(e.data);
+                addEvent('orchestrator_stopping', data);
+                // The orchestrator we're viewing is shutting down - show notification and return to hub
+                alert('Orchestrator "' + (data.project || project) + '" is shutting down. Returning to hub view.');
+                returnToHub();
+            });
+            proxyEvtSource.onerror = () => {
+                addEvent('connection_error', { proxied: true });
+                // If we lose connection to a proxied orchestrator, return to hub after a delay
+                // This handles the case where the orchestrator shuts down
+                setTimeout(() => {
+                    if (viewingOrchestrator === project) {
+                        addEvent('proxy_disconnected', { project: project });
+                        returnToHub();
+                    }
+                }, 3000);
+            };
 
             // Store the proxied event source
             window.currentProxyEvtSource = proxyEvtSource;
