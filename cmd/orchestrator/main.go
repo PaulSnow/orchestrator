@@ -363,9 +363,9 @@ OPTIONS`)
 		fmt.Printf("  Dashboard: http://localhost:%d\n", *webPort)
 		defer dashboardServer.Stop()
 
-		// Register this orchestrator in the global registry
+		// Register this orchestrator with daemon and file registry
 		if !*dryRun {
-			if err := orchestrator.RegisterOrchestrator(
+			if err := orchestrator.RegisterWithDaemon(
 				primaryCfg.Project,
 				*webPort,
 				primaryCfg.ConfigPath,
@@ -374,7 +374,7 @@ OPTIONS`)
 			); err != nil {
 				fmt.Printf("  Warning: Failed to register orchestrator: %v\n", err)
 			}
-			defer orchestrator.DeregisterOrchestrator()
+			defer orchestrator.DeregisterFromDaemon()
 		}
 	}
 
@@ -639,7 +639,7 @@ OPTIONS`)
 
 		// Orchestration complete
 		events.SetPhase(orchestrator.PhaseCompleted, "all work done")
-		orchestrator.UpdateOrchestratorStatus(orchestrator.StatusCompleted)
+		orchestrator.UpdateDaemonStatus(orchestrator.StatusCompleted)
 		fmt.Println()
 		fmt.Println("Orchestration complete.")
 	}
@@ -687,8 +687,8 @@ func cmdReview(args []string) {
 		fmt.Printf("Dashboard: http://localhost:%d\n", *webPort)
 		fmt.Println()
 
-		// Register this orchestrator in the global registry
-		if err := orchestrator.RegisterOrchestrator(
+		// Register this orchestrator with daemon and file registry
+		if err := orchestrator.RegisterWithDaemon(
 			primaryCfg.Project,
 			*webPort,
 			primaryCfg.ConfigPath,
@@ -697,7 +697,7 @@ func cmdReview(args []string) {
 		); err != nil {
 			fmt.Printf("Warning: Failed to register orchestrator: %v\n", err)
 		}
-		defer orchestrator.DeregisterOrchestrator()
+		defer orchestrator.DeregisterFromDaemon()
 	}
 
 	// Run review
