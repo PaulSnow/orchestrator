@@ -364,6 +364,15 @@ func isProcessRunning(pid int) bool {
 	return err == nil
 }
 
+// ConnectivityStatus represents the online/offline status of an orchestrator.
+type ConnectivityStatus string
+
+const (
+	ConnectivityOnline   ConnectivityStatus = "online"
+	ConnectivityOffline  ConnectivityStatus = "offline"
+	ConnectivityChecking ConnectivityStatus = "checking"
+)
+
 // OrchestratorInfo represents enriched orchestrator information for the API.
 type OrchestratorInfo struct {
 	Project      string             `json:"project"`
@@ -377,6 +386,10 @@ type OrchestratorInfo struct {
 	DashboardURL string             `json:"dashboard_url"`
 	Uptime       string             `json:"uptime"`
 	IsCurrent    bool               `json:"is_current"`
+	// Connectivity indicates if the orchestrator's dashboard is reachable
+	Connectivity ConnectivityStatus `json:"connectivity"`
+	// LastSeen is the timestamp when the orchestrator was last seen online (for offline orchestrators)
+	LastSeen string `json:"last_seen,omitempty"`
 }
 
 // GetOrchestratorInfos returns enriched orchestrator information.
@@ -409,7 +422,38 @@ func (rm *RegistryManager) GetOrchestratorInfos() ([]OrchestratorInfo, error) {
 			info.Uptime = formatUptime(uptime)
 		}
 
+		// Default connectivity to checking (will be enriched by caller if needed)
+		if entry.PID == currentPID {
+			info.Connectivity = ConnectivityOnline
+		} else {
+			info.Connectivity = ConnectivityChecking
+		}
+
 		infos = append(infos, info)
+	}
+
+	return infos, nil
+}
+
+// GetOrchestratorInfosWithConnectivity returns enriched orchestrator information
+// with connectivity status from the provided ConnectivityChecker.
+func (rm *RegistryManager) GetOrchestratorInfosWithConnectivity(cc *ConnectivityChecker) ([]OrchestratorInfo, error) {
+	infos, err := rm.GetOrchestratorInfos()
+	if err != nil {
+		return nil, err
+	}
+
+	if cc == nil {
+		return infos, nil
+	}
+
+	// Enrich with connectivity status
+	for i := range infos {
+		status, lastSeen := cc.GetStatus(infos[i].Project)
+		infos[i].Connectivity = status
+		if status == ConnectivityOffline && !lastSeen.IsZero() {
+			infos[i].LastSeen = lastSeen.Format(time.RFC3339)
+		}
 	}
 
 	return infos, nil
