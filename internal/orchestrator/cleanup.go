@@ -8,20 +8,22 @@ import (
 	"strings"
 )
 
-// RunCleanup cleans up tmux session, signal files, and optionally worktrees.
+// RunCleanup stops worker processes, cleans signal files, and optionally removes worktrees.
 func RunCleanup(cfg *RunConfig, keepWorktrees bool) {
 	fmt.Println("+" + strings.Repeat("=", 38) + "+")
 	fmt.Println("|  Orchestrator Cleanup                 |")
 	fmt.Println("+" + strings.Repeat("=", 38) + "+")
 	fmt.Println()
 
-	// Kill tmux session
-	if SessionExists(cfg.TmuxSession) {
-		fmt.Printf("Killing tmux session: %s\n", cfg.TmuxSession)
-		KillSession(cfg.TmuxSession)
+	// Stop all worker processes
+	pm := GetProcessManager()
+	runningWorkers := pm.GetRunningWorkers()
+	if len(runningWorkers) > 0 {
+		fmt.Printf("Stopping %d worker processes...\n", len(runningWorkers))
+		pm.StopAll()
 		fmt.Println("  Done.")
 	} else {
-		fmt.Printf("No tmux session '%s' found.\n", cfg.TmuxSession)
+		fmt.Println("No running worker processes found.")
 	}
 
 	// Clean signal files

@@ -36,7 +36,21 @@ func LogMsg(msg string) {
 	fmt.Printf("[%s] %s\n", now, msg)
 }
 
-// BuildClaudeCmd builds the tmux command string with deadman's switch bookends.
+// LaunchWorkerProcess launches a worker as a direct subprocess (no tmux).
+// This is the new approach that replaces tmux-based worker launching.
+func LaunchWorkerProcess(
+	worktree, promptPath, logFile, signalFile string,
+	workerID, issueNum int,
+	stage string,
+	appendLog bool,
+) error {
+	pm := GetProcessManager()
+	return pm.LaunchWorker(workerID, issueNum, stage, worktree, promptPath, logFile, signalFile)
+}
+
+// BuildClaudeCmd builds the shell command string with deadman's switch bookends.
+// Deprecated: Use LaunchWorkerProcess for direct subprocess management.
+// Kept for backwards compatibility during transition.
 func BuildClaudeCmd(
 	worktree, promptPath, logFile, signalFile string,
 	workerID, issueNum int,
@@ -67,11 +81,12 @@ func BuildClaudeCmd(
 }
 
 // CollectWorkerSnapshot collects a point-in-time snapshot of a worker's state.
+// Note: tmuxSession parameter is deprecated and unused; kept for API compatibility.
 func CollectWorkerSnapshot(
 	workerID int,
 	cfg *RunConfig,
 	state *StateManager,
-	tmuxSession string,
+	_ string,
 ) *WorkerSnapshot {
 	worker := state.LoadWorker(workerID)
 	if worker == nil {
@@ -91,14 +106,8 @@ func CollectWorkerSnapshot(
 		}
 	}
 
-	session := tmuxSession
-	if session == "" {
-		session = cfg.TmuxSession
-	}
-
-	// Check if claude is running in this tmux window
-	panePID := GetPanePID(session, fmt.Sprintf("worker-%d", workerID))
-	claudeRunning := IsClaudeRunning(panePID)
+	// Check if claude is running using direct process management
+	claudeRunning := IsClaudeRunningDirect(workerID)
 
 	// Check signal file
 	exitCode := state.ReadSignal(workerID)
@@ -399,8 +408,10 @@ func ExecuteDecision(decision *Decision, cfg *RunConfig, state *StateManager) {
 		logFile := state.LogPath(workerID)
 		signalFile := state.SignalPath(workerID)
 
-		SendCommand(cfg.TmuxSession, fmt.Sprintf("worker-%d", workerID),
-			BuildClaudeCmd(newWt, promptPath, logFile, signalFile, workerID, *newIssueNum, stageName, false))
+		// Launch worker as direct subprocess
+		if err := LaunchWorkerProcess(newWt, promptPath, logFile, signalFile, workerID, *newIssueNum, stageName, false); err != nil {
+			LogMsg(fmt.Sprintf("WARNING: failed to launch worker %d: %v", workerID, err))
+		}
 
 		state.LogEvent(map[string]any{"action": "reassign", "worker": workerID, "new_issue": newIssueNum})
 		// Log to activity log
@@ -466,7 +477,8 @@ func ExecuteDecision(decision *Decision, cfg *RunConfig, state *StateManager) {
 		worker.Stage = stageName
 		state.SaveWorker(worker)
 
-		SendCtrlC(cfg.TmuxSession, fmt.Sprintf("worker-%d", workerID))
+		// Stop the current worker process
+		GetProcessManager().StopWorker(workerID)
 		time.Sleep(2 * time.Second)
 
 		state.ClearSignal(workerID)
@@ -474,8 +486,10 @@ func ExecuteDecision(decision *Decision, cfg *RunConfig, state *StateManager) {
 		logFile := state.LogPath(workerID)
 		signalFile := state.SignalPath(workerID)
 
-		SendCommand(cfg.TmuxSession, fmt.Sprintf("worker-%d", workerID),
-			BuildClaudeCmd(worker.Worktree, promptPath, logFile, signalFile, workerID, issueNum, stageName, false))
+		// Launch worker as direct subprocess
+		if err := LaunchWorkerProcess(worker.Worktree, promptPath, logFile, signalFile, workerID, issueNum, stageName, false); err != nil {
+			LogMsg(fmt.Sprintf("WARNING: failed to restart worker %d: %v", workerID, err))
+		}
 
 		state.LogEvent(map[string]any{
 			"action": "restart", "worker": workerID,
@@ -545,8 +559,10 @@ func ExecuteDecision(decision *Decision, cfg *RunConfig, state *StateManager) {
 		logFile := state.LogPath(workerID)
 		signalFile := state.SignalPath(workerID)
 
-		SendCommand(cfg.TmuxSession, fmt.Sprintf("worker-%d", workerID),
-			BuildClaudeCmd(worker.Worktree, promptPath, logFile, signalFile, workerID, *issueNum, nextStage, true))
+		// Launch worker as direct subprocess
+		if err := LaunchWorkerProcess(worker.Worktree, promptPath, logFile, signalFile, workerID, *issueNum, nextStage, true); err != nil {
+			LogMsg(fmt.Sprintf("WARNING: failed to advance worker %d: %v", workerID, err))
+		}
 
 		state.LogEvent(map[string]any{
 			"action": "advance_stage", "worker": workerID,
@@ -672,8 +688,10 @@ func ExecuteDecision(decision *Decision, cfg *RunConfig, state *StateManager) {
 		logFile := state.LogPath(workerID)
 		signalFile := state.SignalPath(workerID)
 
-		SendCommand(cfg.TmuxSession, fmt.Sprintf("worker-%d", workerID),
-			BuildClaudeCmd(newWt, promptPath, logFile, signalFile, workerID, *newIssueNum, stageName, false))
+		// Launch worker as direct subprocess
+		if err := LaunchWorkerProcess(newWt, promptPath, logFile, signalFile, workerID, *newIssueNum, stageName, false); err != nil {
+			LogMsg(fmt.Sprintf("WARNING: failed to launch worker %d: %v", workerID, err))
+		}
 
 		state.LogEvent(map[string]any{
 			"action": "reassign_cross", "worker": workerID,
@@ -765,7 +783,8 @@ func ExecuteDecision(decision *Decision, cfg *RunConfig, state *StateManager) {
 		state.ClearSignal(workerID)
 		state.TruncateLog(workerID)
 
-		SendCtrlC(cfg.TmuxSession, fmt.Sprintf("worker-%d", workerID))
+		// Stop any existing worker process
+		GetProcessManager().StopWorker(workerID)
 		time.Sleep(1 * time.Second)
 
 		promptPath := state.PromptPath(workerID)
@@ -775,8 +794,10 @@ func ExecuteDecision(decision *Decision, cfg *RunConfig, state *StateManager) {
 		logFile := state.LogPath(workerID)
 		signalFile := state.SignalPath(workerID)
 
-		SendCommand(cfg.TmuxSession, fmt.Sprintf("worker-%d", workerID),
-			BuildClaudeCmd(newWt, promptPath, logFile, signalFile, workerID, *newIssueNum, "retry_analyze", false))
+		// Launch worker as direct subprocess
+		if err := LaunchWorkerProcess(newWt, promptPath, logFile, signalFile, workerID, *newIssueNum, "retry_analyze", false); err != nil {
+			LogMsg(fmt.Sprintf("WARNING: failed to launch worker %d for retry_analyze: %v", workerID, err))
+		}
 
 		state.LogEvent(map[string]any{
 			"action": "retry_failed", "worker": workerID,
@@ -805,7 +826,8 @@ func ExecuteDecision(decision *Decision, cfg *RunConfig, state *StateManager) {
 }
 
 // HandleRetryPhase handles retry phase progression (analyze -> explore -> implement).
-func HandleRetryPhase(workerID int, cfg *RunConfig, state *StateManager, tmuxSession string) bool {
+// Note: tmuxSession parameter is deprecated and unused; kept for API compatibility.
+func HandleRetryPhase(workerID int, cfg *RunConfig, state *StateManager, _ string) bool {
 	worker := state.LoadWorker(workerID)
 	if worker == nil || (worker.Stage != "retry_analyze" && worker.Stage != "retry_explore") {
 		return false
@@ -847,8 +869,10 @@ func HandleRetryPhase(workerID int, cfg *RunConfig, state *StateManager, tmuxSes
 		logFile := state.LogPath(workerID)
 		signalFile := state.SignalPath(workerID)
 
-		SendCommand(tmuxSession, fmt.Sprintf("worker-%d", workerID),
-			BuildClaudeCmd(worker.Worktree, promptPath, logFile, signalFile, workerID, *worker.IssueNumber, "retry_explore", true))
+		// Launch worker as direct subprocess for retry_explore
+		if err := LaunchWorkerProcess(worker.Worktree, promptPath, logFile, signalFile, workerID, *worker.IssueNumber, "retry_explore", true); err != nil {
+			LogMsg(fmt.Sprintf("WARNING: failed to launch worker %d for retry_explore: %v", workerID, err))
+		}
 
 		state.LogEvent(map[string]any{
 			"action": "retry_phase", "worker": workerID,
@@ -876,8 +900,10 @@ func HandleRetryPhase(workerID int, cfg *RunConfig, state *StateManager, tmuxSes
 
 		signalFile := state.SignalPath(workerID)
 
-		SendCommand(tmuxSession, fmt.Sprintf("worker-%d", workerID),
-			BuildClaudeCmd(worker.Worktree, promptPath, logFile, signalFile, workerID, *worker.IssueNumber, stageName, true))
+		// Launch worker as direct subprocess
+		if err := LaunchWorkerProcess(worker.Worktree, promptPath, logFile, signalFile, workerID, *worker.IssueNumber, stageName, true); err != nil {
+			LogMsg(fmt.Sprintf("WARNING: failed to launch worker %d for %s: %v", workerID, stageName, err))
+		}
 
 		state.LogEvent(map[string]any{
 			"action": "retry_phase", "worker": workerID,
