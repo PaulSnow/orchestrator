@@ -452,6 +452,7 @@ func (ds *DaemonServer) handleDashboard(w http.ResponseWriter, r *http.Request) 
 // handleIdleState returns empty state for offline mode.
 func (ds *DaemonServer) handleIdleState(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
 
 	// Detect repo from current directory
 	project := "No Repository"
@@ -460,20 +461,22 @@ func (ds *DaemonServer) handleIdleState(w http.ResponseWriter, r *http.Request) 
 		project = repoInfo.Owner + "/" + repoInfo.Name
 	}
 
+	// Match the format expected by dashboard JS (same as DashboardServer.buildStateResponse)
 	state := map[string]any{
+		"phase":           "idle",
 		"project":         project,
 		"version":         Version,
+		"repos":           []map[string]any{},
+		"config_path":     "",
+		"started_at":      time.Now().Format(time.RFC3339),
 		"elapsed_seconds": 0,
-		"phase":           "idle",
-		"repos":           map[string]any{},
-		"stats": map[string]int{
-			"total":       0,
-			"completed":   0,
-			"in_progress": 0,
-			"pending":     0,
-			"failed":      0,
-			"pr_pending":  0,
-		},
+		"total_issues":    0,
+		"completed":       0,
+		"in_progress":     0,
+		"pending":         0,
+		"failed":          0,
+		"active_workers":  0,
+		"total_workers":   0,
 	}
 	json.NewEncoder(w).Encode(state)
 }
