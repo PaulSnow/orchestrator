@@ -75,6 +75,9 @@ func (ds *DashboardServer) Start() error {
 	mux.HandleFunc("/api/metrics", ds.handleMetrics)
 	mux.HandleFunc("/api/activity", ds.handleActivity)
 
+	// Action endpoints
+	mux.HandleFunc("/api/open-tmux", ds.handleOpenTmux)
+
 	// Dashboard HTML
 	mux.HandleFunc("/", ds.handleDashboard)
 
@@ -540,9 +543,55 @@ func (ds *DashboardServer) handleActivity(w http.ResponseWriter, r *http.Request
 	json.NewEncoder(w).Encode(events)
 }
 
+// handleOpenTmux opens a terminal with tmux attached to the session.
+func (ds *DashboardServer) handleOpenTmux(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+
+	session := ds.cfg.TmuxSession
+	if session == "" {
+		session = ds.cfg.Project
+	}
+
+	// Try different terminal emulators
+	terminals := []struct {
+		cmd  string
+		args []string
+	}{
+		{"gnome-terminal", []string{"--", "tmux", "attach", "-t", session}},
+		{"konsole", []string{"-e", "tmux", "attach", "-t", session}},
+		{"xfce4-terminal", []string{"-e", "tmux attach -t " + session}},
+		{"xterm", []string{"-e", "tmux", "attach", "-t", session}},
+	}
+
+	var launched bool
+	for _, term := range terminals {
+		cmd := exec.Command(term.cmd, term.args...)
+		if err := cmd.Start(); err == nil {
+			launched = true
+			json.NewEncoder(w).Encode(map[string]any{
+				"success": true,
+				"message": "Opened " + term.cmd + " with tmux session: " + session,
+			})
+			break
+		}
+	}
+
+	if !launched {
+		json.NewEncoder(w).Encode(map[string]any{
+			"success": false,
+			"error":   "Could not find a terminal emulator",
+			"command": "tmux attach -t " + session,
+		})
+	}
+}
+
 // handleDashboard serves the HTML dashboard.
 func (ds *DashboardServer) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html")
+	w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
+	w.Header().Set("Pragma", "no-cache")
+	w.Header().Set("Expires", "0")
 	fmt.Fprint(w, dashboardHTML)
 }
 
@@ -709,15 +758,54 @@ const dashboardHTML = `<!DOCTYPE html>
         .event-time { color: #666; margin-right: 10px; }
         .event-type { color: #00d9ff; margin-right: 10px; }
 
-        /* Gate result */
-        .gate-result {
-            padding: 20px;
-            border-radius: 8px;
+        /* Control Panel */
+        .control-panel {
+            display: flex;
+            gap: 20px;
             margin-bottom: 20px;
+            padding: 15px;
+            background: #16213e;
+            border-radius: 8px;
         }
-        .gate-passed { background: #0a3d1a; border: 2px solid #00ff88; }
-        .gate-failed { background: #3d0a0a; border: 2px solid #ff4444; }
-        .gate-pending { background: #16213e; border: 2px solid #666; }
+        .control-section {
+            flex: 1;
+        }
+        .control-section h3 {
+            margin: 0 0 10px 0;
+            font-size: 12px;
+            text-transform: uppercase;
+            color: #888;
+        }
+        .control-btn {
+            background: #0a3d5c;
+            border: 1px solid #00d9ff;
+            color: #00d9ff;
+            padding: 8px 16px;
+            border-radius: 4px;
+            cursor: pointer;
+            margin-right: 8px;
+            margin-bottom: 8px;
+            font-size: 12px;
+        }
+        .control-btn:hover {
+            background: #0d4a6f;
+        }
+        #orchestrator-count {
+            font-size: 14px;
+            margin-bottom: 8px;
+        }
+        .orch-link-item {
+            display: inline-block;
+            margin-right: 10px;
+            margin-bottom: 5px;
+        }
+        .orch-link-item a {
+            color: #00d9ff;
+            text-decoration: none;
+        }
+        .orch-link-item a:hover {
+            text-decoration: underline;
+        }
 
         /* Orchestrators section */
         .orchestrators-section {
@@ -780,9 +868,18 @@ const dashboardHTML = `<!DOCTYPE html>
             <div class="phase" data-phase="completed">Done</div>
         </div>
 
-        <div id="gate-result" class="gate-result gate-pending" style="display: none;">
-            <h3>Gate Status: <span id="gate-status">Pending</span></h3>
-            <p id="gate-summary"></p>
+        <!-- Control Panel -->
+        <div class="control-panel">
+            <div class="control-section">
+                <h3>Orchestrators</h3>
+                <div id="orchestrator-count">Checking...</div>
+                <div id="orchestrator-links"></div>
+            </div>
+            <div class="control-section">
+                <h3>Actions</h3>
+                <button class="control-btn" onclick="openTmux()">Open tmux session</button>
+                <button class="control-btn" onclick="refreshState()">Refresh state</button>
+            </div>
         </div>
 
         <div class="progress-section">
@@ -977,11 +1074,50 @@ const dashboardHTML = `<!DOCTYPE html>
         }
 
         function updateGateResult(data) {
-            const el = document.getElementById('gate-result');
-            el.style.display = 'block';
-            el.className = 'gate-result ' + (data.passed ? 'gate-passed' : 'gate-failed');
-            document.getElementById('gate-status').textContent = data.passed ? 'PASSED' : 'FAILED';
-            document.getElementById('gate-summary').textContent = data.summary || '';
+            // Gate result display removed - was showing stale data
+        }
+
+        function updateControlPanel(orchestrators) {
+            const count = orchestrators.length;
+            const others = orchestrators.filter(o => !o.is_current);
+
+            const countEl = document.getElementById('orchestrator-count');
+            if (count === 1) {
+                countEl.innerHTML = '<span style="color:#00ff88">1 orchestrator running</span> (this one)';
+            } else {
+                countEl.innerHTML = '<span style="color:#00d9ff">' + count + ' orchestrators running</span>';
+            }
+
+            const linksEl = document.getElementById('orchestrator-links');
+            if (others.length === 0) {
+                linksEl.innerHTML = '<span style="color:#666">No other orchestrators</span>';
+            } else {
+                linksEl.innerHTML = others.map(o =>
+                    '<span class="orch-link-item"><a href="' + o.dashboard_url + '" target="_blank">' +
+                    o.project + '</a> (' + o.status + ')</span>'
+                ).join('');
+            }
+        }
+
+        function openTmux() {
+            fetch('/api/open-tmux', {method: 'POST'})
+                .then(r => r.json())
+                .then(data => {
+                    if (!data.success) {
+                        alert('Could not open terminal. Run manually:\\n\\ntmux attach -t "' + (state.project || 'orchestrator') + '"');
+                    }
+                })
+                .catch(() => {
+                    alert('Error opening terminal');
+                });
+        }
+
+        function refreshState() {
+            fetch('/api/state').then(r => r.json()).then(updateState);
+            fetch('/api/workers').then(r => r.json()).then(updateWorkers);
+            fetch('/api/issues').then(r => r.json()).then(updateIssues);
+            fetch('/api/progress').then(r => r.json()).then(updateProgress);
+            fetch('/api/orchestrators').then(r => r.json()).then(updateControlPanel).catch(() => {});
         }
 
         function updateOrchestrators(data) {
@@ -1016,6 +1152,7 @@ const dashboardHTML = `<!DOCTYPE html>
                 .then(data => {
                     if (!data.error) {
                         updateOrchestrators(data);
+                        updateControlPanel(data);
                     }
                 })
                 .catch(() => {});
@@ -1027,18 +1164,15 @@ const dashboardHTML = `<!DOCTYPE html>
             fetch('/api/workers').then(r => r.json()),
             fetch('/api/issues').then(r => r.json()),
             fetch('/api/progress').then(r => r.json()),
-            fetch('/api/gate-result').then(r => r.json()).catch(() => null),
             fetch('/api/orchestrators').then(r => r.json()).catch(() => [])
-        ]).then(([stateData, workersData, issuesData, progressData, gateData, orchestratorsData]) => {
+        ]).then(([stateData, workersData, issuesData, progressData, orchestratorsData]) => {
             updateState(stateData);
             updateWorkers(workersData);
             updateIssues(issuesData);
             updateProgress(progressData);
-            if (gateData && !gateData.error) {
-                updateGateResult(gateData);
-            }
             if (orchestratorsData && !orchestratorsData.error) {
                 updateOrchestrators(orchestratorsData);
+                updateControlPanel(orchestratorsData);
             }
         });
 

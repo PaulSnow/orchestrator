@@ -26,6 +26,10 @@ const (
 	InconsistencyFileMemoryMismatch InconsistencyType = "file_memory_mismatch"
 	// InconsistencyIssueAssignedToMultiple - same issue assigned to multiple workers
 	InconsistencyIssueAssignedToMultiple InconsistencyType = "issue_assigned_to_multiple"
+	// InconsistencyOrchestratorStuck - all workers idle but pending issues blocked by failed deps
+	InconsistencyOrchestratorStuck InconsistencyType = "orchestrator_stuck"
+	// InconsistencyDashboardStateMismatch - dashboard reports different state than backend
+	InconsistencyDashboardStateMismatch InconsistencyType = "dashboard_state_mismatch"
 )
 
 // Inconsistency represents a detected state inconsistency.
@@ -68,6 +72,196 @@ func (cc *ConsistencyChecker) CheckAll() []Inconsistency {
 	issues = append(issues, cc.checkWorkerState()...)
 	issues = append(issues, cc.checkFileVsMemory()...)
 	issues = append(issues, cc.checkDuplicateAssignments()...)
+	issues = append(issues, cc.checkOrchestratorStuck()...)
+
+	return issues
+}
+
+// ScanAndFixCompletedWork scans ALL issues and marks any with completed local work as done.
+// This is instant - just checks local branches, no network calls.
+// The orchestrator does all work locally, so if commits exist, work is done.
+func (cc *ConsistencyChecker) ScanAndFixCompletedWork() int {
+	fixed := 0
+
+	repo, _ := cc.cfg.PrimaryRepo()
+	if repo == nil {
+		return 0
+	}
+
+	for _, issue := range cc.cfg.Issues {
+		// Skip already completed or failed issues
+		if issue.Status == "completed" || issue.Status == "failed" {
+			continue
+		}
+
+		branchName := repo.BranchPrefix + fmt.Sprintf("%d", issue.Number)
+		worktreePath := repo.WorktreeBase + "/issue-" + fmt.Sprintf("%d", issue.Number)
+
+		// Check if branch is ready for review:
+		// - Has commits beyond base
+		// - Worktree is clean (no uncommitted changes = not still working)
+		if !BranchReadyForReview(worktreePath, branchName, repo.DefaultBranch) {
+			continue
+		}
+
+		_, _, commitCount := LocalBranchHasWork(repo.Path, branchName, repo.DefaultBranch)
+
+		// Check if there's an active worker on this issue
+		hasActiveWorker := false
+		for i := 1; i <= cc.cfg.NumWorkers; i++ {
+			worker := cc.state.LoadWorker(i)
+			if worker != nil && worker.IssueNumber != nil && *worker.IssueNumber == issue.Number {
+				// Worker is assigned - check if it's actually running Claude
+				panePID := GetPanePID(cc.cfg.TmuxSession, fmt.Sprintf("worker-%d", i))
+				if IsClaudeRunning(panePID) {
+					hasActiveWorker = true
+					break
+				}
+			}
+		}
+
+		if !hasActiveWorker {
+			// No active worker, clean worktree, has commits - mark complete
+			commits := GetLocalBranchCommits(repo.Path, branchName, repo.DefaultBranch, 3)
+			LogMsg(fmt.Sprintf("[auto-complete] Issue #%d has %d commits on %s (clean worktree, no active worker):", issue.Number, commitCount, branchName))
+			for _, line := range strings.Split(commits, "\n") {
+				if line != "" {
+					LogMsg(fmt.Sprintf("  %s", line))
+				}
+			}
+
+			// Clear any worker that thinks it's working on this
+			for i := 1; i <= cc.cfg.NumWorkers; i++ {
+				worker := cc.state.LoadWorker(i)
+				if worker != nil && worker.IssueNumber != nil && *worker.IssueNumber == issue.Number {
+					worker.Status = "idle"
+					worker.IssueNumber = nil
+					worker.SourceConfig = ""
+					cc.state.SaveWorker(worker)
+					cc.state.ClearSignal(i)
+					LogMsg(fmt.Sprintf("[auto-complete] Cleared worker %d from issue #%d", i, issue.Number))
+				}
+			}
+
+			// Push the branch first (in case it wasn't pushed yet)
+			if !PushBranch(worktreePath, "", branchName) {
+				// Try pushing from main repo if worktree push fails
+				PushBranch(repo.Path, "", branchName)
+			}
+
+			// Mark issue as completed
+			cc.state.UpdateIssueStatus(issue.Number, "completed", nil)
+			LogMsg(fmt.Sprintf("[auto-complete] Marked issue #%d as completed", issue.Number))
+
+			// Create PR for this issue
+			prURL, err := CreatePRForIssue(issue.Number, issue.Title, branchName, cc.cfg)
+			if err != nil {
+				LogMsg(fmt.Sprintf("[auto-complete] WARNING: failed to create PR for #%d: %v", issue.Number, err))
+			} else if prURL != "" {
+				LogMsg(fmt.Sprintf("[auto-complete] Created PR for #%d: %s", issue.Number, prURL))
+			}
+
+			// Update epic checkbox
+			if cc.cfg.EpicNumber > 0 && cc.cfg.EpicURL != "" {
+				if err := UpdateEpicCheckbox(cc.cfg.EpicURL, issue.Number, true); err != nil {
+					LogMsg(fmt.Sprintf("[auto-complete] WARNING: failed to update epic for #%d: %v", issue.Number, err))
+				}
+			}
+
+			// Emit events
+			GetActivityLogger().LogIssueCompleted(issue.Number, 0)
+			if eb := GetGlobalEventBroadcaster(); eb != nil {
+				eb.EmitIssueStatus(issue.Number, issue.Title, "completed", nil)
+			}
+
+			fixed++
+		}
+	}
+
+	return fixed
+}
+
+// checkOrchestratorStuck detects when orchestrator is stuck:
+// all workers idle but pending issues remain blocked by failed dependencies.
+func (cc *ConsistencyChecker) checkOrchestratorStuck() []Inconsistency {
+	var issues []Inconsistency
+
+	// Check if all workers are idle
+	allIdle := true
+	for i := 1; i <= cc.cfg.NumWorkers; i++ {
+		worker := cc.state.LoadWorker(i)
+		if worker != nil && worker.Status == "running" {
+			allIdle = false
+			break
+		}
+	}
+
+	if !allIdle {
+		return issues
+	}
+
+	// Count pending issues
+	pendingCount := 0
+	for _, issue := range cc.cfg.Issues {
+		if issue.Status == "pending" {
+			pendingCount++
+		}
+	}
+
+	if pendingCount == 0 {
+		return issues
+	}
+
+	// Check if any pending issue can be scheduled
+	completed := cc.state.GetCompletedIssues()
+	inProgress := GetInProgressIssues(cc.cfg)
+	nextIssue := NextAvailableIssue(cc.cfg, completed, inProgress)
+
+	if nextIssue != nil {
+		return issues // There's work that can be done
+	}
+
+	// Find which failed issues are blocking progress
+	failedBlockers := make(map[int][]int) // failed issue -> list of pending issues it blocks
+	for _, issue := range cc.cfg.Issues {
+		if issue.Status != "pending" {
+			continue
+		}
+		for _, dep := range issue.DependsOn {
+			depIssue := cc.cfg.GetIssue(dep)
+			if depIssue != nil && depIssue.Status == "failed" {
+				failedBlockers[dep] = append(failedBlockers[dep], issue.Number)
+			}
+		}
+	}
+
+	if len(failedBlockers) > 0 {
+		var blockerDetails []map[string]any
+		for failedNum, blocked := range failedBlockers {
+			failedIssue := cc.cfg.GetIssue(failedNum)
+			title := ""
+			if failedIssue != nil {
+				title = failedIssue.Title
+			}
+			blockerDetails = append(blockerDetails, map[string]any{
+				"failed_issue":  failedNum,
+				"title":         title,
+				"blocks_issues": blocked,
+			})
+		}
+
+		issues = append(issues, Inconsistency{
+			Type:        InconsistencyOrchestratorStuck,
+			Description: fmt.Sprintf("Orchestrator stuck: %d pending issues blocked by %d failed dependencies", pendingCount, len(failedBlockers)),
+			DetectedAt:  time.Now(),
+			AutoFixable: true, // Will retry failed issues
+			SuggestedFix: "Retry failed issues that block pending work",
+			Details: map[string]any{
+				"pending_count":   pendingCount,
+				"failed_blockers": blockerDetails,
+			},
+		})
+	}
 
 	return issues
 }
@@ -114,11 +308,21 @@ func (cc *ConsistencyChecker) checkBranchVsStatus() []Inconsistency {
 		}
 
 		if issue.Status == "in_progress" && hasRemoteBranch && hasCommits {
-			// Check if the branch has a merged PR or complete work
-			if cc.branchAppearsComplete(branchName, issue.Number) {
+			// Check if there's an active worker on this issue - if so, don't auto-complete
+			hasActiveWorker := false
+			for i := 1; i <= cc.cfg.NumWorkers; i++ {
+				worker := cc.state.LoadWorker(i)
+				if worker != nil && worker.IssueNumber != nil && *worker.IssueNumber == issue.Number && worker.Status == "running" {
+					hasActiveWorker = true
+					break
+				}
+			}
+
+			// Only flag if no worker is actively working AND branch appears complete
+			if !hasActiveWorker && cc.branchAppearsComplete(branchName, issue.Number) {
 				issues = append(issues, Inconsistency{
 					Type:        InconsistencyBranchExistsButInProgress,
-					Description: fmt.Sprintf("Issue #%d is in_progress but branch %s appears complete", issue.Number, branchName),
+					Description: fmt.Sprintf("Issue #%d is in_progress but branch %s appears complete (no active worker)", issue.Number, branchName),
 					IssueNumber: &issue.Number,
 					DetectedAt:  time.Now(),
 					AutoFixable: true,
@@ -351,6 +555,19 @@ func (cc *ConsistencyChecker) AutoFix(inc Inconsistency) error {
 			}
 		}
 
+	case InconsistencyOrchestratorStuck:
+		// Reset failed issues that block pending work back to pending
+		if inc.Details != nil {
+			if blockers, ok := inc.Details["failed_blockers"].([]map[string]any); ok {
+				for _, blocker := range blockers {
+					if failedNum, ok := blocker["failed_issue"].(int); ok {
+						cc.state.UpdateIssueStatus(failedNum, "pending", nil)
+						LogMsg(fmt.Sprintf("[consistency] Auto-fixed: reset failed issue #%d to pending for retry", failedNum))
+					}
+				}
+			}
+		}
+
 	default:
 		return fmt.Errorf("unknown inconsistency type: %s", inc.Type)
 	}
@@ -365,8 +582,18 @@ func (cc *ConsistencyChecker) LaunchFixerSession(inconsistencies []Inconsistency
 	}
 
 	// Create a prompt file describing the issues
-	promptDir := filepath.Join(cc.cfg.StateDir, "fixer")
-	os.MkdirAll(promptDir, 0755)
+	// Use OrchRoot if StateDir is empty (epic-based config)
+	baseDir := cc.cfg.StateDir
+	if baseDir == "" {
+		baseDir = cc.cfg.OrchRoot
+	}
+	if baseDir == "" {
+		baseDir = "."
+	}
+	promptDir := filepath.Join(baseDir, "fixer")
+	if err := os.MkdirAll(promptDir, 0755); err != nil {
+		return fmt.Errorf("create fixer dir: %w", err)
+	}
 
 	promptPath := filepath.Join(promptDir, "fixer-prompt.md")
 	logPath := filepath.Join(promptDir, "fixer.log")
@@ -424,10 +651,14 @@ func (cc *ConsistencyChecker) LaunchFixerSession(inconsistencies []Inconsistency
 		}
 	}
 
-	// Build the claude command
+	// Build the claude command - use -p to run in print mode with the prompt file content
+	workDir := cc.cfg.OrchRoot
+	if workDir == "" {
+		workDir = "."
+	}
 	claudeCmd := fmt.Sprintf(
-		"cd %s && claude --print-prompt %s 2>&1 | tee %s",
-		cc.cfg.OrchRoot,
+		"cd %s && claude -p \"$(cat %s)\" 2>&1 | tee %s",
+		workDir,
 		promptPath,
 		logPath,
 	)

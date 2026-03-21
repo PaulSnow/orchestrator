@@ -10,7 +10,7 @@ import (
 )
 
 // Helper to create a test config with TempDir
-func newTestConfig(t *testing.T) *RunConfig {
+func newStateTestConfig(t *testing.T) *RunConfig {
 	t.Helper()
 	tmpDir := t.TempDir()
 	cfg := NewRunConfig()
@@ -62,7 +62,7 @@ func newTestConfigWithFile(t *testing.T) (*RunConfig, string) {
 // ============================================================================
 
 func TestNewStateManager(t *testing.T) {
-	cfg := newTestConfig(t)
+	cfg := newStateTestConfig(t)
 	sm := NewStateManager(cfg)
 
 	if sm == nil {
@@ -86,7 +86,7 @@ func TestNewStateManager(t *testing.T) {
 }
 
 func TestStateManager_EnsureDirs(t *testing.T) {
-	cfg := newTestConfig(t)
+	cfg := newStateTestConfig(t)
 	sm := NewStateManager(cfg)
 
 	// Directories should not exist yet
@@ -116,7 +116,7 @@ func TestStateManager_EnsureDirs(t *testing.T) {
 }
 
 func TestStateManager_StateDir(t *testing.T) {
-	cfg := newTestConfig(t)
+	cfg := newStateTestConfig(t)
 	sm := NewStateManager(cfg)
 
 	// Verify state directory matches config
@@ -136,7 +136,7 @@ func TestStateManager_StateDir(t *testing.T) {
 // ============================================================================
 
 func TestStateManager_InitWorker(t *testing.T) {
-	cfg := newTestConfig(t)
+	cfg := newStateTestConfig(t)
 	sm := NewStateManager(cfg)
 	sm.EnsureDirs()
 
@@ -169,7 +169,7 @@ func TestStateManager_InitWorker(t *testing.T) {
 }
 
 func TestStateManager_SaveWorker(t *testing.T) {
-	cfg := newTestConfig(t)
+	cfg := newStateTestConfig(t)
 	sm := NewStateManager(cfg)
 	sm.EnsureDirs()
 
@@ -210,7 +210,7 @@ func TestStateManager_SaveWorker(t *testing.T) {
 }
 
 func TestStateManager_LoadWorker(t *testing.T) {
-	cfg := newTestConfig(t)
+	cfg := newStateTestConfig(t)
 	sm := NewStateManager(cfg)
 	sm.EnsureDirs()
 
@@ -241,7 +241,7 @@ func TestStateManager_LoadWorker(t *testing.T) {
 }
 
 func TestStateManager_LoadWorker_NotFound(t *testing.T) {
-	cfg := newTestConfig(t)
+	cfg := newStateTestConfig(t)
 	sm := NewStateManager(cfg)
 	sm.EnsureDirs()
 
@@ -253,7 +253,7 @@ func TestStateManager_LoadWorker_NotFound(t *testing.T) {
 }
 
 func TestStateManager_LoadWorker_Corrupted(t *testing.T) {
-	cfg := newTestConfig(t)
+	cfg := newStateTestConfig(t)
 	sm := NewStateManager(cfg)
 	sm.EnsureDirs()
 
@@ -343,7 +343,7 @@ func TestStateManager_UpdateIssueStage(t *testing.T) {
 }
 
 func TestStateManager_GetIssueStatus(t *testing.T) {
-	cfg := newTestConfig(t)
+	cfg := newStateTestConfig(t)
 	sm := NewStateManager(cfg)
 
 	// GetCompletedIssues returns set of completed issues
@@ -368,7 +368,7 @@ func TestStateManager_GetIssueStatus(t *testing.T) {
 // ============================================================================
 
 func TestStateManager_SignalPath(t *testing.T) {
-	cfg := newTestConfig(t)
+	cfg := newStateTestConfig(t)
 	sm := NewStateManager(cfg)
 
 	path := sm.SignalPath(1)
@@ -394,7 +394,7 @@ func TestStateManager_SignalPath(t *testing.T) {
 }
 
 func TestStateManager_ReadSignal(t *testing.T) {
-	cfg := newTestConfig(t)
+	cfg := newStateTestConfig(t)
 	sm := NewStateManager(cfg)
 
 	// Write a signal file
@@ -427,7 +427,7 @@ func TestStateManager_ReadSignal(t *testing.T) {
 }
 
 func TestStateManager_ReadSignal_NotFound(t *testing.T) {
-	cfg := newTestConfig(t)
+	cfg := newStateTestConfig(t)
 	sm := NewStateManager(cfg)
 
 	// Clean up any existing signal file
@@ -441,7 +441,7 @@ func TestStateManager_ReadSignal_NotFound(t *testing.T) {
 }
 
 func TestStateManager_ClearSignal(t *testing.T) {
-	cfg := newTestConfig(t)
+	cfg := newStateTestConfig(t)
 	sm := NewStateManager(cfg)
 
 	// Create a signal file
@@ -470,7 +470,7 @@ func TestStateManager_ClearSignal(t *testing.T) {
 // ============================================================================
 
 func TestStateManager_LogPath(t *testing.T) {
-	cfg := newTestConfig(t)
+	cfg := newStateTestConfig(t)
 	sm := NewStateManager(cfg)
 
 	path := sm.LogPath(1)
@@ -490,7 +490,7 @@ func TestStateManager_LogPath(t *testing.T) {
 }
 
 func TestStateManager_GetLogStats(t *testing.T) {
-	cfg := newTestConfig(t)
+	cfg := newStateTestConfig(t)
 	sm := NewStateManager(cfg)
 
 	// Create a log file with known content
@@ -518,7 +518,7 @@ func TestStateManager_GetLogStats(t *testing.T) {
 }
 
 func TestStateManager_GetLogTail(t *testing.T) {
-	cfg := newTestConfig(t)
+	cfg := newStateTestConfig(t)
 	sm := NewStateManager(cfg)
 
 	// Create a log file with known content
@@ -559,7 +559,7 @@ func TestStateManager_GetLogTail(t *testing.T) {
 }
 
 func TestStateManager_TruncateLog(t *testing.T) {
-	cfg := newTestConfig(t)
+	cfg := newStateTestConfig(t)
 	sm := NewStateManager(cfg)
 
 	// Create a log file with content
@@ -588,7 +588,7 @@ func TestStateManager_TruncateLog(t *testing.T) {
 // ============================================================================
 
 func TestStateManager_PromptPath(t *testing.T) {
-	cfg := newTestConfig(t)
+	cfg := newStateTestConfig(t)
 	sm := NewStateManager(cfg)
 
 	path := sm.PromptPath(1)
@@ -618,7 +618,7 @@ func TestStateManager_PromptPath(t *testing.T) {
 // ============================================================================
 
 func TestStateManager_LogEvent(t *testing.T) {
-	cfg := newTestConfig(t)
+	cfg := newStateTestConfig(t)
 	sm := NewStateManager(cfg)
 
 	event := map[string]any{
@@ -664,7 +664,7 @@ func TestStateManager_LogEvent(t *testing.T) {
 }
 
 func TestStateManager_ReadEventLog(t *testing.T) {
-	cfg := newTestConfig(t)
+	cfg := newStateTestConfig(t)
 	sm := NewStateManager(cfg)
 
 	// Log multiple events
@@ -846,7 +846,7 @@ func TestAtomicWrite_FailsGracefully(t *testing.T) {
 // ============================================================================
 
 func TestStateManager_WorkerCache(t *testing.T) {
-	cfg := newTestConfig(t)
+	cfg := newStateTestConfig(t)
 	sm := NewStateManager(cfg)
 	sm.EnsureDirs()
 
@@ -870,7 +870,7 @@ func TestStateManager_WorkerCache(t *testing.T) {
 }
 
 func TestStateManager_CacheInvalidation(t *testing.T) {
-	cfg := newTestConfig(t)
+	cfg := newStateTestConfig(t)
 	sm := NewStateManager(cfg)
 	sm.EnsureDirs()
 

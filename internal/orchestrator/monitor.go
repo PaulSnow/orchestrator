@@ -114,6 +114,14 @@ func CollectWorkerSnapshot(
 	var gitStatus, newCommits string
 	var worktreeMtime *float64
 	if worker.Worktree != "" {
+		// Auto-fix: recreate worktree if missing
+		if _, err := os.Stat(worker.Worktree); os.IsNotExist(err) {
+			LogMsg(fmt.Sprintf("[auto-fix] Worker %d: worktree missing, recreating %s", workerID, worker.Worktree))
+			repo := cfg.RepoForIssueByNumber(*worker.IssueNumber)
+			if repo != nil {
+				CreateWorktree(repo.Path, worker.Worktree, worker.Branch, "origin/"+repo.DefaultBranch)
+			}
+		}
 		gitStatus = GetStatus(worker.Worktree)
 		worktreeMtime = GetWorktreeMtime(worker.Worktree)
 
@@ -179,6 +187,50 @@ func CollectWorkerSnapshot(
 	}
 }
 
+// CheckWorkAlreadyDone checks if an issue's work is already complete on the remote branch.
+// If work is done, it marks the issue as complete and returns true.
+// This prevents endless restarts when Claude completed work but orchestrator doesn't know.
+func CheckWorkAlreadyDone(issueNum int, cfg *RunConfig, state *StateManager) bool {
+	issue := cfg.GetIssue(issueNum)
+	if issue == nil {
+		return false
+	}
+
+	repo := cfg.RepoForIssue(issue)
+	if repo == nil {
+		return false
+	}
+
+	branchName := repo.BranchPrefix + strconv.Itoa(issueNum)
+
+	// Check if remote branch has commits
+	exists, hasWork, commitCount := RemoteBranchHasWork(repo.Path, branchName, repo.DefaultBranch)
+	if !exists || !hasWork {
+		return false
+	}
+
+	// Work exists! Log what we found
+	commits := GetRemoteBranchCommits(repo.Path, branchName, repo.DefaultBranch, 5)
+	LogMsg(fmt.Sprintf("[auto-complete] Issue #%d already has %d commits on %s:", issueNum, commitCount, branchName))
+	for _, line := range strings.Split(commits, "\n") {
+		if line != "" {
+			LogMsg(fmt.Sprintf("  %s", line))
+		}
+	}
+
+	// Mark as complete
+	LogMsg(fmt.Sprintf("[auto-complete] Marking issue #%d as completed (work already done)", issueNum))
+	state.UpdateIssueStatus(issueNum, "completed", nil)
+
+	// Log to activity log and emit events
+	GetActivityLogger().LogIssueCompleted(issueNum, 0)
+	if globalEventBroadcaster != nil {
+		globalEventBroadcaster.EmitIssueStatus(issueNum, issue.Title, "completed", nil)
+	}
+
+	return true
+}
+
 // ExecuteDecision executes a single decision.
 func ExecuteDecision(decision *Decision, cfg *RunConfig, state *StateManager) {
 	action := decision.Action
@@ -203,9 +255,13 @@ func ExecuteDecision(decision *Decision, cfg *RunConfig, state *StateManager) {
 	case "mark_complete":
 		issueNum := decision.Issue
 		var issueTitle string
+		var effCfg *RunConfig = cfg
+		var worker *Worker
+
 		if decision.SourceConfig != "" {
 			srcCfg, err := LoadConfig(decision.SourceConfig)
 			if err == nil {
+				effCfg = srcCfg
 				srcState := NewStateManager(srcCfg)
 				LogMsg(fmt.Sprintf("Marking issue #%d as completed (in %s)", *issueNum, srcCfg.Project))
 				srcState.UpdateIssueStatus(*issueNum, "completed", nil)
@@ -222,8 +278,38 @@ func ExecuteDecision(decision *Decision, cfg *RunConfig, state *StateManager) {
 				issueTitle = issue.Title
 			}
 		}
+
+		// Get worker info for branch name
+		worker = state.LoadWorker(workerID)
+		var branchName string
+		if worker != nil && worker.Branch != "" {
+			branchName = worker.Branch
+		} else {
+			// Fallback: construct branch name from issue number
+			repo, _ := effCfg.PrimaryRepo()
+			if repo != nil {
+				branchName = repo.BranchPrefix + strconv.Itoa(*issueNum)
+			}
+		}
+
+		// Create PR if branch exists
+		if branchName != "" {
+			prURL, err := CreatePRForIssue(*issueNum, issueTitle, branchName, effCfg)
+			if err != nil {
+				LogMsg(fmt.Sprintf("WARNING: failed to create PR for #%d: %v", *issueNum, err))
+			} else if prURL != "" {
+				LogMsg(fmt.Sprintf("Created PR for #%d: %s", *issueNum, prURL))
+			}
+		}
+
+		// Update epic checkbox if epic-based config
+		if effCfg.EpicNumber > 0 && effCfg.EpicURL != "" {
+			if err := UpdateEpicCheckbox(effCfg.EpicURL, *issueNum, true); err != nil {
+				LogMsg(fmt.Sprintf("WARNING: failed to update epic checkbox for #%d: %v", *issueNum, err))
+			}
+		}
+
 		state.ClearSignal(workerID)
-		worker := state.LoadWorker(workerID)
 		if worker != nil {
 			worker.SourceConfig = ""
 			state.SaveWorker(worker)
@@ -241,6 +327,19 @@ func ExecuteDecision(decision *Decision, cfg *RunConfig, state *StateManager) {
 		newIssueNum := decision.NewIssue
 		if newIssueNum == nil {
 			LogMsg(fmt.Sprintf("Worker %d: no new issue to assign", workerID))
+			return
+		}
+
+		// Check if work is already done on this issue before assigning
+		if CheckWorkAlreadyDone(*newIssueNum, cfg, state) {
+			LogMsg(fmt.Sprintf("Worker %d: issue #%d already complete, skipping assignment", workerID, *newIssueNum))
+			// Mark worker as idle so it gets another issue next cycle
+			worker := state.LoadWorker(workerID)
+			if worker != nil {
+				worker.Status = "idle"
+				worker.IssueNumber = nil
+				state.SaveWorker(worker)
+			}
 			return
 		}
 
@@ -331,6 +430,19 @@ func ExecuteDecision(decision *Decision, cfg *RunConfig, state *StateManager) {
 		}
 
 		issueNum := *worker.IssueNumber
+
+		// Check if work is already done on this issue before restarting
+		if CheckWorkAlreadyDone(issueNum, effCfg, effState) {
+			LogMsg(fmt.Sprintf("Worker %d: issue #%d already complete, no restart needed", workerID, issueNum))
+			// Mark worker as idle so it gets another issue next cycle
+			worker.Status = "idle"
+			worker.IssueNumber = nil
+			worker.SourceConfig = ""
+			state.SaveWorker(worker)
+			state.ClearSignal(workerID)
+			return
+		}
+
 		issue := effCfg.GetIssue(issueNum)
 		if issue == nil {
 			LogMsg(fmt.Sprintf("Worker %d: issue #%d not found", workerID, issueNum))
@@ -488,6 +600,21 @@ func ExecuteDecision(decision *Decision, cfg *RunConfig, state *StateManager) {
 			return
 		}
 
+		// Check if work is already done on this issue before assigning
+		otherState := NewStateManager(otherCfg)
+		if CheckWorkAlreadyDone(*newIssueNum, otherCfg, otherState) {
+			LogMsg(fmt.Sprintf("Worker %d: issue #%d already complete, skipping assignment", workerID, *newIssueNum))
+			// Mark worker as idle so it gets another issue next cycle
+			worker := state.LoadWorker(workerID)
+			if worker != nil {
+				worker.Status = "idle"
+				worker.IssueNumber = nil
+				worker.SourceConfig = ""
+				state.SaveWorker(worker)
+			}
+			return
+		}
+
 		newIssue := otherCfg.GetIssue(*newIssueNum)
 		if newIssue == nil {
 			LogMsg(fmt.Sprintf("Worker %d: issue #%d not found in %s", workerID, *newIssueNum, otherCfg.Project))
@@ -516,7 +643,7 @@ func ExecuteDecision(decision *Decision, cfg *RunConfig, state *StateManager) {
 			state.SaveWorker(worker)
 		}
 
-		otherState := NewStateManager(otherCfg)
+		otherState = NewStateManager(otherCfg) // refresh after worktree
 		otherState.UpdateIssueStatus(*newIssueNum, "in_progress", &workerID)
 
 		state.ClearSignal(workerID)
@@ -813,6 +940,16 @@ func RunMonitorLoop(cfg *RunConfig, state *StateManager, noDelay bool) {
 
 	// Create consistency checker
 	consistencyChecker := NewConsistencyChecker(cfg, state)
+
+	// Fast scan goroutine - checks for completed local branches every 15 seconds
+	go func() {
+		for {
+			time.Sleep(15 * time.Second)
+			if fixed := consistencyChecker.ScanAndFixCompletedWork(); fixed > 0 {
+				LogMsg(fmt.Sprintf("[scan] Auto-completed %d issues", fixed))
+			}
+		}
+	}()
 
 	cycle := 0
 	for {

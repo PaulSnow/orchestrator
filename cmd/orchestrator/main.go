@@ -476,6 +476,16 @@ OPTIONS`)
 	}
 	fmt.Println()
 
+	// Scan for already-completed work BEFORE assigning workers
+	fmt.Println("-- Scanning for completed remote branches --")
+	for _, cfg := range configs {
+		cc := orchestrator.NewConsistencyChecker(cfg, orchestrator.NewStateManager(cfg))
+		if fixed := cc.ScanAndFixCompletedWork(); fixed > 0 {
+			fmt.Printf("  [%s] Auto-completed %d issues with existing remote work\n", cfg.Project, fixed)
+		}
+	}
+	fmt.Println()
+
 	// Initial assignments
 	fmt.Println("-- Initial assignments from global priority queue --")
 	type assignment struct {

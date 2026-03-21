@@ -274,31 +274,28 @@ func (sm *StateManager) CacheIssue(issueNumber int, body string) error {
 	return os.WriteFile(cacheFile, []byte(body), 0644)
 }
 
+// sanitizeProject returns a filesystem-safe project name.
+func sanitizeProject(project string) string {
+	if project == "" {
+		return "default"
+	}
+	// Replace / with - to avoid creating subdirectories
+	return strings.ReplaceAll(project, "/", "-")
+}
+
 // SignalPath returns the signal file path for a worker.
 func (sm *StateManager) SignalPath(workerID int) string {
-	project := sm.cfg.Project
-	if project == "" {
-		project = "default"
-	}
-	return fmt.Sprintf("/tmp/%s-signal-%d", project, workerID)
+	return fmt.Sprintf("/tmp/%s-signal-%d", sanitizeProject(sm.cfg.Project), workerID)
 }
 
 // LogPath returns the log file path for a worker.
 func (sm *StateManager) LogPath(workerID int) string {
-	project := sm.cfg.Project
-	if project == "" {
-		project = "default"
-	}
-	return fmt.Sprintf("/tmp/%s-worker-%d.log", project, workerID)
+	return fmt.Sprintf("/tmp/%s-worker-%d.log", sanitizeProject(sm.cfg.Project), workerID)
 }
 
 // PromptPath returns the prompt file path for a worker.
 func (sm *StateManager) PromptPath(workerID int) string {
-	project := sm.cfg.Project
-	if project == "" {
-		project = "default"
-	}
-	return fmt.Sprintf("/tmp/%s-worker-prompt-%d.md", project, workerID)
+	return fmt.Sprintf("/tmp/%s-worker-prompt-%d.md", sanitizeProject(sm.cfg.Project), workerID)
 }
 
 // ReadSignal reads exit code from signal file, or nil if not present.

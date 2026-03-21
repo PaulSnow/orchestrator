@@ -317,6 +317,17 @@ func ComputeDecision(snapshot *WorkerSnapshot, cfg *RunConfig, state *StateManag
 				SourceConfig: otherCfg.ConfigPath,
 			}}
 		}
+		// No pending issues - try retrying a failed issue that blocks others
+		retryIssue := NextRetriableIssue(cfg, completed)
+		if retryIssue != nil {
+			return []*Decision{{
+				Action:       "retry_failed",
+				Worker:       workerID,
+				NewIssue:     &retryIssue.Number,
+				Reason:       "retrying failed #" + itoa(retryIssue.Number) + " that blocks other work",
+				SourceConfig: cfg.ConfigPath,
+			}}
+		}
 		return []*Decision{{
 			Action: "noop",
 			Worker: workerID,
@@ -567,8 +578,33 @@ func handleRunningWorker(snapshot *WorkerSnapshot, cfg *RunConfig, state *StateM
 		now := time.Now().Unix()
 		age := float64(now) - *snapshot.LogMtime
 
-		// Empty log = claude started but produced nothing
-		if snapshot.LogSize == 0 && age > 120 {
+		// Check if log has only DEADMAN markers (no actual Claude output)
+		onlyDeadman := snapshot.LogSize < 200 && strings.Contains(snapshot.LogTail, "[DEADMAN] START") && !strings.Contains(snapshot.LogTail, "[DEADMAN] EXIT")
+
+		// Empty/deadman-only log = claude started but produced nothing meaningful
+		if (snapshot.LogSize == 0 || onlyDeadman) && age > 120 {
+			// Before restarting, check if work is already done on remote branch
+			// This prevents endless restarts when Claude completed work but crashed before writing to log
+			if snapshot.IssueNumber != nil {
+				issue := cfg.GetIssue(*snapshot.IssueNumber)
+				if issue != nil {
+					repo := cfg.RepoForIssueByNumber(*snapshot.IssueNumber)
+					if repo != nil {
+						branchName := repo.BranchPrefix + itoa(*snapshot.IssueNumber)
+						exists, hasWork, _ := RemoteBranchHasWork(repo.Path, branchName, repo.DefaultBranch)
+						if exists && hasWork {
+							// Work exists on remote - mark complete instead of restarting
+							return []*Decision{{
+								Action: "mark_complete",
+								Worker: workerID,
+								Issue:  snapshot.IssueNumber,
+								Reason: "empty log but remote branch has commits — work already done",
+							}}
+						}
+					}
+				}
+			}
+
 			if snapshot.RetryCount < maxEmptyRetries {
 				return []*Decision{{
 					Action:       "restart",

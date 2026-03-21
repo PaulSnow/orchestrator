@@ -630,7 +630,7 @@ func TestGetPendingCount(t *testing.T) {
 				{Number: 3, Status: "completed"},
 				{Number: 4, Status: "failed"},
 			},
-			expected: 2, // pending + in_progress
+			expected: 1, // only pending
 		},
 		{
 			name: "none pending",

@@ -139,6 +139,43 @@ func GetFailedCount(cfg *RunConfig) int {
 	return count
 }
 
+// NextRetriableIssue finds a failed issue worth retrying.
+// Prioritizes issues that block the most downstream work.
+func NextRetriableIssue(cfg *RunConfig, completed map[int]bool) *Issue {
+	// Build map: issue -> how many pending issues depend on it
+	dependents := make(map[int]int)
+	for _, issue := range cfg.Issues {
+		if issue.Status != "pending" {
+			continue
+		}
+		for _, dep := range issue.DependsOn {
+			dependents[dep]++
+		}
+	}
+
+	var best *Issue
+	bestScore := -1
+
+	for _, issue := range cfg.Issues {
+		if issue.Status != "failed" {
+			continue
+		}
+		// Check if any pending issue depends on this one
+		score := dependents[issue.Number]
+		if score > bestScore || (score == bestScore && best != nil &&
+			(issue.Wave < best.Wave || (issue.Wave == best.Wave && issue.Priority < best.Priority))) {
+			best = issue
+			bestScore = score
+		}
+	}
+
+	// Only return if this issue actually blocks something
+	if bestScore > 0 {
+		return best
+	}
+	return nil
+}
+
 // ClaimedIssue represents a claimed issue by config path and issue number.
 type ClaimedIssue struct {
 	ConfigPath  string

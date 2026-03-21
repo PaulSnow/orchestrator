@@ -53,12 +53,27 @@ func CreateWorktree(repoPath, worktreePath, branch, baseBranch string) bool {
 		return true
 	}
 
+	// Prune stale worktree references first
+	PruneWorktrees(repoPath)
+
 	var err error
 	if BranchExists(repoPath, branch) {
 		_, err = runGit(repoPath, "worktree", "add", worktreePath, branch)
 	} else {
 		_, err = runGit(repoPath, "worktree", "add", "-b", branch, worktreePath, baseBranch)
 	}
+
+	// If still failed, try force-removing stale ref and retry
+	if err != nil {
+		runGit(repoPath, "worktree", "remove", "--force", worktreePath)
+		PruneWorktrees(repoPath)
+		if BranchExists(repoPath, branch) {
+			_, err = runGit(repoPath, "worktree", "add", worktreePath, branch)
+		} else {
+			_, err = runGit(repoPath, "worktree", "add", "-b", branch, worktreePath, baseBranch)
+		}
+	}
+
 	return err == nil
 }
 
@@ -154,6 +169,136 @@ func GetDiffStat(worktreePath, sinceRef string) string {
 // HasCommits checks if there are any commits since the reference.
 func HasCommits(worktreePath, sinceRef string) bool {
 	return GetRecentCommits(worktreePath, 1, sinceRef) != ""
+}
+
+// LocalBranchHasWork checks if a LOCAL branch exists and has commits beyond the base branch.
+// This is instant - no network calls. Use this first before checking remote.
+// Returns (exists bool, hasCommits bool, commitCount int).
+func LocalBranchHasWork(repoPath, branchName, baseBranch string) (bool, bool, int) {
+	if baseBranch == "" {
+		baseBranch = "main"
+	}
+
+	// Check if local branch exists
+	_, err := runGit(repoPath, "rev-parse", "--verify", "refs/heads/"+branchName)
+	if err != nil {
+		return false, false, 0
+	}
+
+	// Count commits on local branch beyond origin/base
+	baseRef := "origin/" + baseBranch
+	out, err := runGit(repoPath, "rev-list", "--count", baseRef+".."+branchName)
+	if err != nil {
+		return true, false, 0
+	}
+
+	count := 0
+	fmt.Sscanf(strings.TrimSpace(out), "%d", &count)
+	return true, count > 0, count
+}
+
+// GetLocalBranchCommits gets the commit log from a local branch.
+func GetLocalBranchCommits(repoPath, branchName, baseBranch string, count int) string {
+	if baseBranch == "" {
+		baseBranch = "main"
+	}
+	if count == 0 {
+		count = 5
+	}
+
+	baseRef := "origin/" + baseBranch
+	out, _ := runGit(repoPath, "log", "--oneline", fmt.Sprintf("-%d", count), baseRef+".."+branchName)
+	return strings.TrimSpace(out)
+}
+
+// WorktreeIsClean checks if a worktree has no uncommitted changes.
+// Clean tree + commits = work likely complete. Uncommitted files = still in progress.
+func WorktreeIsClean(worktreePath string) bool {
+	// Check for any uncommitted changes (staged or unstaged)
+	out, err := runGit(worktreePath, "status", "--porcelain")
+	if err != nil {
+		return false
+	}
+	return strings.TrimSpace(out) == ""
+}
+
+// BranchReadyForReview checks if a branch appears complete and ready for review:
+// - Has commits beyond base branch
+// - Worktree is clean (no uncommitted changes) OR worktree doesn't exist
+func BranchReadyForReview(worktreePath, branchName, baseBranch string) bool {
+	// Must have commits (check from worktree or main repo - worktrees share refs)
+	exists, hasWork, _ := LocalBranchHasWork(worktreePath, branchName, baseBranch)
+	if !exists || !hasWork {
+		return false
+	}
+
+	// Check if worktree exists
+	if _, err := os.Stat(worktreePath); os.IsNotExist(err) {
+		// Worktree doesn't exist but branch has commits - consider it ready
+		// (user might have cleaned up, or it's a remote-only branch)
+		return true
+	}
+
+	// Worktree exists - must be clean (no uncommitted work in progress)
+	return WorktreeIsClean(worktreePath)
+}
+
+// RemoteBranchHasWork checks if a remote branch exists and has commits beyond the base branch.
+// This is used to detect when work is already complete before assigning a worker.
+// Returns (exists bool, hasCommits bool, commitCount int).
+func RemoteBranchHasWork(repoPath, branchName, baseBranch string) (bool, bool, int) {
+	return RemoteBranchHasWorkWithFetch(repoPath, branchName, baseBranch, true)
+}
+
+// RemoteBranchHasWorkNoFetch is like RemoteBranchHasWork but skips the fetch.
+// Use when you've already done a bulk fetch.
+func RemoteBranchHasWorkNoFetch(repoPath, branchName, baseBranch string) (bool, bool, int) {
+	return RemoteBranchHasWorkWithFetch(repoPath, branchName, baseBranch, false)
+}
+
+// RemoteBranchHasWorkWithFetch checks if a remote branch exists and has commits beyond the base branch.
+func RemoteBranchHasWorkWithFetch(repoPath, branchName, baseBranch string, doFetch bool) (bool, bool, int) {
+	if baseBranch == "" {
+		baseBranch = "main"
+	}
+
+	if doFetch {
+		// Fetch to ensure we have latest remote state
+		runGit(repoPath, "fetch", "origin", branchName)
+	}
+
+	// Check if remote branch exists
+	remoteBranch := "origin/" + branchName
+	_, err := runGit(repoPath, "rev-parse", "--verify", remoteBranch)
+	if err != nil {
+		return false, false, 0
+	}
+
+	// Count commits on remote branch beyond base
+	baseRef := "origin/" + baseBranch
+	out, err := runGit(repoPath, "rev-list", "--count", baseRef+".."+remoteBranch)
+	if err != nil {
+		return true, false, 0
+	}
+
+	count := 0
+	fmt.Sscanf(strings.TrimSpace(out), "%d", &count)
+	return true, count > 0, count
+}
+
+// GetRemoteBranchCommits gets the commit log from a remote branch.
+func GetRemoteBranchCommits(repoPath, branchName, baseBranch string, count int) string {
+	if baseBranch == "" {
+		baseBranch = "main"
+	}
+	if count == 0 {
+		count = 5
+	}
+
+	remoteBranch := "origin/" + branchName
+	baseRef := "origin/" + baseBranch
+	out, _ := runGit(repoPath, "log", "--oneline", fmt.Sprintf("-%d", count), baseRef+".."+remoteBranch)
+	return strings.TrimSpace(out)
 }
 
 // IsClaudeRunning checks if a claude process is a child of the given PID.
