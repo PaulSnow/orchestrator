@@ -2,6 +2,7 @@ package orchestrator
 
 import (
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 )
@@ -196,16 +197,142 @@ type PRLifecycleResult struct {
 	Merged        bool
 	MergeConflict bool
 	IssueReopened bool
+	RebaseAttempted bool
+	RebaseSuccess   bool
 	Error         error
+}
+
+// RebaseResult represents the outcome of a rebase attempt.
+type RebaseResult struct {
+	Success      bool
+	Error        string
+	HasConflicts bool
+}
+
+// RebaseBranchOntoMain attempts to rebase a branch onto the latest main/default branch.
+// This is used when a PR has merge conflicts due to concurrent worker changes.
+// Returns a RebaseResult indicating success or failure.
+func RebaseBranchOntoMain(worktreePath, branchName, baseBranch string) RebaseResult {
+	if baseBranch == "" {
+		baseBranch = "main"
+	}
+
+	// Fetch latest from remote
+	_, err := runGit(worktreePath, "fetch", "origin")
+	if err != nil {
+		return RebaseResult{Success: false, Error: fmt.Sprintf("fetch failed: %v", err)}
+	}
+
+	// Check if we're on the right branch
+	currentBranch, err := runGit(worktreePath, "rev-parse", "--abbrev-ref", "HEAD")
+	if err != nil {
+		return RebaseResult{Success: false, Error: fmt.Sprintf("failed to get current branch: %v", err)}
+	}
+	currentBranch = strings.TrimSpace(currentBranch)
+
+	// Checkout the branch if not already on it
+	if currentBranch != branchName {
+		_, err = runGit(worktreePath, "checkout", branchName)
+		if err != nil {
+			return RebaseResult{Success: false, Error: fmt.Sprintf("checkout failed: %v", err)}
+		}
+	}
+
+	// Attempt the rebase
+	baseRef := "origin/" + baseBranch
+	out, err := runGit(worktreePath, "rebase", baseRef)
+	if err != nil {
+		outStr := string(out)
+		// Check if there are conflicts that need manual resolution
+		if strings.Contains(outStr, "CONFLICT") || strings.Contains(outStr, "conflict") {
+			// Abort the rebase to leave the worktree in a clean state
+			runGit(worktreePath, "rebase", "--abort")
+			return RebaseResult{Success: false, HasConflicts: true, Error: "rebase has conflicts requiring manual resolution"}
+		}
+		// Try to abort any in-progress rebase
+		runGit(worktreePath, "rebase", "--abort")
+		return RebaseResult{Success: false, Error: fmt.Sprintf("rebase failed: %v: %s", err, outStr)}
+	}
+
+	LogMsg(fmt.Sprintf("[rebase] Successfully rebased %s onto %s", branchName, baseRef))
+	return RebaseResult{Success: true}
+}
+
+// ForcePushBranch force-pushes a branch to the remote.
+// Uses --force-with-lease for safety (will fail if remote has unexpected changes).
+func ForcePushBranch(worktreePath, remote, branchName string) error {
+	if remote == "" {
+		remote = "origin"
+	}
+
+	out, err := runGit(worktreePath, "push", "--force-with-lease", remote, branchName)
+	if err != nil {
+		return fmt.Errorf("force push failed: %v: %s", err, out)
+	}
+
+	LogMsg(fmt.Sprintf("[push] Force pushed %s to %s", branchName, remote))
+	return nil
+}
+
+// RebaseAndRetry attempts to rebase a branch and retry the merge.
+// This is the main entry point for handling merge conflicts automatically.
+// Returns true if the rebase and force-push succeeded, false otherwise.
+func RebaseAndRetry(worktreePath, branchName, baseBranch string) bool {
+	LogMsg(fmt.Sprintf("[auto-rebase] Attempting to rebase %s onto origin/%s", branchName, baseBranch))
+
+	// Check if worktree exists
+	if _, err := os.Stat(worktreePath); os.IsNotExist(err) {
+		LogMsg(fmt.Sprintf("[auto-rebase] Worktree %s does not exist, cannot rebase", worktreePath))
+		return false
+	}
+
+	// Attempt rebase
+	rebaseResult := RebaseBranchOntoMain(worktreePath, branchName, baseBranch)
+	if !rebaseResult.Success {
+		if rebaseResult.HasConflicts {
+			LogMsg("[auto-rebase] Rebase has conflicts that require manual resolution")
+		} else {
+			LogMsg(fmt.Sprintf("[auto-rebase] Rebase failed: %s", rebaseResult.Error))
+		}
+		return false
+	}
+
+	// Force push the rebased branch
+	if err := ForcePushBranch(worktreePath, "origin", branchName); err != nil {
+		LogMsg(fmt.Sprintf("[auto-rebase] Force push failed: %v", err))
+		return false
+	}
+
+	LogMsg(fmt.Sprintf("[auto-rebase] Successfully rebased and pushed %s", branchName))
+	return true
 }
 
 // CreateAndMergePR handles the full PR lifecycle for a completed issue:
 // 1. Creates a PR if one doesn't exist
 // 2. Attempts to merge the PR
-// 3. If merge fails due to conflicts, reopens the issue for worker resolution
+// 3. If merge fails due to conflicts, attempts auto-rebase and retry
+// 4. If auto-rebase fails, reopens the issue for worker resolution
 // Returns the result of each step.
 func CreateAndMergePR(issueNum int, issueTitle, branchName string, cfg *RunConfig, state *StateManager) PRLifecycleResult {
+	// Use default worktree path pattern
+	return CreateAndMergePRWithWorktree(issueNum, issueTitle, branchName, "", cfg, state)
+}
+
+// CreateAndMergePRWithWorktree handles the full PR lifecycle for a completed issue,
+// with an optional explicit worktree path for auto-rebase.
+// If worktreePath is empty, it will be inferred from the repo config.
+func CreateAndMergePRWithWorktree(issueNum int, issueTitle, branchName, worktreePath string, cfg *RunConfig, state *StateManager) PRLifecycleResult {
 	result := PRLifecycleResult{}
+
+	// Get repo for worktree path (if not provided) and default branch
+	repo, _ := cfg.PrimaryRepo()
+	var baseBranch string
+	if repo != nil {
+		if worktreePath == "" {
+			worktreePath = repo.WorktreeBase + "/issue-" + fmt.Sprintf("%d", issueNum)
+		}
+		baseBranch = repo.DefaultBranch
+	}
 
 	// Step 1: Create PR if needed
 	prURL, err := CreatePRForIssue(issueNum, issueTitle, branchName, cfg)
@@ -232,7 +359,32 @@ func CreateAndMergePR(issueNum int, issueTitle, branchName string, cfg *RunConfi
 		result.MergeConflict = true
 		LogMsg(fmt.Sprintf("[pr-lifecycle] Merge conflict for #%d: %s", issueNum, mergeResult.MergeError))
 
-		// Reopen the issue for worker to resolve
+		// Step 3a: Try auto-rebase
+		if worktreePath != "" {
+			result.RebaseAttempted = true
+			LogMsg(fmt.Sprintf("[pr-lifecycle] Attempting auto-rebase for #%d", issueNum))
+
+			if RebaseAndRetry(worktreePath, branchName, baseBranch) {
+				result.RebaseSuccess = true
+				LogMsg(fmt.Sprintf("[pr-lifecycle] Auto-rebase succeeded for #%d, retrying merge", issueNum))
+
+				// Retry the merge after successful rebase
+				retryResult := MergePRForIssue(issueNum, branchName, cfg)
+				if retryResult.Success {
+					result.Merged = true
+					result.MergeConflict = false // Clear the conflict flag since we resolved it
+					LogMsg(fmt.Sprintf("[pr-lifecycle] Merged PR for #%d after auto-rebase", issueNum))
+					return result
+				}
+
+				// Merge still failed after rebase
+				LogMsg(fmt.Sprintf("[pr-lifecycle] Merge still failed after rebase for #%d: %s", issueNum, retryResult.MergeError))
+			} else {
+				LogMsg(fmt.Sprintf("[pr-lifecycle] Auto-rebase failed for #%d, will reopen issue", issueNum))
+			}
+		}
+
+		// Step 3b: Rebase failed or not possible - reopen issue for worker to resolve
 		if err := ReopenIssueForMergeConflict(issueNum, branchName, mergeResult.MergeError, cfg); err != nil {
 			result.Error = fmt.Errorf("failed to reopen issue: %w", err)
 			return result
