@@ -1396,7 +1396,7 @@ const dashboardHTML = `<!DOCTYPE html>
 
         <div class="header">
             <div class="header-left">
-                <h1 id="project-name" style="color: #58a6ff; font-size: 32px; font-weight: 600;"></h1>
+                <h1 id="project-name" style="color: #58a6ff; font-size: 40px; font-weight: 600;"></h1>
                 <div id="repos-info" style="font-size: 12px; color: #888;"></div>
                 <!-- Orchestrator switcher -->
                 <div class="orchestrator-switcher" id="orch-switcher">
@@ -1432,8 +1432,8 @@ const dashboardHTML = `<!DOCTYPE html>
                 <h3>Actions</h3>
                 <button class="control-btn" onclick="openTmux()">Open tmux session</button>
                 <button class="control-btn" onclick="refreshState()">Refresh state</button>
-                <button class="control-btn" onclick="syncFromGitHub()" style="background: #238636;">Sync from GitHub</button>
-                <button class="control-btn" id="stop-btn" onclick="stopOrchestrator()" style="background: #da3633; display: none;">Stop Orchestrator</button>
+                <button class="control-btn" onclick="syncFromGitHub()" style="background: #238636; color: #ffffff; border-color: #2ea043;">Sync from GitHub</button>
+                <button class="control-btn" id="stop-btn" onclick="stopOrchestrator()" style="background: #da3633; color: #ffffff; border-color: #f85149; display: none;">Stop Orchestrator</button>
             </div>
         </div>
 
