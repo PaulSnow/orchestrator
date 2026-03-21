@@ -167,7 +167,7 @@ Disable with `--web-port 0`.
     }
   ],
   "num_workers": 5,
-  "stagger_delay": 30,
+  "stagger_delay": 3,
   "cycle_interval": 60
 }
 ```

@@ -167,8 +167,8 @@ func TestLoadConfig_DefaultValues(t *testing.T) {
 	if loadedCfg.TmuxSession != "proof-orchestrator" {
 		t.Errorf("Expected default tmux_session 'proof-orchestrator', got '%s'", loadedCfg.TmuxSession)
 	}
-	if loadedCfg.StaggerDelay != 30 {
-		t.Errorf("Expected default stagger_delay 30, got %d", loadedCfg.StaggerDelay)
+	if loadedCfg.StaggerDelay != 3 {
+		t.Errorf("Expected default stagger_delay 3, got %d", loadedCfg.StaggerDelay)
 	}
 
 	// Verify issue defaults
