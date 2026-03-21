@@ -133,6 +133,28 @@ func GetFailedCount(cfg *RunConfig) int {
 	return count
 }
 
+// GetPRPendingCount returns count of issues with PRs waiting to be merged.
+func GetPRPendingCount(cfg *RunConfig) int {
+	count := 0
+	for _, i := range cfg.Issues {
+		if i.Status == "pr_pending" {
+			count++
+		}
+	}
+	return count
+}
+
+// GetPRPendingIssues returns issues that have open PRs waiting to be merged.
+func GetPRPendingIssues(cfg *RunConfig) []*Issue {
+	var issues []*Issue
+	for _, i := range cfg.Issues {
+		if i.Status == "pr_pending" {
+			issues = append(issues, i)
+		}
+	}
+	return issues
+}
+
 // NextRetriableIssue finds a failed issue worth retrying.
 // Prioritizes issues that block the most downstream work.
 func NextRetriableIssue(cfg *RunConfig, completed map[int]bool) *Issue {

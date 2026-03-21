@@ -361,3 +361,59 @@ func TestNextAvailableIssueGlobal_PriorityAcrossProjects(t *testing.T) {
 		t.Errorf("expected config2 to be selected")
 	}
 }
+
+// === PR Pending Count Tests ===
+
+func TestGetPRPendingCount_NoPRPending(t *testing.T) {
+	cfg := testConfig([]*Issue{
+		testIssue(1, "pending", 1, 1, nil),
+		testIssue(2, "in_progress", 1, 2, nil),
+		testIssue(3, "completed", 1, 3, nil),
+		testIssue(4, "failed", 1, 4, nil),
+	})
+
+	count := GetPRPendingCount(cfg)
+	if count != 0 {
+		t.Errorf("expected 0 pr_pending issues, got %d", count)
+	}
+}
+
+func TestGetPRPendingCount_WithPRPending(t *testing.T) {
+	cfg := testConfig([]*Issue{
+		testIssue(1, "pending", 1, 1, nil),
+		testIssue(2, "pr_pending", 1, 2, nil),
+		testIssue(3, "pr_pending", 1, 3, nil),
+		testIssue(4, "completed", 1, 4, nil),
+	})
+
+	count := GetPRPendingCount(cfg)
+	if count != 2 {
+		t.Errorf("expected 2 pr_pending issues, got %d", count)
+	}
+}
+
+func TestGetPRPendingIssues(t *testing.T) {
+	cfg := testConfig([]*Issue{
+		testIssue(1, "pending", 1, 1, nil),
+		{Number: 2, Status: "pr_pending", BranchName: "feature/issue-2"},
+		{Number: 3, Status: "pr_pending", BranchName: "feature/issue-3"},
+		testIssue(4, "completed", 1, 4, nil),
+	})
+
+	issues := GetPRPendingIssues(cfg)
+	if len(issues) != 2 {
+		t.Fatalf("expected 2 pr_pending issues, got %d", len(issues))
+	}
+
+	// Verify the right issues are returned
+	issueNums := make(map[int]bool)
+	for _, i := range issues {
+		issueNums[i.Number] = true
+		if i.BranchName == "" {
+			t.Errorf("expected branch name for issue #%d", i.Number)
+		}
+	}
+	if !issueNums[2] || !issueNums[3] {
+		t.Errorf("expected issues #2 and #3, got %v", issueNums)
+	}
+}

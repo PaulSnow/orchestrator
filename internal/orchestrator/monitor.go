@@ -197,7 +197,8 @@ func CollectWorkerSnapshot(
 }
 
 // CheckWorkAlreadyDone checks if an issue's work is already complete on the remote branch.
-// If work is done, it marks the issue as complete and returns true.
+// If work is done, it attempts to merge the PR and marks appropriately.
+// Returns true if work was found and handled (merged, pr_pending, or reverted to pending).
 // This prevents endless restarts when Claude completed work but orchestrator doesn't know.
 func CheckWorkAlreadyDone(issueNum int, cfg *RunConfig, state *StateManager) bool {
 	issue := cfg.GetIssue(issueNum)
@@ -227,28 +228,37 @@ func CheckWorkAlreadyDone(issueNum int, cfg *RunConfig, state *StateManager) boo
 		}
 	}
 
-	// Mark as complete (may be reverted if merge fails)
-	LogMsg(fmt.Sprintf("[auto-complete] Marking issue #%d as completed (work already done)", issueNum))
-	state.UpdateIssueStatus(issueNum, "completed", nil)
+	// First mark as pr_pending (awaiting merge)
+	LogMsg(fmt.Sprintf("[auto-complete] Issue #%d: setting pr_pending (awaiting merge)", issueNum))
+	state.UpdateIssueStatusWithBranch(issueNum, "pr_pending", nil, branchName)
 
 	// Create PR and attempt to merge
 	prResult := CreateAndMergePR(issueNum, issue.Title, branchName, cfg, state)
 	if prResult.Error != nil {
 		LogMsg(fmt.Sprintf("[auto-complete] WARNING: PR lifecycle failed for #%d: %v", issueNum, prResult.Error))
 	}
-	if prResult.IssueReopened {
-		// Issue was reopened due to merge conflict, don't emit completed event
-		LogMsg(fmt.Sprintf("[auto-complete] Issue #%d reopened for merge conflict resolution", issueNum))
-		return true // Still return true since we handled it
+
+	if prResult.Merged {
+		// PR merged successfully - NOW mark as completed
+		LogMsg(fmt.Sprintf("[auto-complete] Issue #%d: PR merged, marking completed", issueNum))
+		state.UpdateIssueStatus(issueNum, "completed", nil)
+		GetActivityLogger().LogIssueCompleted(issueNum, 0)
+		if globalEventBroadcaster != nil {
+			globalEventBroadcaster.EmitIssueStatus(issueNum, issue.Title, "completed", nil)
+		}
+	} else if prResult.IssueReopened {
+		// Issue was reopened due to merge conflict
+		LogMsg(fmt.Sprintf("[auto-complete] Issue #%d: merge conflict, reverted to pending", issueNum))
+		// Status already set to pending by CreateAndMergePR
+	} else {
+		// PR created but not merged yet - stays as pr_pending
+		LogMsg(fmt.Sprintf("[auto-complete] Issue #%d: PR created, awaiting merge", issueNum))
+		if globalEventBroadcaster != nil {
+			globalEventBroadcaster.EmitIssueStatus(issueNum, issue.Title, "pr_pending", nil)
+		}
 	}
 
-	// Log to activity log and emit events
-	GetActivityLogger().LogIssueCompleted(issueNum, 0)
-	if globalEventBroadcaster != nil {
-		globalEventBroadcaster.EmitIssueStatus(issueNum, issue.Title, "completed", nil)
-	}
-
-	return true
+	return true // Work was found and handled
 }
 
 // ExecuteDecision executes a single decision.
@@ -276,27 +286,22 @@ func ExecuteDecision(decision *Decision, cfg *RunConfig, state *StateManager) {
 		issueNum := decision.Issue
 		var issueTitle string
 		var effCfg *RunConfig = cfg
+		var effState *StateManager = state
 		var worker *Worker
 
+		// Get effective config for cross-project issues
 		if decision.SourceConfig != "" {
 			srcCfg, err := LoadConfig(decision.SourceConfig)
 			if err == nil {
 				effCfg = srcCfg
-				srcState := NewStateManager(srcCfg)
-				LogMsg(fmt.Sprintf("Marking issue #%d as completed (in %s)", *issueNum, srcCfg.Project))
-				srcState.UpdateIssueStatus(*issueNum, "completed", nil)
-				if issue := srcCfg.GetIssue(*issueNum); issue != nil {
-					issueTitle = issue.Title
-				}
+				effState = NewStateManager(srcCfg)
 			} else {
-				LogMsg(fmt.Sprintf("WARNING: failed to update source config: %v", err))
+				LogMsg(fmt.Sprintf("WARNING: failed to load source config: %v", err))
 			}
-		} else {
-			LogMsg(fmt.Sprintf("Marking issue #%d as completed", *issueNum))
-			state.UpdateIssueStatus(*issueNum, "completed", nil)
-			if issue := cfg.GetIssue(*issueNum); issue != nil {
-				issueTitle = issue.Title
-			}
+		}
+
+		if issue := effCfg.GetIssue(*issueNum); issue != nil {
+			issueTitle = issue.Title
 		}
 
 		// Get worker info for branch name
@@ -312,23 +317,35 @@ func ExecuteDecision(decision *Decision, cfg *RunConfig, state *StateManager) {
 			}
 		}
 
+		// IMPORTANT: Mark as pr_pending BEFORE attempting merge
+		// This ensures we don't falsely report completion until PR is actually merged
+		LogMsg(fmt.Sprintf("Issue #%d: setting pr_pending (awaiting merge)", *issueNum))
+		effState.UpdateIssueStatusWithBranch(*issueNum, "pr_pending", nil, branchName)
+
 		// Create PR and attempt to merge
+		merged := false
 		mergeConflict := false
 		if branchName != "" {
-			prResult := CreateAndMergePR(*issueNum, issueTitle, branchName, effCfg, state)
+			prResult := CreateAndMergePR(*issueNum, issueTitle, branchName, effCfg, effState)
 			if prResult.Error != nil {
 				LogMsg(fmt.Sprintf("WARNING: PR lifecycle failed for #%d: %v", *issueNum, prResult.Error))
 			}
-			if prResult.IssueReopened {
+			if prResult.Merged {
+				merged = true
+				// NOW we can mark as completed - PR is actually merged
+				LogMsg(fmt.Sprintf("Issue #%d: PR merged successfully, marking completed", *issueNum))
+				effState.UpdateIssueStatus(*issueNum, "completed", nil)
+			} else if prResult.IssueReopened {
 				// Issue was reopened due to merge conflict
-				// Status already reverted to pending by CreateAndMergePR
+				// CreateAndMergePR already set status to pending
 				mergeConflict = true
-				LogMsg(fmt.Sprintf("Issue #%d reopened for merge conflict resolution", *issueNum))
+				LogMsg(fmt.Sprintf("Issue #%d: merge conflict, reverted to pending", *issueNum))
 			}
+			// If neither merged nor conflict, keep as pr_pending for retry
 		}
 
-		// Update epic checkbox if epic-based config (only if no merge conflict)
-		if !mergeConflict && effCfg.EpicNumber > 0 && effCfg.EpicURL != "" {
+		// Update epic checkbox only if PR was actually merged
+		if merged && effCfg.EpicNumber > 0 && effCfg.EpicURL != "" {
 			if err := UpdateEpicCheckbox(effCfg.EpicURL, *issueNum, true); err != nil {
 				LogMsg(fmt.Sprintf("WARNING: failed to update epic checkbox for #%d: %v", *issueNum, err))
 			}
@@ -340,21 +357,24 @@ func ExecuteDecision(decision *Decision, cfg *RunConfig, state *StateManager) {
 			state.SaveWorker(worker)
 		}
 
-		// Only emit completion events if no merge conflict
-		if !mergeConflict {
-			state.LogEvent(map[string]any{"action": "mark_complete", "issue": issueNum})
-			// Log to activity log
+		// Emit appropriate events based on outcome
+		if merged {
+			state.LogEvent(map[string]any{"action": "mark_complete", "issue": issueNum, "merged": true})
 			GetActivityLogger().LogIssueCompleted(*issueNum, workerID)
-			// Emit worker completed event
 			if globalEventBroadcaster != nil {
 				globalEventBroadcaster.EmitWorkerCompleted(workerID, *issueNum, issueTitle)
 				globalEventBroadcaster.EmitIssueStatus(*issueNum, issueTitle, "completed", nil)
 			}
-		} else {
+		} else if mergeConflict {
 			state.LogEvent(map[string]any{"action": "merge_conflict", "issue": issueNum})
-			// Emit merge conflict event
 			if globalEventBroadcaster != nil {
 				globalEventBroadcaster.EmitIssueStatus(*issueNum, issueTitle, "pending", nil)
+			}
+		} else {
+			// PR created but not yet merged - stays in pr_pending
+			state.LogEvent(map[string]any{"action": "pr_pending", "issue": issueNum})
+			if globalEventBroadcaster != nil {
+				globalEventBroadcaster.EmitIssueStatus(*issueNum, issueTitle, "pr_pending", nil)
 			}
 		}
 
@@ -1041,9 +1061,16 @@ func HandleRetryPhase(workerID int, cfg *RunConfig, state *StateManager, _ strin
 }
 
 // AllDone checks if all work is complete.
+// Returns false if any issues are pending, in_progress, or pr_pending (waiting for merge).
 func AllDone(cfg *RunConfig, state *StateManager) bool {
 	pending := GetPendingCount(cfg)
 	if pending > 0 {
+		return false
+	}
+
+	// Check for issues with open PRs waiting to be merged
+	prPending := GetPRPendingCount(cfg)
+	if prPending > 0 {
 		return false
 	}
 
@@ -1057,9 +1084,14 @@ func AllDone(cfg *RunConfig, state *StateManager) bool {
 }
 
 // AllDoneGlobal checks if all work is complete across all configs.
+// Returns false if any issues are pending, in_progress, or pr_pending (waiting for merge).
 func AllDoneGlobal(configs []*RunConfig, state *StateManager, numWorkers int) bool {
 	for _, cfg := range configs {
 		if GetPendingCount(cfg) > 0 {
+			return false
+		}
+		// Check for issues with open PRs waiting to be merged
+		if GetPRPendingCount(cfg) > 0 {
 			return false
 		}
 	}
@@ -1194,6 +1226,16 @@ func RunMonitorLoop(cfg *RunConfig, state *StateManager, noDelay bool) {
 			ExecuteDecision(decision, cfg, state)
 		}
 
+		// Retry merging any pr_pending issues
+		prPendingCount := GetPRPendingCount(cfg)
+		if prPendingCount > 0 {
+			LogMsg(fmt.Sprintf("[pr-retry] %d issues awaiting merge", prPendingCount))
+			merged := RetryPRPendingMerges(cfg, state)
+			if merged > 0 {
+				LogMsg(fmt.Sprintf("[pr-retry] Merged %d/%d pending PRs", merged, prPendingCount))
+			}
+		}
+
 		// Check if all work is done
 		if AllDone(cfg, state) {
 			LogMsg("All issues completed or failed. Orchestrator shutting down.")
@@ -1207,9 +1249,14 @@ func RunMonitorLoop(cfg *RunConfig, state *StateManager, noDelay bool) {
 		// Status summary
 		completed := GetCompletedCount(cfg)
 		pending := GetPendingCount(cfg)
+		prPending := GetPRPendingCount(cfg)
 		failed := GetFailedCount(cfg)
 		total := len(cfg.Issues)
-		LogMsg(fmt.Sprintf("Progress: %d/%d completed, %d pending, %d failed", completed, total, pending, failed))
+		if prPending > 0 {
+			LogMsg(fmt.Sprintf("Progress: %d/%d completed, %d pending, %d pr_pending, %d failed", completed, total, pending, prPending, failed))
+		} else {
+			LogMsg(fmt.Sprintf("Progress: %d/%d completed, %d pending, %d failed", completed, total, pending, failed))
+		}
 		LogMsg(fmt.Sprintf("==== Cycle %d complete. Sleeping %ds ====", cycle, cfg.CycleInterval))
 		LogMsg("")
 
@@ -1331,6 +1378,19 @@ func RunMonitorLoopGlobal(
 			ExecuteDecision(decision, configs[0], state)
 		}
 
+		// Retry merging any pr_pending issues across all configs
+		for _, cfg := range configs {
+			prPendingCount := GetPRPendingCount(cfg)
+			if prPendingCount > 0 {
+				LogMsg(fmt.Sprintf("[pr-retry] %s: %d issues awaiting merge", cfg.Project, prPendingCount))
+				cfgState := NewStateManager(cfg)
+				merged := RetryPRPendingMerges(cfg, cfgState)
+				if merged > 0 {
+					LogMsg(fmt.Sprintf("[pr-retry] %s: Merged %d/%d pending PRs", cfg.Project, merged, prPendingCount))
+				}
+			}
+		}
+
 		// Check if all work is done
 		if AllDoneGlobal(configs, state, numWorkers) {
 			LogMsg("All issues completed or failed. Orchestrator shutting down.")
@@ -1343,9 +1403,14 @@ func RunMonitorLoopGlobal(
 		for _, cfg := range configs {
 			completed := GetCompletedCount(cfg)
 			pending := GetPendingCount(cfg)
+			prPending := GetPRPendingCount(cfg)
 			failed := GetFailedCount(cfg)
 			total := len(cfg.Issues)
-			LogMsg(fmt.Sprintf("  %s: %d/%d completed, %d pending, %d failed", cfg.Project, completed, total, pending, failed))
+			if prPending > 0 {
+				LogMsg(fmt.Sprintf("  %s: %d/%d completed, %d pending, %d pr_pending, %d failed", cfg.Project, completed, total, pending, prPending, failed))
+			} else {
+				LogMsg(fmt.Sprintf("  %s: %d/%d completed, %d pending, %d failed", cfg.Project, completed, total, pending, failed))
+			}
 		}
 		LogMsg(fmt.Sprintf("==== Cycle %d complete. Sleeping %ds ====", cycle, cycleInterval))
 		LogMsg("")

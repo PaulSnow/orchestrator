@@ -123,6 +123,22 @@ func (sm *StateManager) UpdateIssueStatus(issueNumber int, status string, assign
 	return nil
 }
 
+// UpdateIssueStatusWithBranch updates issue status and branch name in memory.
+// Used when transitioning to pr_pending to track which branch has the PR.
+func (sm *StateManager) UpdateIssueStatusWithBranch(issueNumber int, status string, assignedWorker *int, branchName string) error {
+	for _, issue := range sm.cfg.Issues {
+		if issue.Number == issueNumber {
+			issue.Status = status
+			issue.BranchName = branchName
+			if assignedWorker != nil {
+				issue.AssignedWorker = assignedWorker
+			}
+			break
+		}
+	}
+	return nil
+}
+
 // UpdateIssueStage updates issue pipeline stage in memory only.
 func (sm *StateManager) UpdateIssueStage(issueNumber, pipelineStage int) error {
 	for _, issue := range sm.cfg.Issues {

@@ -78,12 +78,14 @@ type Issue struct {
 	Priority       int    `json:"priority,omitempty"`
 	DependsOn      []int  `json:"depends_on,omitempty"`
 	Wave           int    `json:"wave,omitempty"`
-	Status         string `json:"status,omitempty"`          // pending | in_progress | completed | failed
+	Status         string `json:"status,omitempty"`          // pending | in_progress | pr_pending | completed | failed
 	AssignedWorker *int   `json:"assigned_worker,omitempty"` // nil if unassigned
 	Repo           string `json:"repo,omitempty"`
 	TaskType       string `json:"task_type,omitempty"`    // implement | review | test
 	PipelineStage  int    `json:"pipeline_stage,omitempty"`
 	Description    string `json:"description,omitempty"`
+	PRNumber       int    `json:"pr_number,omitempty"` // PR number when status is pr_pending
+	BranchName     string `json:"branch_name,omitempty"` // Branch name for PR operations
 }
 
 // Init sets defaults for Issue after loading.
