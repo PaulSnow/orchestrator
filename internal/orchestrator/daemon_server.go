@@ -37,13 +37,19 @@ func NewDaemonServer(port int) *DaemonServer {
 func (ds *DaemonServer) Start() error {
 	mux := http.NewServeMux()
 
-	// API endpoints
+	// API endpoints for orchestrator registry
 	mux.HandleFunc("/api/orchestrators", ds.handleOrchestrators)
 	mux.HandleFunc("/api/orchestrators/", ds.handleOrchestratorByProject)
 	mux.HandleFunc("/api/health", ds.handleHealth)
 	mux.HandleFunc("/api/events", ds.handleSSE)
 
-	// Dashboard HTML
+	// API endpoints to make dashboard work in offline/idle mode
+	mux.HandleFunc("/api/state", ds.handleIdleState)
+	mux.HandleFunc("/api/workers", ds.handleIdleWorkers)
+	mux.HandleFunc("/api/issues", ds.handleIdleIssues)
+	mux.HandleFunc("/api/log/", ds.handleIdleLog)
+
+	// Dashboard HTML - use same dashboard as active orchestrator
 	mux.HandleFunc("/", ds.handleDashboard)
 
 	// Find an available port
@@ -415,532 +421,49 @@ func (ds *DaemonServer) broadcastLoop() {
 	}
 }
 
-// handleDashboard serves the unified hub dashboard HTML.
+// handleDashboard serves the same dashboard HTML as active orchestrators.
+// In idle/offline mode, the API endpoints return empty state.
 func (ds *DaemonServer) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html")
 	w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
-	fmt.Fprint(w, daemonDashboardHTML)
+	fmt.Fprint(w, dashboardHTML)
 }
 
-const daemonDashboardHTML = `<!DOCTYPE html>
-<html>
-<head>
-    <title>Orchestrator Hub</title>
-    <style>
-        * { box-sizing: border-box; }
-        body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-            margin: 0;
-            padding: 20px;
-            background: #1a1a2e;
-            color: #eee;
-            min-height: 100vh;
-        }
-        .container { max-width: 1200px; margin: 0 auto; }
-        h1 { color: #00d9ff; margin: 0 0 10px 0; }
-        .subtitle { color: #888; font-size: 14px; margin-bottom: 30px; }
+// handleIdleState returns empty state for offline mode.
+func (ds *DaemonServer) handleIdleState(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	state := map[string]any{
+		"project":         "Orchestrator Hub",
+		"version":         Version,
+		"elapsed_seconds": 0,
+		"phase":           "idle",
+		"repos":           map[string]any{},
+		"stats": map[string]int{
+			"total":       0,
+			"completed":   0,
+			"in_progress": 0,
+			"pending":     0,
+			"failed":      0,
+			"pr_pending":  0,
+		},
+	}
+	json.NewEncoder(w).Encode(state)
+}
 
-        /* Header */
-        .header {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            margin-bottom: 30px;
-            padding-bottom: 20px;
-            border-bottom: 1px solid #0f3460;
-        }
-        .header-left { display: flex; flex-direction: column; }
-        .header-right { text-align: right; }
-        .stats-summary {
-            display: flex;
-            gap: 20px;
-            font-size: 14px;
-        }
-        .summary-stat { display: flex; gap: 8px; }
-        .summary-label { color: #888; }
-        .summary-value { font-weight: bold; }
-        .summary-value.running { color: #00d9ff; }
-        .summary-value.completed { color: #00ff88; }
-        .summary-value.failed { color: #ff4444; }
+// handleIdleWorkers returns empty workers list for offline mode.
+func (ds *DaemonServer) handleIdleWorkers(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode([]any{})
+}
 
-        /* Connection status */
-        .connection-status {
-            display: flex;
-            align-items: center;
-            gap: 8px;
-            font-size: 12px;
-            color: #888;
-        }
-        .connection-dot {
-            width: 8px;
-            height: 8px;
-            border-radius: 50%;
-            background: #ff4444;
-        }
-        .connection-dot.connected {
-            background: #00ff88;
-        }
+// handleIdleIssues returns empty issues list for offline mode.
+func (ds *DaemonServer) handleIdleIssues(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode([]any{})
+}
 
-        /* Orchestrators table */
-        .orchestrators-section {
-            background: #16213e;
-            border-radius: 12px;
-            overflow: hidden;
-        }
-        table {
-            width: 100%;
-            border-collapse: collapse;
-        }
-        th, td {
-            padding: 16px;
-            text-align: left;
-            border-bottom: 1px solid #0a0a0a;
-        }
-        th {
-            background: #0f1a2e;
-            font-size: 12px;
-            color: #888;
-            text-transform: uppercase;
-            font-weight: 600;
-        }
-        tr:hover {
-            background: #1a2540;
-        }
-
-        /* Status badges */
-        .status-badge {
-            display: inline-block;
-            padding: 6px 12px;
-            border-radius: 6px;
-            font-size: 12px;
-            font-weight: 600;
-        }
-        .status-running { background: #00d9ff22; color: #00d9ff; }
-        .status-completed { background: #00ff8822; color: #00ff88; }
-        .status-failed { background: #ff444422; color: #ff4444; }
-
-        /* Progress bar */
-        .progress-cell {
-            display: flex;
-            flex-direction: column;
-            gap: 6px;
-        }
-        .progress-bar {
-            width: 150px;
-            height: 8px;
-            background: #0a0a0a;
-            border-radius: 4px;
-            overflow: hidden;
-        }
-        .progress-fill {
-            height: 100%;
-            background: linear-gradient(90deg, #00d9ff, #00ff88);
-            transition: width 0.3s ease;
-        }
-        .progress-text {
-            font-size: 12px;
-            color: #888;
-        }
-
-        /* Workers display */
-        .workers-display {
-            display: flex;
-            align-items: center;
-            gap: 8px;
-        }
-        .workers-count {
-            font-weight: bold;
-            color: #00d9ff;
-        }
-        .workers-total {
-            color: #888;
-        }
-
-        /* View button */
-        .view-btn {
-            background: #0a3d5c;
-            border: 1px solid #00d9ff;
-            color: #00d9ff;
-            padding: 8px 16px;
-            border-radius: 6px;
-            cursor: pointer;
-            text-decoration: none;
-            font-size: 12px;
-            font-weight: 500;
-            transition: background 0.2s;
-            margin-right: 8px;
-        }
-        .view-btn:hover {
-            background: #0d4a6f;
-        }
-
-        /* Remove button */
-        .remove-btn {
-            background: #3d1a1a;
-            border: 1px solid #ff4444;
-            color: #ff4444;
-            padding: 8px 16px;
-            border-radius: 6px;
-            cursor: pointer;
-            font-size: 12px;
-            font-weight: 500;
-            transition: background 0.2s;
-        }
-        .remove-btn:hover {
-            background: #4d2a2a;
-        }
-        .remove-btn:disabled {
-            opacity: 0.5;
-            cursor: not-allowed;
-        }
-
-        /* Offline status */
-        .status-offline { background: #88888822; color: #888; }
-        .offline-row { opacity: 0.7; }
-
-        /* Confirmation modal */
-        .modal-overlay {
-            display: none;
-            position: fixed;
-            top: 0;
-            left: 0;
-            width: 100%;
-            height: 100%;
-            background: rgba(0, 0, 0, 0.7);
-            z-index: 1000;
-            justify-content: center;
-            align-items: center;
-        }
-        .modal-overlay.active {
-            display: flex;
-        }
-        .modal {
-            background: #16213e;
-            border-radius: 12px;
-            padding: 24px;
-            max-width: 400px;
-            width: 90%;
-            border: 1px solid #0f3460;
-        }
-        .modal h3 {
-            margin: 0 0 16px 0;
-            color: #ff4444;
-        }
-        .modal p {
-            margin: 0 0 20px 0;
-            color: #aaa;
-            font-size: 14px;
-        }
-        .modal-buttons {
-            display: flex;
-            gap: 12px;
-            justify-content: flex-end;
-        }
-        .modal-btn {
-            padding: 10px 20px;
-            border-radius: 6px;
-            cursor: pointer;
-            font-size: 14px;
-            font-weight: 500;
-            border: none;
-        }
-        .modal-btn.cancel {
-            background: #333;
-            color: #aaa;
-        }
-        .modal-btn.cancel:hover {
-            background: #444;
-        }
-        .modal-btn.confirm {
-            background: #ff4444;
-            color: white;
-        }
-        .modal-btn.confirm:hover {
-            background: #ff5555;
-        }
-        .actions-cell {
-            white-space: nowrap;
-        }
-
-        /* Empty state */
-        .empty-state {
-            text-align: center;
-            padding: 60px 20px;
-            color: #888;
-        }
-        .empty-state h2 {
-            color: #666;
-            margin-bottom: 10px;
-        }
-        .empty-state p {
-            font-size: 14px;
-        }
-
-        /* Uptime */
-        .uptime {
-            font-size: 12px;
-            color: #666;
-        }
-
-        /* Project name */
-        .project-name {
-            font-weight: 600;
-            color: #eee;
-        }
-        .project-path {
-            font-size: 11px;
-            color: #666;
-            margin-top: 4px;
-        }
-
-        /* Animations */
-        @keyframes pulse {
-            0%, 100% { opacity: 1; }
-            50% { opacity: 0.6; }
-        }
-        .status-running .status-badge {
-            animation: pulse 2s infinite;
-        }
-    </style>
-</head>
-<body>
-    <div class="container">
-        <div class="header">
-            <div class="header-left">
-                <h1>Orchestrator Hub</h1>
-                <div class="subtitle">Unified dashboard for all running orchestrators</div>
-            </div>
-            <div class="header-right">
-                <div class="stats-summary" id="stats-summary">
-                    <div class="summary-stat">
-                        <span class="summary-label">Online:</span>
-                        <span class="summary-value running" id="running-count">0</span>
-                    </div>
-                    <div class="summary-stat">
-                        <span class="summary-label">Offline:</span>
-                        <span class="summary-value" id="completed-count" style="color: #888;">0</span>
-                    </div>
-                </div>
-                <div class="connection-status">
-                    <span class="connection-dot" id="connection-dot"></span>
-                    <span id="connection-text">Connecting...</span>
-                </div>
-            </div>
-        </div>
-
-        <div class="orchestrators-section">
-            <table>
-                <thead>
-                    <tr>
-                        <th>Project</th>
-                        <th>Status</th>
-                        <th>Workers</th>
-                        <th>Progress</th>
-                        <th>Uptime</th>
-                        <th></th>
-                    </tr>
-                </thead>
-                <tbody id="orchestrators-table">
-                    <tr>
-                        <td colspan="6">
-                            <div class="empty-state">
-                                <h2>Loading...</h2>
-                            </div>
-                        </td>
-                    </tr>
-                </tbody>
-            </table>
-        </div>
-    </div>
-
-    <!-- Confirmation Modal -->
-    <div class="modal-overlay" id="remove-modal">
-        <div class="modal">
-            <h3>Remove Orchestrator</h3>
-            <p>Are you sure you want to remove <strong id="remove-project-name"></strong> from the registry?</p>
-            <div class="modal-buttons">
-                <button class="modal-btn cancel" onclick="closeRemoveModal()">Cancel</button>
-                <button class="modal-btn confirm" onclick="confirmRemove()">Remove</button>
-            </div>
-        </div>
-    </div>
-
-    <script>
-        let orchestrators = [];
-        let evtSource = null;
-        let removeProject = null;
-
-        function updateConnectionStatus(connected) {
-            const dot = document.getElementById('connection-dot');
-            const text = document.getElementById('connection-text');
-            if (connected) {
-                dot.classList.add('connected');
-                text.textContent = 'Live';
-            } else {
-                dot.classList.remove('connected');
-                text.textContent = 'Reconnecting...';
-            }
-        }
-
-        function updateSummary(data) {
-            let running = 0;
-            let offline = 0;
-            data.forEach(o => {
-                if (o.is_online !== false) running++;
-                else offline++;
-            });
-            document.getElementById('running-count').textContent = running;
-            document.getElementById('completed-count').textContent = offline;
-        }
-
-        function updateTable(data) {
-            orchestrators = data || [];
-            const tbody = document.getElementById('orchestrators-table');
-
-            if (orchestrators.length === 0) {
-                tbody.innerHTML = '<tr><td colspan="6"><div class="empty-state"><h2>No Orchestrators</h2><p>Start an orchestrator with: orchestrator launch &lt;epic-number&gt;</p></div></td></tr>';
-                return;
-            }
-
-            tbody.innerHTML = orchestrators.map(o => {
-                const isOnline = o.is_online !== false;
-                const statusClass = isOnline ? 'status-' + o.status : 'status-offline';
-                const rowClass = isOnline ? statusClass : 'offline-row';
-                const total = o.total_issues || 0;
-                const completed = o.completed || 0;
-                const percent = total > 0 ? Math.round((completed / total) * 100) : 0;
-
-                const activeWorkers = o.active_workers || 0;
-                const totalWorkers = o.num_workers || 0;
-
-                const progressText = completed + '/' + total + ' (' + percent + '%)';
-
-                // Show different status badge for offline orchestrators
-                const statusText = isOnline ? o.status : 'offline';
-                const statusBadgeClass = isOnline ? statusClass : 'status-offline';
-
-                // Build actions based on online status
-                let actionsHtml = '';
-                if (isOnline) {
-                    actionsHtml = '<a href="' + o.dashboard_url + '" class="view-btn" target="_blank">View</a>';
-                } else {
-                    actionsHtml = '<button class="remove-btn" onclick="showRemoveModal(\'' + escapeHtml(o.project) + '\')">Remove</button>';
-                }
-
-                return '<tr class="' + rowClass + '">' +
-                    '<td><div class="project-name">' + escapeHtml(o.project || 'Unknown') + '</div>' +
-                    '<div class="project-path">' + escapeHtml(o.config_path || '') + '</div></td>' +
-                    '<td><span class="status-badge ' + statusBadgeClass + '">' + statusText + '</span></td>' +
-                    '<td><div class="workers-display"><span class="workers-count">' + activeWorkers + '</span>' +
-                    '<span class="workers-total">/ ' + totalWorkers + '</span></div></td>' +
-                    '<td><div class="progress-cell">' +
-                    '<div class="progress-bar"><div class="progress-fill" style="width: ' + percent + '%"></div></div>' +
-                    '<div class="progress-text">' + progressText + '</div></div></td>' +
-                    '<td><span class="uptime">' + (isOnline ? (o.uptime || '--') : '--') + '</span></td>' +
-                    '<td class="actions-cell">' + actionsHtml + '</td>' +
-                '</tr>';
-            }).join('');
-
-            updateSummary(data);
-        }
-
-        function escapeHtml(text) {
-            const div = document.createElement('div');
-            div.textContent = text;
-            return div.innerHTML;
-        }
-
-        function showRemoveModal(project) {
-            removeProject = project;
-            document.getElementById('remove-project-name').textContent = project;
-            document.getElementById('remove-modal').classList.add('active');
-        }
-
-        function closeRemoveModal() {
-            removeProject = null;
-            document.getElementById('remove-modal').classList.remove('active');
-        }
-
-        function confirmRemove() {
-            if (!removeProject) return;
-
-            const project = removeProject;
-            closeRemoveModal();
-
-            fetch('/api/orchestrators/' + encodeURIComponent(project), {
-                method: 'DELETE'
-            })
-            .then(r => r.json())
-            .then(data => {
-                if (data.error) {
-                    alert('Error removing orchestrator: ' + data.error);
-                } else {
-                    // Refresh the list
-                    fetchOrchestrators();
-                }
-            })
-            .catch(err => {
-                alert('Error removing orchestrator: ' + err.message);
-            });
-        }
-
-        function fetchOrchestrators() {
-            fetch('/api/orchestrators')
-                .then(r => r.json())
-                .then(data => {
-                    if (!data.error) {
-                        updateTable(data);
-                    }
-                })
-                .catch(err => {
-                    console.error('Error fetching orchestrators:', err);
-                });
-        }
-
-        let wasConnected = false;
-
-        function connectSSE() {
-            evtSource = new EventSource('/api/events');
-
-            evtSource.onopen = () => {
-                wasConnected = true;
-                updateConnectionStatus(true);
-            };
-
-            evtSource.addEventListener('connected', () => {
-                updateConnectionStatus(true);
-                fetchOrchestrators();
-            });
-
-            evtSource.addEventListener('update', (e) => {
-                try {
-                    const data = JSON.parse(e.data);
-                    if (data.orchestrators) {
-                        updateTable(data.orchestrators);
-                    }
-                } catch (err) {
-                    console.error('Error parsing SSE data:', err);
-                }
-            });
-
-            evtSource.onerror = () => {
-                if (wasConnected) {
-                    wasConnected = false;
-                }
-                updateConnectionStatus(false);
-                evtSource.close();
-                setTimeout(connectSSE, 3000);
-            };
-        }
-
-        // Initial fetch
-        fetchOrchestrators();
-
-        // Connect to SSE
-        connectSSE();
-
-        // Fallback polling (in case SSE fails)
-        setInterval(fetchOrchestrators, 5000);
-    </script>
-</body>
-</html>`
+// handleIdleLog returns empty log for offline mode.
+func (ds *DaemonServer) handleIdleLog(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/plain")
+	w.Write([]byte("No active workers"))
+}

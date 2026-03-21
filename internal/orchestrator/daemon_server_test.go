@@ -87,18 +87,18 @@ func TestDaemonHandleDashboard(t *testing.T) {
 		t.Errorf("Expected content-type text/html, got %s", contentType)
 	}
 
-	// Check that it contains expected HTML content
+	// Check that it contains expected HTML content (uses same dashboard as active orchestrator)
 	body := w.Body.String()
-	if !strings.Contains(body, "Orchestrator Hub") {
-		t.Error("Expected dashboard HTML to contain 'Orchestrator Hub'")
+	if !strings.Contains(body, "Orchestrator") {
+		t.Error("Expected dashboard HTML to contain 'Orchestrator'")
 	}
-	if !strings.Contains(body, "Project") {
-		t.Error("Expected dashboard HTML to contain 'Project' column")
+	if !strings.Contains(body, "Issues") {
+		t.Error("Expected dashboard HTML to contain 'Issues'")
 	}
 	if !strings.Contains(body, "Workers") {
-		t.Error("Expected dashboard HTML to contain 'Workers' column")
+		t.Error("Expected dashboard HTML to contain 'Workers'")
 	}
-	if !strings.Contains(body, "Progress") {
+	if !strings.Contains(body, "api/state") {
 		t.Error("Expected dashboard HTML to contain 'Progress' column")
 	}
 }
