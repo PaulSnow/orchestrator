@@ -10,7 +10,7 @@ import (
 	"time"
 )
 
-// FetchIssueBody fetches an issue body from the remote platform, using cache if available.
+// FetchIssueBody fetches an issue body from GitHub.
 // If the issue has a local description, use that instead of fetching.
 func FetchIssueBody(issue *Issue, cfg *RunConfig, state *StateManager) string {
 	// If issue has local description, use it directly
@@ -18,17 +18,11 @@ func FetchIssueBody(issue *Issue, cfg *RunConfig, state *StateManager) string {
 		return issue.Description
 	}
 
-	cached := state.GetCachedIssue(issue.Number)
-	if cached != "" {
-		return cached
-	}
-
 	repoCfg := cfg.RepoForIssue(issue)
-	body := fetchFromPlatform(issue.Number, repoCfg.Path, repoCfg.Platform)
-	if body != "" && !strings.HasPrefix(body, "(Could not fetch") {
-		state.CacheIssue(issue.Number, body)
+	if repoCfg == nil {
+		return fmt.Sprintf("(No repo configured for issue #%d)", issue.Number)
 	}
-	return body
+	return fetchFromPlatform(issue.Number, repoCfg.Path, repoCfg.Platform)
 }
 
 func fetchFromPlatform(issueNumber int, repoPath, platform string) string {

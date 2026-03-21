@@ -1101,7 +1101,7 @@ func RunMonitorLoopGlobal(
 	LogMsg(fmt.Sprintf("Workers: %d", numWorkers))
 	LogMsg(fmt.Sprintf("Cycle interval: %ds", cycleInterval))
 	LogMsg(fmt.Sprintf("Max retries: %d", maxRetries))
-	LogMsg(fmt.Sprintf("State dir: %s", state.stateDir))
+	LogMsg("State: in-memory (source of truth: GitHub issues)")
 	LogMsg("")
 
 	if !noDelay {

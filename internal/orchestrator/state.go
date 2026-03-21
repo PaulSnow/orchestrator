@@ -7,10 +7,12 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
 // AtomicWrite writes data to a file atomically using write-to-temp-then-rename.
+// Used only for transient/temp files, not for persistent state.
 func AtomicWrite(path string, data any) error {
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0755); err != nil {
@@ -35,89 +37,80 @@ func NowISO() string {
 	return time.Now().UTC().Format("2006-01-02T15:04:05Z")
 }
 
-// StateManager manages all state files for an orchestrator run.
+// StateManager manages in-memory working state for an orchestrator run.
+// Source of truth is GitHub issues - this is just transient working memory.
 type StateManager struct {
-	cfg           *RunConfig
-	stateDir      string
-	workersDir    string
-	eventLogPath  string
-	issueCacheDir string
+	cfg     *RunConfig
+	workers map[int]*Worker // in-memory worker state
+	mu      sync.RWMutex
 }
 
 // NewStateManager creates a new StateManager.
 func NewStateManager(cfg *RunConfig) *StateManager {
-	stateDir := cfg.StateDir
 	return &StateManager{
-		cfg:           cfg,
-		stateDir:      stateDir,
-		workersDir:    filepath.Join(stateDir, "workers"),
-		eventLogPath:  filepath.Join(stateDir, "orchestrator-log.jsonl"),
-		issueCacheDir: filepath.Join(stateDir, "issue-cache"),
+		cfg:     cfg,
+		workers: make(map[int]*Worker),
 	}
 }
 
-// EnsureDirs creates all state directories.
+// EnsureDirs is a no-op now - no state directories needed.
 func (sm *StateManager) EnsureDirs() error {
-	if err := os.MkdirAll(sm.workersDir, 0755); err != nil {
-		return err
-	}
-	return os.MkdirAll(sm.issueCacheDir, 0755)
+	return nil
 }
 
-// WorkerPath returns the path to a worker's state file.
-func (sm *StateManager) WorkerPath(workerID int) string {
-	return filepath.Join(sm.workersDir, fmt.Sprintf("worker-%d.json", workerID))
+// GetWorker returns worker state from memory.
+func (sm *StateManager) GetWorker(workerID int) *Worker {
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+	return sm.workers[workerID]
 }
 
-// LoadWorker loads worker state from disk.
+// LoadWorker returns worker state from memory (alias for GetWorker for compatibility).
 func (sm *StateManager) LoadWorker(workerID int) *Worker {
-	path := sm.WorkerPath(workerID)
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil
-	}
-
-	var w Worker
-	if err := json.Unmarshal(data, &w); err != nil {
-		return nil
-	}
-	return &w
+	return sm.GetWorker(workerID)
 }
 
-// SaveWorker saves worker state atomically.
+// SetWorker updates worker state in memory.
+func (sm *StateManager) SetWorker(worker *Worker) {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	sm.workers[worker.WorkerID] = worker
+}
+
+// SaveWorker updates worker state in memory (no file writes).
 func (sm *StateManager) SaveWorker(worker *Worker) error {
-	return AtomicWrite(sm.WorkerPath(worker.WorkerID), worker)
+	sm.SetWorker(worker)
+	return nil
 }
 
-// InitWorker initializes a new worker state file.
+// InitWorker creates a new worker in memory.
 func (sm *StateManager) InitWorker(workerID, issueNumber int, branch, worktree string) (*Worker, error) {
 	worker := &Worker{
 		WorkerID:    workerID,
 		IssueNumber: &issueNumber,
 		Branch:      branch,
 		Worktree:    worktree,
-		Status:      "pending",
+		Status:      "running",
+		StartedAt:   NowISO(),
 	}
-	if err := sm.SaveWorker(worker); err != nil {
-		return nil, err
-	}
+	sm.SetWorker(worker)
 	return worker, nil
 }
 
-// LoadAllWorkers loads all worker state files.
+// LoadAllWorkers returns all workers from memory.
 func (sm *StateManager) LoadAllWorkers() []*Worker {
-	var workers []*Worker
-	for i := 1; i <= sm.cfg.NumWorkers; i++ {
-		if w := sm.LoadWorker(i); w != nil {
-			workers = append(workers, w)
-		}
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+	workers := make([]*Worker, 0, len(sm.workers))
+	for _, w := range sm.workers {
+		workers = append(workers, w)
 	}
 	return workers
 }
 
-// UpdateIssueStatus updates an issue's status in the config file.
+// UpdateIssueStatus updates issue status in memory only.
+// Actual completion is determined by GitHub issue state.
 func (sm *StateManager) UpdateIssueStatus(issueNumber int, status string, assignedWorker *int) error {
-	// Always update in-memory config first
 	for _, issue := range sm.cfg.Issues {
 		if issue.Number == issueNumber {
 			issue.Status = status
@@ -127,98 +120,21 @@ func (sm *StateManager) UpdateIssueStatus(issueNumber int, status string, assign
 			break
 		}
 	}
-
-	// If no config file (epic-based config), we're done
-	if sm.cfg.ConfigPath == "" {
-		return nil
-	}
-
-	data, err := os.ReadFile(sm.cfg.ConfigPath)
-	if err != nil {
-		return err
-	}
-
-	var raw map[string]any
-	if err := json.Unmarshal(data, &raw); err != nil {
-		return err
-	}
-
-	issues, ok := raw["issues"].([]any)
-	if !ok {
-		return nil
-	}
-
-	for _, item := range issues {
-		issueData, ok := item.(map[string]any)
-		if !ok {
-			continue
-		}
-		num, _ := issueData["number"].(float64)
-		if int(num) == issueNumber {
-			issueData["status"] = status
-			if assignedWorker != nil {
-				issueData["assigned_worker"] = *assignedWorker
-			}
-			break
-		}
-	}
-
-	if err := AtomicWrite(sm.cfg.ConfigPath, raw); err != nil {
-		return err
-	}
-
 	return nil
 }
 
-// UpdateIssueStage updates an issue's pipeline_stage in the config file.
+// UpdateIssueStage updates issue pipeline stage in memory only.
 func (sm *StateManager) UpdateIssueStage(issueNumber, pipelineStage int) error {
-	if sm.cfg.ConfigPath == "" {
-		return nil
-	}
-
-	data, err := os.ReadFile(sm.cfg.ConfigPath)
-	if err != nil {
-		return err
-	}
-
-	var raw map[string]any
-	if err := json.Unmarshal(data, &raw); err != nil {
-		return err
-	}
-
-	issues, ok := raw["issues"].([]any)
-	if !ok {
-		return nil
-	}
-
-	for _, item := range issues {
-		issueData, ok := item.(map[string]any)
-		if !ok {
-			continue
-		}
-		num, _ := issueData["number"].(float64)
-		if int(num) == issueNumber {
-			issueData["pipeline_stage"] = pipelineStage
-			break
-		}
-	}
-
-	if err := AtomicWrite(sm.cfg.ConfigPath, raw); err != nil {
-		return err
-	}
-
-	// Also update in-memory config
 	for _, issue := range sm.cfg.Issues {
 		if issue.Number == issueNumber {
 			issue.PipelineStage = pipelineStage
 			break
 		}
 	}
-
 	return nil
 }
 
-// GetCompletedIssues returns set of completed issue numbers.
+// GetCompletedIssues returns set of completed issue numbers from memory.
 func (sm *StateManager) GetCompletedIssues() map[int]bool {
 	result := make(map[int]bool)
 	for _, i := range sm.cfg.Issues {
@@ -229,49 +145,13 @@ func (sm *StateManager) GetCompletedIssues() map[int]bool {
 	return result
 }
 
-// LogEvent appends an event to the orchestrator event log.
+// LogEvent logs to console only - no file persistence.
 func (sm *StateManager) LogEvent(event map[string]any) error {
-	if err := os.MkdirAll(filepath.Dir(sm.eventLogPath), 0755); err != nil {
-		return err
+	// Just log to console, no file
+	if action, ok := event["action"].(string); ok {
+		LogMsg(fmt.Sprintf("[event] %s: %v", action, event))
 	}
-
-	entry := map[string]any{
-		"timestamp": NowISO(),
-		"event":     event,
-	}
-
-	data, err := json.Marshal(entry)
-	if err != nil {
-		return err
-	}
-
-	f, err := os.OpenFile(sm.eventLogPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-
-	_, err = f.WriteString(string(data) + "\n")
-	return err
-}
-
-// GetCachedIssue gets cached issue body, or empty string if not cached.
-func (sm *StateManager) GetCachedIssue(issueNumber int) string {
-	cacheFile := filepath.Join(sm.issueCacheDir, fmt.Sprintf("issue-%d.md", issueNumber))
-	data, err := os.ReadFile(cacheFile)
-	if err != nil {
-		return ""
-	}
-	return string(data)
-}
-
-// CacheIssue caches an issue body to disk.
-func (sm *StateManager) CacheIssue(issueNumber int, body string) error {
-	if err := os.MkdirAll(sm.issueCacheDir, 0755); err != nil {
-		return err
-	}
-	cacheFile := filepath.Join(sm.issueCacheDir, fmt.Sprintf("issue-%d.md", issueNumber))
-	return os.WriteFile(cacheFile, []byte(body), 0644)
+	return nil
 }
 
 // sanitizeProject returns a filesystem-safe project name.
@@ -279,21 +159,23 @@ func sanitizeProject(project string) string {
 	if project == "" {
 		return "default"
 	}
-	// Replace / with - to avoid creating subdirectories
 	return strings.ReplaceAll(project, "/", "-")
 }
 
 // SignalPath returns the signal file path for a worker.
+// Signal files are transient process communication, not persistent state.
 func (sm *StateManager) SignalPath(workerID int) string {
 	return fmt.Sprintf("/tmp/%s-signal-%d", sanitizeProject(sm.cfg.Project), workerID)
 }
 
 // LogPath returns the log file path for a worker.
+// Log files are transient process output, not persistent state.
 func (sm *StateManager) LogPath(workerID int) string {
 	return fmt.Sprintf("/tmp/%s-worker-%d.log", sanitizeProject(sm.cfg.Project), workerID)
 }
 
 // PromptPath returns the prompt file path for a worker.
+// Prompt files are transient process input, not persistent state.
 func (sm *StateManager) PromptPath(workerID int) string {
 	return fmt.Sprintf("/tmp/%s-worker-prompt-%d.md", sanitizeProject(sm.cfg.Project), workerID)
 }
@@ -332,7 +214,7 @@ func (sm *StateManager) GetLogStats(workerID int) (int64, *float64) {
 // GetLogTail returns the last N lines of a worker's log file.
 func (sm *StateManager) GetLogTail(workerID, lines int) string {
 	if lines == 0 {
-		lines = 50
+		lines = 100 // Increased from 50 for better DEADMAN recovery
 	}
 	path := sm.LogPath(workerID)
 	data, err := os.ReadFile(path)
@@ -351,4 +233,17 @@ func (sm *StateManager) GetLogTail(workerID, lines int) string {
 func (sm *StateManager) TruncateLog(workerID int) {
 	path := sm.LogPath(workerID)
 	os.WriteFile(path, []byte{}, 0644)
+}
+
+// ClearAllWorkers resets all worker state (used on startup).
+func (sm *StateManager) ClearAllWorkers() {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	sm.workers = make(map[int]*Worker)
+}
+
+// WorkerPath is deprecated - returns empty string.
+// Worker state is no longer persisted to files.
+func (sm *StateManager) WorkerPath(workerID int) string {
+	return ""
 }
