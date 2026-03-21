@@ -92,14 +92,31 @@ func (rm *RegistryManager) saveRegistry(reg *Registry) error {
 }
 
 // Register registers the current orchestrator instance.
+// Returns error if another orchestrator is already running on the same project.
 func (rm *RegistryManager) Register(project string, port int, configPath string, numWorkers, totalIssues int) error {
 	rm.mu.Lock()
 	defer rm.mu.Unlock()
 
+	reg, err := rm.loadRegistry()
+	if err != nil {
+		return fmt.Errorf("loading registry: %w", err)
+	}
+
+	// Check if another orchestrator is already running on this project
+	myPID := os.Getpid()
+	for _, existing := range reg.Orchestrators {
+		if existing.Project == project && existing.PID != myPID {
+			// Check if the process is still alive
+			if isProcessRunning(existing.PID) {
+				return fmt.Errorf("another orchestrator (PID %d) is already running on project %q - only one orchestrator per repository allowed", existing.PID, project)
+			}
+		}
+	}
+
 	entry := OrchestratorEntry{
 		Project:     project,
 		Port:        port,
-		PID:         os.Getpid(),
+		PID:         myPID,
 		ConfigPath:  configPath,
 		StartTime:   NowISO(),
 		Status:      StatusRunning,
@@ -107,13 +124,18 @@ func (rm *RegistryManager) Register(project string, port int, configPath string,
 		TotalIssues: totalIssues,
 	}
 
-	reg, err := rm.loadRegistry()
-	if err != nil {
-		return fmt.Errorf("loading registry: %w", err)
-	}
-
 	// Remove any stale entry for this PID (shouldn't exist, but just in case)
 	reg.Orchestrators = rm.filterByPID(reg.Orchestrators, entry.PID)
+
+	// Also clean up stale entries for this project (dead processes)
+	activeEntries := make([]OrchestratorEntry, 0, len(reg.Orchestrators))
+	for _, e := range reg.Orchestrators {
+		if e.Project == project && !isProcessRunning(e.PID) {
+			continue // Skip dead entries for this project
+		}
+		activeEntries = append(activeEntries, e)
+	}
+	reg.Orchestrators = activeEntries
 
 	// Add the new entry
 	reg.Orchestrators = append(reg.Orchestrators, entry)
