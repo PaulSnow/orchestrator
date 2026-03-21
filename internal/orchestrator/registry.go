@@ -263,6 +263,94 @@ func (rm *RegistryManager) GetOrchestratorByProject(project string) (*Orchestrat
 	return nil, nil
 }
 
+// GetOrchestratorInfoByProject returns enriched orchestrator info for a specific project.
+func (rm *RegistryManager) GetOrchestratorInfoByProject(project string) (*OrchestratorInfo, error) {
+	entry, err := rm.GetOrchestratorByProject(project)
+	if err != nil {
+		return nil, err
+	}
+	if entry == nil {
+		return nil, nil
+	}
+
+	currentPID := os.Getpid()
+	info := &OrchestratorInfo{
+		Project:      entry.Project,
+		Port:         entry.Port,
+		PID:          entry.PID,
+		ConfigPath:   entry.ConfigPath,
+		StartTime:    entry.StartTime,
+		Status:       entry.Status,
+		NumWorkers:   entry.NumWorkers,
+		TotalIssues:  entry.TotalIssues,
+		DashboardURL: fmt.Sprintf("http://localhost:%d", entry.Port),
+		IsCurrent:    entry.PID == currentPID,
+	}
+
+	// Calculate uptime
+	if startTime, err := time.Parse("2006-01-02T15:04:05Z", entry.StartTime); err == nil {
+		uptime := time.Since(startTime)
+		info.Uptime = formatUptime(uptime)
+	}
+
+	return info, nil
+}
+
+// ForceDeregisterByProject removes an orchestrator from the registry by project name.
+// This is an admin action used for cleanup. It does not terminate the process.
+func (rm *RegistryManager) ForceDeregisterByProject(project string) (bool, error) {
+	rm.mu.Lock()
+	defer rm.mu.Unlock()
+
+	reg, err := rm.loadRegistry()
+	if err != nil {
+		return false, fmt.Errorf("loading registry: %w", err)
+	}
+
+	// Find and remove the entry for this project
+	found := false
+	newEntries := make([]OrchestratorEntry, 0, len(reg.Orchestrators))
+	for _, entry := range reg.Orchestrators {
+		if entry.Project == project {
+			found = true
+			continue
+		}
+		newEntries = append(newEntries, entry)
+	}
+
+	if !found {
+		return false, nil
+	}
+
+	reg.Orchestrators = newEntries
+	if err := rm.saveRegistry(reg); err != nil {
+		return false, fmt.Errorf("saving registry: %w", err)
+	}
+
+	return true, nil
+}
+
+// ListOrchestratorsByStatus returns orchestrators filtered by status.
+// If status is empty, returns all orchestrators.
+func (rm *RegistryManager) ListOrchestratorsByStatus(status OrchestratorStatus) ([]OrchestratorInfo, error) {
+	infos, err := rm.GetOrchestratorInfos()
+	if err != nil {
+		return nil, err
+	}
+
+	if status == "" {
+		return infos, nil
+	}
+
+	filtered := make([]OrchestratorInfo, 0)
+	for _, info := range infos {
+		if info.Status == status {
+			filtered = append(filtered, info)
+		}
+	}
+	return filtered, nil
+}
+
 // isProcessRunning checks if a process with the given PID is running.
 func isProcessRunning(pid int) bool {
 	process, err := os.FindProcess(pid)

@@ -70,8 +70,9 @@ func (ds *DashboardServer) Start() error {
 	mux.HandleFunc("/api/status", ds.handleStatus)
 	mux.HandleFunc("/api/gate-result", ds.handleGateResult)
 
-	// Orchestrator registry endpoint
+	// Orchestrator registry endpoints (directory service API)
 	mux.HandleFunc("/api/orchestrators", ds.handleOrchestrators)
+	mux.HandleFunc("/api/orchestrators/", ds.handleOrchestratorByProject)
 
 	// Metrics and activity endpoints
 	mux.HandleFunc("/api/metrics", ds.handleMetrics)
@@ -492,12 +493,26 @@ func (ds *DashboardServer) handleGateResult(w http.ResponseWriter, r *http.Reque
 }
 
 // handleOrchestrators returns all registered orchestrators.
+// Supports filtering by status query parameter (e.g., ?status=running).
 func (ds *DashboardServer) handleOrchestrators(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 
-	infos, err := ds.registry.GetOrchestratorInfos()
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Check for status filter
+	statusFilter := r.URL.Query().Get("status")
+	var status OrchestratorStatus
+	if statusFilter != "" {
+		status = OrchestratorStatus(statusFilter)
+	}
+
+	infos, err := ds.registry.ListOrchestratorsByStatus(status)
 	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
 		json.NewEncoder(w).Encode(map[string]string{
 			"error": err.Error(),
 		})
@@ -505,6 +520,88 @@ func (ds *DashboardServer) handleOrchestrators(w http.ResponseWriter, r *http.Re
 	}
 
 	json.NewEncoder(w).Encode(infos)
+}
+
+// handleOrchestratorByProject handles GET and DELETE for a specific orchestrator by project.
+// GET /api/orchestrators/:project - returns details for a specific orchestrator
+// DELETE /api/orchestrators/:project - force cleanup (admin action)
+func (ds *DashboardServer) handleOrchestratorByProject(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Control-Allow-Methods", "GET, DELETE, OPTIONS")
+	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+
+	// Handle CORS preflight
+	if r.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+
+	// Extract project name from path
+	project := strings.TrimPrefix(r.URL.Path, "/api/orchestrators/")
+	if project == "" {
+		http.Error(w, "Project name required", http.StatusBadRequest)
+		return
+	}
+
+	switch r.Method {
+	case http.MethodGet:
+		ds.handleGetOrchestrator(w, project)
+	case http.MethodDelete:
+		ds.handleDeleteOrchestrator(w, project)
+	default:
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+// handleGetOrchestrator returns details for a specific orchestrator.
+func (ds *DashboardServer) handleGetOrchestrator(w http.ResponseWriter, project string) {
+	info, err := ds.registry.GetOrchestratorInfoByProject(project)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{
+			"error": err.Error(),
+		})
+		return
+	}
+
+	if info == nil {
+		w.WriteHeader(http.StatusNotFound)
+		json.NewEncoder(w).Encode(map[string]string{
+			"error": "orchestrator not found",
+		})
+		return
+	}
+
+	json.NewEncoder(w).Encode(info)
+}
+
+// handleDeleteOrchestrator force-removes an orchestrator from the registry.
+// This is an admin action for cleanup purposes.
+func (ds *DashboardServer) handleDeleteOrchestrator(w http.ResponseWriter, project string) {
+	removed, err := ds.registry.ForceDeregisterByProject(project)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]any{
+			"success": false,
+			"error":   err.Error(),
+		})
+		return
+	}
+
+	if !removed {
+		w.WriteHeader(http.StatusNotFound)
+		json.NewEncoder(w).Encode(map[string]any{
+			"success": false,
+			"error":   "orchestrator not found",
+		})
+		return
+	}
+
+	json.NewEncoder(w).Encode(map[string]any{
+		"success": true,
+		"message": fmt.Sprintf("Orchestrator '%s' removed from registry", project),
+	})
 }
 
 // handleMetrics returns productivity metrics.
