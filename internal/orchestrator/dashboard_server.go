@@ -19,15 +19,16 @@ import (
 
 // DashboardServer provides a unified web dashboard for the orchestrator.
 type DashboardServer struct {
-	cfg         *RunConfig
-	state       *StateManager
-	liveState   *LiveState
-	events      *EventBroadcaster
-	reviewGate  *ReviewGate
-	server      *http.Server
-	port        int
-	mu          sync.Mutex
-	registry    *RegistryManager
+	cfg                  *RunConfig
+	state                *StateManager
+	liveState            *LiveState
+	events               *EventBroadcaster
+	reviewGate           *ReviewGate
+	server               *http.Server
+	port                 int
+	mu                   sync.Mutex
+	registry             *RegistryManager
+	connectivityChecker  *ConnectivityChecker
 }
 
 // NewDashboardServer creates a new dashboard server instance.
@@ -35,13 +36,16 @@ func NewDashboardServer(cfg *RunConfig, state *StateManager, events *EventBroadc
 	if port == 0 {
 		port = 8123
 	}
+	registry := GetGlobalRegistry()
+	connChecker := NewConnectivityChecker(registry)
 	return &DashboardServer{
-		cfg:       cfg,
-		state:     state,
-		liveState: NewLiveState(cfg),
-		events:    events,
-		port:      port,
-		registry:  GetGlobalRegistry(),
+		cfg:                 cfg,
+		state:               state,
+		liveState:           NewLiveState(cfg),
+		events:              events,
+		port:                port,
+		registry:            registry,
+		connectivityChecker: connChecker,
 	}
 }
 
@@ -107,6 +111,9 @@ func (ds *DashboardServer) Start() error {
 		}
 	}()
 
+	// Start connectivity checker for monitoring orchestrator health
+	ds.connectivityChecker.Start()
+
 	// Auto-launch browser after short delay to ensure server is ready
 	go func() {
 		time.Sleep(500 * time.Millisecond)
@@ -164,6 +171,11 @@ func (ds *DashboardServer) openBrowser(url string) {
 
 // Stop gracefully shuts down the dashboard server.
 func (ds *DashboardServer) Stop() error {
+	// Stop connectivity checker
+	if ds.connectivityChecker != nil {
+		ds.connectivityChecker.Stop()
+	}
+
 	if ds.server == nil {
 		return nil
 	}
@@ -525,7 +537,25 @@ func (ds *DashboardServer) handleOrchestrators(w http.ResponseWriter, r *http.Re
 		return
 	}
 
+	// Enrich with connectivity status
+	ds.enrichWithConnectivity(infos)
+
 	json.NewEncoder(w).Encode(infos)
+}
+
+// enrichWithConnectivity adds connectivity status to orchestrator infos.
+func (ds *DashboardServer) enrichWithConnectivity(infos []OrchestratorInfo) {
+	if ds.connectivityChecker == nil {
+		return
+	}
+
+	for i := range infos {
+		connectivity, lastSeen := ds.connectivityChecker.GetStatus(infos[i].Project)
+		infos[i].Connectivity = connectivity
+		if connectivity == ConnectivityOffline && !lastSeen.IsZero() {
+			infos[i].LastSeen = lastSeen.Format(time.RFC3339)
+		}
+	}
 }
 
 // handleOrchestratorByProject handles GET and DELETE for a specific orchestrator by project.
@@ -1189,6 +1219,38 @@ const dashboardHTML = `<!DOCTYPE html>
         .orch-link a:hover { text-decoration: underline; }
         .no-orchestrators { color: #666; font-style: italic; }
 
+        /* Connectivity indicators */
+        .connectivity-indicator {
+            display: inline-block;
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            margin-right: 8px;
+        }
+        .connectivity-online {
+            background: #00ff88;
+            box-shadow: 0 0 6px #00ff88;
+        }
+        .connectivity-offline {
+            background: #ff4444;
+            box-shadow: 0 0 6px #ff4444;
+        }
+        .connectivity-checking {
+            background: #ffaa00;
+            box-shadow: 0 0 6px #ffaa00;
+            animation: pulse 1s infinite;
+        }
+        .orch-connectivity {
+            min-width: 100px;
+            display: flex;
+            align-items: center;
+        }
+        .orch-last-seen {
+            color: #888;
+            font-size: 10px;
+            margin-left: 4px;
+        }
+
         /* Animations */
         @keyframes pulse {
             0%, 100% { opacity: 1; }
@@ -1447,22 +1509,31 @@ const dashboardHTML = `<!DOCTYPE html>
         function updateControlPanel(orchestrators) {
             const count = orchestrators.length;
             const others = orchestrators.filter(o => !o.is_current);
+            const onlineCount = orchestrators.filter(o => o.connectivity === 'online').length;
+            const offlineCount = orchestrators.filter(o => o.connectivity === 'offline').length;
 
             const countEl = document.getElementById('orchestrator-count');
             if (count === 1) {
-                countEl.innerHTML = '<span style="color:#00ff88">1 orchestrator running</span> (this one)';
+                countEl.innerHTML = '<span style="color:#00ff88">1 orchestrator</span> (this one)';
             } else {
-                countEl.innerHTML = '<span style="color:#00d9ff">' + count + ' orchestrators running</span>';
+                let statusText = count + ' orchestrators';
+                if (offlineCount > 0) {
+                    statusText += ' (<span style="color:#00ff88">' + onlineCount + ' online</span>, <span style="color:#ff4444">' + offlineCount + ' offline</span>)';
+                }
+                countEl.innerHTML = '<span style="color:#00d9ff">' + statusText + '</span>';
             }
 
             const linksEl = document.getElementById('orchestrator-links');
             if (others.length === 0) {
                 linksEl.innerHTML = '<span style="color:#666">No other orchestrators</span>';
             } else {
-                linksEl.innerHTML = others.map(o =>
-                    '<span class="orch-link-item"><a href="' + o.dashboard_url + '" target="_blank">' +
-                    o.project + '</a> (' + o.status + ')</span>'
-                ).join('');
+                linksEl.innerHTML = others.map(o => {
+                    const connectivity = o.connectivity || 'checking';
+                    const indicatorClass = 'connectivity-' + connectivity;
+                    const indicatorHtml = '<span class="connectivity-indicator ' + indicatorClass + '" style="width:8px;height:8px;margin-right:4px;"></span>';
+                    return '<span class="orch-link-item">' + indicatorHtml +
+                        '<a href="' + o.dashboard_url + '" target="_blank">' + o.project + '</a></span>';
+                }).join('');
             }
         }
 
@@ -1502,6 +1573,19 @@ const dashboardHTML = `<!DOCTYPE html>
                 });
         }
 
+        function formatLastSeen(isoString) {
+            if (!isoString) return '';
+            const d = new Date(isoString);
+            const now = new Date();
+            const diffMs = now - d;
+            const diffMins = Math.floor(diffMs / 60000);
+            if (diffMins < 1) return 'just now';
+            if (diffMins < 60) return diffMins + 'm ago';
+            const diffHours = Math.floor(diffMins / 60);
+            if (diffHours < 24) return diffHours + 'h ago';
+            return d.toLocaleDateString();
+        }
+
         function updateOrchestrators(data) {
             orchestrators = data || [];
             const container = document.getElementById('orchestrators-list');
@@ -1518,17 +1602,46 @@ const dashboardHTML = `<!DOCTYPE html>
                 const statusClass = 'status-' + o.status;
                 const statsStr = o.num_workers + ' workers, ' + o.total_issues + ' issues';
 
+                // Connectivity status indicator
+                const connectivity = o.connectivity || 'checking';
+                const connectivityClass = 'connectivity-' + connectivity;
+                const lastSeenStr = connectivity === 'offline' && o.last_seen ?
+                    '<span class="orch-last-seen">' + formatLastSeen(o.last_seen) + '</span>' : '';
+
+                // Show "Remove" button for offline orchestrators, "View" for online
+                const actionLinks = connectivity === 'offline' ?
+                    '<button class="control-btn" style="padding:4px 8px;margin:0;" onclick="removeOrchestrator(\'' + o.project + '\')">Remove</button>' :
+                    '<a href="#" onclick="switchToOrchestrator(\'' + o.project + '\', false); return false;">View</a>';
+
                 return '<div class="orchestrator-card">' +
+                    '<span class="orch-connectivity">' +
+                        '<span class="connectivity-indicator ' + connectivityClass + '"></span>' +
+                        '<span>' + connectivity + '</span>' +
+                        lastSeenStr +
+                    '</span>' +
                     '<span class="orch-project">' + o.project + '</span>' +
                     '<span class="orch-status"><span class="status-badge ' + statusClass + '">' + o.status + '</span></span>' +
                     '<span class="orch-stats">' + statsStr + '</span>' +
                     '<span class="orch-uptime">' + (o.uptime || '--') + '</span>' +
-                    '<span class="orch-link">' +
-                        '<a href="#" onclick="switchToOrchestrator(\'' + o.project + '\', false); return false;">View Here</a>' +
-                        ' | <a href="' + o.dashboard_url + '" target="_blank">New Tab</a>' +
-                    '</span>' +
+                    '<span class="orch-link">' + actionLinks + '</span>' +
                 '</div>';
             }).join('');
+        }
+
+        function removeOrchestrator(project) {
+            if (!confirm('Remove offline orchestrator "' + project + '" from the registry?')) {
+                return;
+            }
+            fetch('/api/orchestrators/' + encodeURIComponent(project), {method: 'DELETE'})
+                .then(r => r.json())
+                .then(data => {
+                    if (data.success) {
+                        fetchOrchestrators();
+                    } else {
+                        alert('Failed to remove: ' + (data.error || 'Unknown error'));
+                    }
+                })
+                .catch(err => alert('Error: ' + err));
         }
 
         function fetchOrchestrators() {
