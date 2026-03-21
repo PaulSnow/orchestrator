@@ -359,6 +359,7 @@ OPTIONS`)
 	var dashboardServer *orchestrator.DashboardServer
 	if *webPort > 0 {
 		dashboardServer = orchestrator.NewDashboardServer(primaryCfg, state, events, *webPort)
+		orchestrator.SetGlobalDashboardServer(dashboardServer)
 		dashboardServer.Start()
 		fmt.Printf("  Dashboard: http://localhost:%d\n", *webPort)
 		defer dashboardServer.Stop()
@@ -682,6 +683,7 @@ func cmdReview(args []string) {
 	var dashboardServer *orchestrator.DashboardServer
 	if *webPort > 0 {
 		dashboardServer = orchestrator.NewDashboardServer(primaryCfg, state, events, *webPort)
+		orchestrator.SetGlobalDashboardServer(dashboardServer)
 		dashboardServer.SetReviewGate(reviewGate)
 		dashboardServer.Start()
 		fmt.Printf("Dashboard: http://localhost:%d\n", *webPort)

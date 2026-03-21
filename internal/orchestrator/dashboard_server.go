@@ -19,15 +19,18 @@ import (
 
 // DashboardServer provides a unified web dashboard for the orchestrator.
 type DashboardServer struct {
-	cfg         *RunConfig
-	state       *StateManager
-	liveState   *LiveState
-	events      *EventBroadcaster
-	reviewGate  *ReviewGate
-	server      *http.Server
-	port        int
-	mu          sync.Mutex
-	registry    *RegistryManager
+	cfg          *RunConfig
+	state        *StateManager
+	liveState    *LiveState
+	events       *EventBroadcaster
+	reviewGate   *ReviewGate
+	server       *http.Server
+	port         int
+	mu           sync.Mutex
+	registry     *RegistryManager
+	stopChan     chan struct{} // Channel to signal orchestrator shutdown
+	stopOnce     sync.Once     // Ensure we only signal once
+	stopRequested bool         // Flag to track if stop was requested
 }
 
 // NewDashboardServer creates a new dashboard server instance.
@@ -42,7 +45,21 @@ func NewDashboardServer(cfg *RunConfig, state *StateManager, events *EventBroadc
 		events:    events,
 		port:      port,
 		registry:  GetGlobalRegistry(),
+		stopChan:  make(chan struct{}),
 	}
+}
+
+// GetStopChannel returns the channel that signals shutdown request.
+// The orchestrator's monitor loop should select on this channel.
+func (ds *DashboardServer) GetStopChannel() <-chan struct{} {
+	return ds.stopChan
+}
+
+// StopRequested returns whether a stop was requested via the dashboard.
+func (ds *DashboardServer) StopRequested() bool {
+	ds.mu.Lock()
+	defer ds.mu.Unlock()
+	return ds.stopRequested
 }
 
 // SetReviewGate sets the review gate for accessing review results.
@@ -87,6 +104,7 @@ func (ds *DashboardServer) Start() error {
 	// Action endpoints
 	mux.HandleFunc("/api/open-tmux", ds.handleOpenTmux)
 	mux.HandleFunc("/api/reload", ds.handleReload)
+	mux.HandleFunc("/api/stop", ds.handleStopOrchestrator)
 
 	// Dashboard HTML
 	mux.HandleFunc("/", ds.handleDashboard)
@@ -724,6 +742,59 @@ func (ds *DashboardServer) handleReload(w http.ResponseWriter, r *http.Request) 
 	})
 }
 
+// handleStopOrchestrator handles requests to gracefully stop this orchestrator.
+// This endpoint is only callable when viewing the orchestrator directly (not via proxy).
+func (ds *DashboardServer) handleStopOrchestrator(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
+	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+
+	// Handle CORS preflight
+	if r.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	ds.mu.Lock()
+	alreadyStopping := ds.stopRequested
+	if !alreadyStopping {
+		ds.stopRequested = true
+	}
+	ds.mu.Unlock()
+
+	if alreadyStopping {
+		json.NewEncoder(w).Encode(map[string]any{
+			"success": false,
+			"error":   "Stop already in progress",
+		})
+		return
+	}
+
+	LogMsg(fmt.Sprintf("[dashboard] Stop requested via API for orchestrator: %s", ds.cfg.Project))
+
+	// Signal the stop channel (non-blocking)
+	ds.stopOnce.Do(func() {
+		close(ds.stopChan)
+	})
+
+	// Emit an event so the dashboard updates
+	ds.events.EmitEvent("orchestrator_stopping", map[string]any{
+		"project": ds.cfg.Project,
+		"message": "Orchestrator is shutting down",
+	})
+
+	json.NewEncoder(w).Encode(map[string]any{
+		"success": true,
+		"message": fmt.Sprintf("Stop signal sent to orchestrator '%s'. Graceful shutdown in progress.", ds.cfg.Project),
+	})
+}
+
 // handleProxy proxies requests to another orchestrator's dashboard.
 // This allows viewing other orchestrators without knowing their ports.
 func (ds *DashboardServer) handleProxy(w http.ResponseWriter, r *http.Request) {
@@ -1195,6 +1266,82 @@ const dashboardHTML = `<!DOCTYPE html>
             50% { opacity: 0.5; }
         }
         .running { animation: pulse 2s infinite; }
+
+        /* Stop button styles */
+        .control-btn.danger {
+            background: #5c0a0a;
+            border: 1px solid #ff4444;
+            color: #ff4444;
+        }
+        .control-btn.danger:hover {
+            background: #7a1a1a;
+        }
+        .control-btn.danger:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+
+        /* Confirmation Modal */
+        .modal-overlay {
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: rgba(0, 0, 0, 0.7);
+            z-index: 1000;
+            justify-content: center;
+            align-items: center;
+        }
+        .modal-overlay.active {
+            display: flex;
+        }
+        .modal {
+            background: #16213e;
+            border-radius: 12px;
+            padding: 24px;
+            max-width: 400px;
+            width: 90%;
+            border: 1px solid #333;
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
+        }
+        .modal h2 {
+            margin: 0 0 16px 0;
+            color: #ff4444;
+            font-size: 18px;
+        }
+        .modal p {
+            margin: 0 0 20px 0;
+            color: #ccc;
+            line-height: 1.5;
+        }
+        .modal-actions {
+            display: flex;
+            gap: 12px;
+            justify-content: flex-end;
+        }
+        .modal-btn {
+            padding: 10px 20px;
+            border-radius: 6px;
+            font-size: 14px;
+            cursor: pointer;
+            border: none;
+        }
+        .modal-btn.cancel {
+            background: #333;
+            color: #eee;
+        }
+        .modal-btn.cancel:hover {
+            background: #444;
+        }
+        .modal-btn.confirm-danger {
+            background: #ff4444;
+            color: #fff;
+        }
+        .modal-btn.confirm-danger:hover {
+            background: #ff6666;
+        }
     </style>
 </head>
 <body>
@@ -1234,6 +1381,19 @@ const dashboardHTML = `<!DOCTYPE html>
             <div class="phase" data-phase="completed">Done</div>
         </div>
 
+        <!-- Confirmation Modal for Stop Orchestrator -->
+        <div class="modal-overlay" id="stop-modal">
+            <div class="modal">
+                <h2>Stop Orchestrator?</h2>
+                <p>Are you sure you want to stop the orchestrator for <strong id="stop-project-name"></strong>?</p>
+                <p style="color: #ffaa00; font-size: 13px;">This will gracefully shut down all workers. Work in progress may be lost.</p>
+                <div class="modal-actions">
+                    <button class="modal-btn cancel" onclick="closeStopModal()">Cancel</button>
+                    <button class="modal-btn confirm-danger" onclick="confirmStopOrchestrator()">Stop Orchestrator</button>
+                </div>
+            </div>
+        </div>
+
         <!-- Control Panel -->
         <div class="control-panel">
             <div class="control-section">
@@ -1246,6 +1406,11 @@ const dashboardHTML = `<!DOCTYPE html>
                 <button class="control-btn" onclick="openTmux()">Open tmux session</button>
                 <button class="control-btn" onclick="refreshState()">Refresh state</button>
                 <button class="control-btn" onclick="syncFromGitHub()" style="background: #238636;">Sync from GitHub</button>
+                <!-- Stop button only visible when viewing this orchestrator directly (not via proxy) -->
+                <button class="control-btn danger" id="stop-btn" onclick="showStopModal()" style="display: none;">Stop Orchestrator</button>
+                <span id="stop-proxy-msg" style="display: none; color: #888; font-size: 11px; margin-left: 8px;">
+                    To stop this orchestrator, <a href="#" id="stop-proxy-link" style="color: #00d9ff;">open its dashboard directly</a>
+                </span>
             </div>
         </div>
 
@@ -1502,6 +1667,71 @@ const dashboardHTML = `<!DOCTYPE html>
                 });
         }
 
+        // Stop Orchestrator Modal Functions
+        function showStopModal() {
+            // Only show if not viewing via proxy
+            if (viewingOrchestrator) {
+                alert('You cannot stop an orchestrator while viewing it via proxy. Switch to that orchestrator\'s dashboard directly.');
+                return;
+            }
+            document.getElementById('stop-project-name').textContent = state.project || 'Unknown';
+            document.getElementById('stop-modal').classList.add('active');
+        }
+
+        function closeStopModal() {
+            document.getElementById('stop-modal').classList.remove('active');
+        }
+
+        function confirmStopOrchestrator() {
+            closeStopModal();
+            const btn = document.getElementById('stop-btn');
+            btn.disabled = true;
+            btn.textContent = 'Stopping...';
+
+            fetch('/api/stop', {method: 'POST'})
+                .then(r => r.json())
+                .then(data => {
+                    if (data.success) {
+                        addEvent('stop_requested', { message: data.message });
+                        btn.textContent = 'Shutdown in progress';
+                    } else {
+                        alert('Failed to stop: ' + (data.error || 'Unknown error'));
+                        btn.disabled = false;
+                        btn.textContent = 'Stop Orchestrator';
+                    }
+                })
+                .catch(err => {
+                    alert('Error: ' + err);
+                    btn.disabled = false;
+                    btn.textContent = 'Stop Orchestrator';
+                });
+        }
+
+        // Update stop button visibility based on whether we're viewing via proxy
+        function updateStopButtonVisibility() {
+            const btn = document.getElementById('stop-btn');
+            const proxyMsg = document.getElementById('stop-proxy-msg');
+            const proxyLink = document.getElementById('stop-proxy-link');
+
+            // Only show stop button when viewing this orchestrator directly (not via proxy)
+            if (!viewingOrchestrator) {
+                btn.style.display = 'inline-block';
+                if (proxyMsg) proxyMsg.style.display = 'none';
+            } else {
+                btn.style.display = 'none';
+                // Show message with link to the orchestrator's direct dashboard
+                if (proxyMsg) {
+                    proxyMsg.style.display = 'inline';
+                    // Find the orchestrator's dashboard URL
+                    const orch = orchestrators.find(o => o.project === viewingOrchestrator);
+                    if (orch && proxyLink) {
+                        proxyLink.href = orch.dashboard_url;
+                        proxyLink.target = '_blank';
+                    }
+                }
+            }
+        }
+
         function updateOrchestrators(data) {
             orchestrators = data || [];
             const container = document.getElementById('orchestrators-list');
@@ -1524,8 +1754,8 @@ const dashboardHTML = `<!DOCTYPE html>
                     '<span class="orch-stats">' + statsStr + '</span>' +
                     '<span class="orch-uptime">' + (o.uptime || '--') + '</span>' +
                     '<span class="orch-link">' +
-                        '<a href="#" onclick="switchToOrchestrator(\'' + o.project + '\', false); return false;">View Here</a>' +
-                        ' | <a href="' + o.dashboard_url + '" target="_blank">New Tab</a>' +
+                        '<button class="control-btn" style="padding:4px 8px;font-size:11px;" onclick="switchToOrchestrator(\'' + o.project + '\', false)">View</button> ' +
+                        '<button class="control-btn" style="padding:4px 8px;font-size:11px;background:#3a2a0a;border-color:#ffaa00;color:#ffaa00;" onclick="removeOrchestrator(\'' + o.project + '\')">Remove</button>' +
                     '</span>' +
                 '</div>';
             }).join('');
@@ -1559,6 +1789,8 @@ const dashboardHTML = `<!DOCTYPE html>
                 updateOrchestrators(orchestratorsData);
                 updateControlPanel(orchestratorsData);
             }
+            // Show stop button when viewing directly (not via proxy)
+            updateStopButtonVisibility();
         });
 
         // SSE connection
@@ -1637,6 +1869,15 @@ const dashboardHTML = `<!DOCTYPE html>
 
         evtSource.addEventListener('issue_review', (e) => {
             addEvent('issue_review', JSON.parse(e.data));
+        });
+
+        evtSource.addEventListener('orchestrator_stopping', (e) => {
+            const data = JSON.parse(e.data);
+            addEvent('orchestrator_stopping', data);
+            // Update UI to show shutdown in progress
+            const btn = document.getElementById('stop-btn');
+            btn.disabled = true;
+            btn.textContent = 'Shutting down...';
         });
 
         evtSource.onerror = () => {
@@ -1719,6 +1960,9 @@ const dashboardHTML = `<!DOCTYPE html>
             }
 
             viewingOrchestrator = project;
+
+            // Hide stop button when viewing via proxy
+            updateStopButtonVisibility();
 
             // Show breadcrumb
             const breadcrumb = document.getElementById('breadcrumb');
@@ -1812,6 +2056,9 @@ const dashboardHTML = `<!DOCTYPE html>
         function returnToHub() {
             viewingOrchestrator = null;
 
+            // Show stop button when viewing hub directly
+            updateStopButtonVisibility();
+
             // Hide breadcrumb
             document.getElementById('breadcrumb').style.display = 'none';
 
@@ -1873,6 +2120,13 @@ const dashboardHTML = `<!DOCTYPE html>
             });
             newEvtSource.addEventListener('reviewing_issue', (e) => addEvent('reviewing_issue', JSON.parse(e.data)));
             newEvtSource.addEventListener('issue_review', (e) => addEvent('issue_review', JSON.parse(e.data)));
+            newEvtSource.addEventListener('orchestrator_stopping', (e) => {
+                const data = JSON.parse(e.data);
+                addEvent('orchestrator_stopping', data);
+                const btn = document.getElementById('stop-btn');
+                btn.disabled = true;
+                btn.textContent = 'Shutting down...';
+            });
             newEvtSource.onerror = () => addEvent('connection_error', null);
 
             // Refresh hub state
@@ -1903,6 +2157,27 @@ const dashboardHTML = `<!DOCTYPE html>
         // Initial switcher update
         if (orchestrators && orchestrators.length > 0) {
             updateSwitcherDropdown(orchestrators);
+        }
+
+        // Remove an orchestrator from the registry (for offline/stale entries)
+        function removeOrchestrator(project) {
+            if (!confirm('Remove orchestrator "' + project + '" from the registry?\n\nThis only removes the registry entry. If the orchestrator is still running, it will re-register.')) {
+                return;
+            }
+
+            fetch('/api/orchestrators/' + encodeURIComponent(project), {method: 'DELETE'})
+                .then(r => r.json())
+                .then(data => {
+                    if (data.success) {
+                        addEvent('orchestrator_removed', { project: project });
+                        fetchOrchestrators();
+                    } else {
+                        alert('Failed to remove: ' + (data.error || 'Unknown error'));
+                    }
+                })
+                .catch(err => {
+                    alert('Error: ' + err);
+                });
         }
     </script>
 </body>

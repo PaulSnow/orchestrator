@@ -16,6 +16,12 @@ var (
 	globalEventBroadcasterMu sync.RWMutex
 )
 
+// globalDashboardServer is the shared dashboard server reference.
+var (
+	globalDashboardServer   *DashboardServer
+	globalDashboardServerMu sync.RWMutex
+)
+
 // SetGlobalEventBroadcaster sets the global event broadcaster.
 func SetGlobalEventBroadcaster(eb *EventBroadcaster) {
 	globalEventBroadcasterMu.Lock()
@@ -28,6 +34,20 @@ func GetGlobalEventBroadcaster() *EventBroadcaster {
 	globalEventBroadcasterMu.RLock()
 	defer globalEventBroadcasterMu.RUnlock()
 	return globalEventBroadcaster
+}
+
+// SetGlobalDashboardServer sets the global dashboard server reference.
+func SetGlobalDashboardServer(ds *DashboardServer) {
+	globalDashboardServerMu.Lock()
+	defer globalDashboardServerMu.Unlock()
+	globalDashboardServer = ds
+}
+
+// GetGlobalDashboardServer returns the global dashboard server reference.
+func GetGlobalDashboardServer() *DashboardServer {
+	globalDashboardServerMu.RLock()
+	defer globalDashboardServerMu.RUnlock()
+	return globalDashboardServer
 }
 
 // LogMsg prints a timestamped log message.
@@ -1017,9 +1037,25 @@ func RunMonitorLoop(cfg *RunConfig, state *StateManager, noDelay bool) {
 	activityLogger := InitActivityLogger(cfg.Project)
 	activityLogger.LogOrchestratorStarted(cfg.ConfigPath, cfg.NumWorkers, len(cfg.Issues))
 
+	// Get stop channel from dashboard server if available
+	var stopChan <-chan struct{}
+	if ds := GetGlobalDashboardServer(); ds != nil {
+		stopChan = ds.GetStopChannel()
+	}
+
 	if !noDelay {
 		LogMsg("Waiting 60s for workers to initialize...")
-		time.Sleep(60 * time.Second)
+		if stopChan != nil {
+			select {
+			case <-stopChan:
+				LogMsg("Stop requested during initialization. Shutting down.")
+				activityLogger.LogOrchestratorCompleted(0, 0)
+				return
+			case <-time.After(60 * time.Second):
+			}
+		} else {
+			time.Sleep(60 * time.Second)
+		}
 	} else {
 		LogMsg("Skipping initial delay (--no-delay)")
 	}
@@ -1039,6 +1075,20 @@ func RunMonitorLoop(cfg *RunConfig, state *StateManager, noDelay bool) {
 
 	cycle := 0
 	for {
+		// Check for stop signal at start of each cycle
+		if stopChan != nil {
+			select {
+			case <-stopChan:
+				LogMsg("Stop requested via dashboard. Initiating graceful shutdown.")
+				state.LogEvent(map[string]any{"action": "shutdown", "reason": "user_requested"})
+				activityLogger.LogOrchestratorCompleted(GetCompletedCount(cfg), GetFailedCount(cfg))
+				performGracefulShutdown(cfg, state)
+				return
+			default:
+				// No stop signal, continue
+			}
+		}
+
 		cycle++
 		LogMsg(fmt.Sprintf("==== Cycle %d starting ====", cycle))
 
@@ -1147,7 +1197,21 @@ func RunMonitorLoop(cfg *RunConfig, state *StateManager, noDelay bool) {
 			globalEventBroadcaster.EmitProgressUpdate(cfg)
 		}
 
-		time.Sleep(time.Duration(cfg.CycleInterval) * time.Second)
+		// Sleep with stop signal check
+		if stopChan != nil {
+			select {
+			case <-stopChan:
+				LogMsg("Stop requested via dashboard. Initiating graceful shutdown.")
+				state.LogEvent(map[string]any{"action": "shutdown", "reason": "user_requested"})
+				activityLogger.LogOrchestratorCompleted(GetCompletedCount(cfg), GetFailedCount(cfg))
+				performGracefulShutdown(cfg, state)
+				return
+			case <-time.After(time.Duration(cfg.CycleInterval) * time.Second):
+				// Normal cycle complete
+			}
+		} else {
+			time.Sleep(time.Duration(cfg.CycleInterval) * time.Second)
+		}
 	}
 
 	// Emit completion phase
@@ -1155,6 +1219,28 @@ func RunMonitorLoop(cfg *RunConfig, state *StateManager, noDelay bool) {
 		globalEventBroadcaster.SetPhase(PhaseCompleted, "all issues done")
 	}
 	LogMsg("Orchestrator monitor exited.")
+}
+
+// performGracefulShutdown stops all workers and cleans up.
+func performGracefulShutdown(cfg *RunConfig, state *StateManager) {
+	LogMsg("Performing graceful shutdown...")
+
+	// Stop all running worker processes
+	pm := GetProcessManager()
+	runningWorkers := pm.GetRunningWorkers()
+	if len(runningWorkers) > 0 {
+		LogMsg(fmt.Sprintf("Stopping %d worker processes...", len(runningWorkers)))
+		pm.StopAll()
+	}
+
+	// Emit shutdown event
+	if globalEventBroadcaster != nil {
+		globalEventBroadcaster.SetPhase(PhaseCompleted, "shutdown requested")
+	}
+
+	// Print summary
+	printSummary(cfg, state)
+	LogMsg("Graceful shutdown complete.")
 }
 
 // RunMonitorLoopGlobal runs the unified monitor loop across all configs.
@@ -1190,15 +1276,43 @@ func RunMonitorLoopGlobal(
 	LogMsg("State: in-memory (source of truth: GitHub issues)")
 	LogMsg("")
 
+	// Get stop channel from dashboard server if available
+	var stopChan <-chan struct{}
+	if ds := GetGlobalDashboardServer(); ds != nil {
+		stopChan = ds.GetStopChannel()
+	}
+
 	if !noDelay {
 		LogMsg("Waiting 60s for workers to initialize...")
-		time.Sleep(60 * time.Second)
+		if stopChan != nil {
+			select {
+			case <-stopChan:
+				LogMsg("Stop requested during initialization. Shutting down.")
+				return
+			case <-time.After(60 * time.Second):
+			}
+		} else {
+			time.Sleep(60 * time.Second)
+		}
 	} else {
 		LogMsg("Skipping initial delay (--no-delay)")
 	}
 
 	cycle := 0
 	for {
+		// Check for stop signal at start of each cycle
+		if stopChan != nil {
+			select {
+			case <-stopChan:
+				LogMsg("Stop requested via dashboard. Initiating graceful shutdown.")
+				state.LogEvent(map[string]any{"action": "shutdown", "reason": "user_requested"})
+				performGracefulShutdownGlobal(configs, state)
+				return
+			default:
+				// No stop signal, continue
+			}
+		}
+
 		cycle++
 		LogMsg(fmt.Sprintf("==== Cycle %d starting ====", cycle))
 
@@ -1284,7 +1398,20 @@ func RunMonitorLoopGlobal(
 			globalEventBroadcaster.EmitProgressUpdate(configs[0])
 		}
 
-		time.Sleep(time.Duration(cycleInterval) * time.Second)
+		// Sleep with stop signal check
+		if stopChan != nil {
+			select {
+			case <-stopChan:
+				LogMsg("Stop requested via dashboard. Initiating graceful shutdown.")
+				state.LogEvent(map[string]any{"action": "shutdown", "reason": "user_requested"})
+				performGracefulShutdownGlobal(configs, state)
+				return
+			case <-time.After(time.Duration(cycleInterval) * time.Second):
+				// Normal cycle complete
+			}
+		} else {
+			time.Sleep(time.Duration(cycleInterval) * time.Second)
+		}
 	}
 
 	// Emit completion phase
@@ -1292,6 +1419,28 @@ func RunMonitorLoopGlobal(
 		globalEventBroadcaster.SetPhase(PhaseCompleted, "all issues done")
 	}
 	LogMsg("Unified orchestrator monitor exited.")
+}
+
+// performGracefulShutdownGlobal stops all workers across all configs.
+func performGracefulShutdownGlobal(configs []*RunConfig, state *StateManager) {
+	LogMsg("Performing graceful shutdown...")
+
+	// Stop all running worker processes
+	pm := GetProcessManager()
+	runningWorkers := pm.GetRunningWorkers()
+	if len(runningWorkers) > 0 {
+		LogMsg(fmt.Sprintf("Stopping %d worker processes...", len(runningWorkers)))
+		pm.StopAll()
+	}
+
+	// Emit shutdown event
+	if globalEventBroadcaster != nil {
+		globalEventBroadcaster.SetPhase(PhaseCompleted, "shutdown requested")
+	}
+
+	// Print summary
+	printSummaryGlobal(configs, state)
+	LogMsg("Graceful shutdown complete.")
 }
 
 func printSummaryGlobal(configs []*RunConfig, state *StateManager) {
