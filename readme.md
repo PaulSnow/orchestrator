@@ -58,6 +58,8 @@ The orchestrator parses:
 | `status` | Show current status |
 | `review --config <file>` | Validate issues without launching |
 | `cleanup` | Remove worktrees and state |
+| `cleanup --logs` | Show dangling log files |
+| `cleanup --logs --all` | Remove all log files for project |
 | `dashboard` | Open web dashboard |
 
 ## How It Works
@@ -68,6 +70,24 @@ The orchestrator parses:
 4. **Launch workers** - Claude Code sessions in tmux windows
 5. **Monitor loop** - Detect completions, reassign workers
 6. **Update epic** - Check off completed tasks
+7. **Cleanup logs** - Remove log files when issues/epics complete
+
+## Log Management
+
+Worker logs are stored in `/tmp` with identifiers for traceability:
+```
+/tmp/orchestrator-{project}-epic{N}-issue{M}-worker{W}.log
+```
+
+Logs are automatically cleaned up when:
+- An issue's PR is merged
+- An epic completes (all issues done)
+
+Manual cleanup:
+```bash
+orchestrator cleanup --logs        # Show dangling logs
+orchestrator cleanup --logs --all  # Remove all logs for project
+```
 
 ## Documentation
 
