@@ -39,6 +39,8 @@ func main() {
 		cmdReview(args)
 	case "cleanup":
 		cmdCleanup(args)
+	case "dead-cleanup":
+		cmdDeadCleanup(args)
 	case "status":
 		cmdStatus(args)
 	case "dashboard":
@@ -102,15 +104,16 @@ CONFIGURATION
     - [x] #103 - Already completed (skipped)
 
 COMMANDS
-  launch     Start workers and monitor until completion (main command)
-  review     Run review gate only, don't launch workers
-  cleanup    Kill tmux session and optionally remove worktrees
-  status     Show current progress (one-shot)
-  dashboard  Live terminal dashboard with auto-refresh
-  metrics    Show productivity metrics and trends
-  activity   Show recent activity log
-  add-issue  Add an issue to config mid-run
-  version    Show version information
+  launch       Start workers and monitor until completion (main command)
+  review       Run review gate only, don't launch workers
+  cleanup      Kill tmux session and optionally remove worktrees
+  dead-cleanup Clean up resources from dead orchestrators
+  status       Show current progress (one-shot)
+  dashboard    Live terminal dashboard with auto-refresh
+  metrics      Show productivity metrics and trends
+  activity     Show recent activity log
+  add-issue    Add an issue to config mid-run
+  version      Show version information
 
 EXAMPLES
 
@@ -363,14 +366,28 @@ OPTIONS`)
 		fmt.Printf("  Dashboard: http://localhost:%d\n", *webPort)
 		defer dashboardServer.Stop()
 
-		// Register this orchestrator in the global registry
+		// Register this orchestrator in the global registry with resource tracking
 		if !*dryRun {
-			if err := orchestrator.RegisterOrchestrator(
+			// Collect worktree bases and repo paths from all configs
+			var worktreeBases []string
+			var repoPaths []string
+			for _, cfg := range configs {
+				for _, repo := range cfg.Repos {
+					if repo.WorktreeBase != "" {
+						worktreeBases = append(worktreeBases, repo.WorktreeBase)
+						repoPaths = append(repoPaths, repo.Path)
+					}
+				}
+			}
+			if err := orchestrator.RegisterOrchestratorWithFullResources(
 				primaryCfg.Project,
 				*webPort,
 				primaryCfg.ConfigPath,
 				numWorkers,
 				len(primaryCfg.Issues),
+				tmuxSession,
+				worktreeBases,
+				repoPaths,
 			); err != nil {
 				fmt.Printf("  Warning: Failed to register orchestrator: %v\n", err)
 			}
@@ -688,12 +705,15 @@ func cmdReview(args []string) {
 		fmt.Println()
 
 		// Register this orchestrator in the global registry
-		if err := orchestrator.RegisterOrchestrator(
+		// Review mode has no workers and no worktrees to track
+		if err := orchestrator.RegisterOrchestratorWithResources(
 			primaryCfg.Project,
 			*webPort,
 			primaryCfg.ConfigPath,
 			0, // no workers in review mode
 			len(primaryCfg.Issues),
+			"", // no tmux session in review mode
+			nil,
 		); err != nil {
 			fmt.Printf("Warning: Failed to register orchestrator: %v\n", err)
 		}
@@ -764,6 +784,99 @@ OPTIONS`)
 
 	cfg, _ := orchestrator.LoadConfig(*config)
 	orchestrator.RunCleanup(cfg, *keepWorktrees)
+}
+
+func cmdDeadCleanup(args []string) {
+	fs := flag.NewFlagSet("dead-cleanup", flag.ExitOnError)
+	fs.Usage = func() {
+		fmt.Println(`orchestrator dead-cleanup - Clean up resources from dead orchestrators
+
+DESCRIPTION
+  Finds orchestrator processes that have died and cleans up their resources:
+  - Kills orphaned tmux sessions
+  - Removes temp files (signals, logs, prompts)
+  - Removes git worktrees (unless --preserve-worktrees)
+  - Removes registry entries
+
+  This is useful when an orchestrator crashes or is killed without proper cleanup.
+
+USAGE
+  orchestrator dead-cleanup
+  orchestrator dead-cleanup --preserve-worktrees
+  orchestrator dead-cleanup --dry-run
+
+OPTIONS`)
+		fs.PrintDefaults()
+	}
+	preserveWorktrees := fs.Bool("preserve-worktrees", false, "Keep worktrees (don't delete)")
+	dryRun := fs.Bool("dry-run", false, "Show what would be cleaned up without making changes")
+	fs.Parse(args)
+
+	fmt.Println("+" + strings.Repeat("=", 48) + "+")
+	fmt.Println("|  Dead Orchestrator Cleanup                      |")
+	fmt.Println("+" + strings.Repeat("=", 48) + "+")
+	fmt.Println()
+
+	// Get list of all orchestrators first
+	entries, err := orchestrator.ListAllOrchestrators()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error listing orchestrators: %v\n", err)
+		os.Exit(1)
+	}
+
+	// Check which are dead
+	deadCount := 0
+	fmt.Println("Checking orchestrator registry...")
+	for _, entry := range entries {
+		// Since ListAllOrchestrators already filters out dead entries,
+		// we need to load the raw registry to find dead ones
+		fmt.Printf("  %s (PID %d, port %d): running\n", entry.Project, entry.PID, entry.Port)
+	}
+
+	// Get the raw count by loading registry directly
+	rm := orchestrator.GetGlobalRegistry()
+	rawEntries, err := rm.ListOrchestrators()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+
+	deadCount = len(entries) - len(rawEntries)
+	if deadCount < 0 {
+		deadCount = 0
+	}
+
+	fmt.Println()
+
+	if deadCount == 0 && len(rawEntries) == len(entries) {
+		// No dead orchestrators found - but we already cleaned during ListOrchestrators
+		// Let's check if there were any cleaned
+		fmt.Println("No dead orchestrators found.")
+		fmt.Println()
+		return
+	}
+
+	if *dryRun {
+		fmt.Println("*** DRY RUN - no changes will be made ***")
+		fmt.Println()
+	}
+
+	config := orchestrator.CleanupConfig{
+		PreserveWorktrees: *preserveWorktrees,
+		LogCleanupActions: true,
+	}
+
+	if !*dryRun {
+		cleaned, err := orchestrator.CleanupDeadOrchestrators(config)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error during cleanup: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Printf("Cleaned up %d dead orchestrator(s).\n", cleaned)
+	}
+
+	fmt.Println()
+	fmt.Println("Cleanup complete.")
 }
 
 func cmdStatus(args []string) {

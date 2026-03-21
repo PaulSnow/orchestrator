@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -21,14 +22,25 @@ const (
 
 // OrchestratorEntry represents a registered orchestrator instance.
 type OrchestratorEntry struct {
-	Project    string             `json:"project"`
-	Port       int                `json:"port"`
-	PID        int                `json:"pid"`
-	ConfigPath string             `json:"config_path"`
-	StartTime  string             `json:"start_time"`
-	Status     OrchestratorStatus `json:"status"`
-	NumWorkers int                `json:"num_workers,omitempty"`
-	TotalIssues int               `json:"total_issues,omitempty"`
+	Project       string             `json:"project"`
+	Port          int                `json:"port"`
+	PID           int                `json:"pid"`
+	ConfigPath    string             `json:"config_path"`
+	StartTime     string             `json:"start_time"`
+	Status        OrchestratorStatus `json:"status"`
+	NumWorkers    int                `json:"num_workers,omitempty"`
+	TotalIssues   int                `json:"total_issues,omitempty"`
+	TmuxSession   string             `json:"tmux_session,omitempty"`
+	WorktreeBases []string           `json:"worktree_bases,omitempty"`
+	RepoPaths     []string           `json:"repo_paths,omitempty"` // Repo paths for git worktree cleanup
+}
+
+// CleanupConfig controls how dead orchestrator resources are cleaned up.
+type CleanupConfig struct {
+	// PreserveWorktrees keeps worktrees intact for manual inspection
+	PreserveWorktrees bool
+	// LogCleanupActions logs what cleanup actions are taken
+	LogCleanupActions bool
 }
 
 // Registry holds all registered orchestrator instances.
@@ -93,7 +105,22 @@ func (rm *RegistryManager) saveRegistry(reg *Registry) error {
 
 // Register registers the current orchestrator instance.
 // Returns error if another orchestrator is already running on the same project.
+// Deprecated: Use RegisterWithResources for full resource tracking.
 func (rm *RegistryManager) Register(project string, port int, configPath string, numWorkers, totalIssues int) error {
+	return rm.RegisterWithResources(project, port, configPath, numWorkers, totalIssues, "", nil)
+}
+
+// RegisterWithResources registers the current orchestrator instance with full resource tracking.
+// Returns error if another orchestrator is already running on the same project.
+// Deprecated: Use RegisterWithFullResources for proper git worktree cleanup support.
+func (rm *RegistryManager) RegisterWithResources(project string, port int, configPath string, numWorkers, totalIssues int, tmuxSession string, worktreeBases []string) error {
+	return rm.RegisterWithFullResources(project, port, configPath, numWorkers, totalIssues, tmuxSession, worktreeBases, nil)
+}
+
+// RegisterWithFullResources registers the current orchestrator instance with full resource tracking
+// including repo paths for proper git worktree cleanup.
+// Returns error if another orchestrator is already running on the same project.
+func (rm *RegistryManager) RegisterWithFullResources(project string, port int, configPath string, numWorkers, totalIssues int, tmuxSession string, worktreeBases []string, repoPaths []string) error {
 	rm.mu.Lock()
 	defer rm.mu.Unlock()
 
@@ -114,14 +141,17 @@ func (rm *RegistryManager) Register(project string, port int, configPath string,
 	}
 
 	entry := OrchestratorEntry{
-		Project:     project,
-		Port:        port,
-		PID:         myPID,
-		ConfigPath:  configPath,
-		StartTime:   NowISO(),
-		Status:      StatusRunning,
-		NumWorkers:  numWorkers,
-		TotalIssues: totalIssues,
+		Project:       project,
+		Port:          port,
+		PID:           myPID,
+		ConfigPath:    configPath,
+		StartTime:     NowISO(),
+		Status:        StatusRunning,
+		NumWorkers:    numWorkers,
+		TotalIssues:   totalIssues,
+		TmuxSession:   tmuxSession,
+		WorktreeBases: worktreeBases,
+		RepoPaths:     repoPaths,
 	}
 
 	// Remove any stale entry for this PID (shouldn't exist, but just in case)
@@ -214,7 +244,7 @@ func (rm *RegistryManager) filterByPID(entries []OrchestratorEntry, pid int) []O
 	return result
 }
 
-// ListOrchestrators returns all registered orchestrators, cleaning up stale entries.
+// ListOrchestrators returns all registered orchestrators, cleaning up stale entries and their resources.
 func (rm *RegistryManager) ListOrchestrators() ([]OrchestratorEntry, error) {
 	rm.mu.Lock()
 	defer rm.mu.Unlock()
@@ -227,12 +257,15 @@ func (rm *RegistryManager) ListOrchestrators() ([]OrchestratorEntry, error) {
 	// Clean up stale entries (PIDs that are no longer running)
 	activeEntries := make([]OrchestratorEntry, 0, len(reg.Orchestrators))
 	needsSave := false
+	cleanupConfig := DefaultCleanupConfig()
 
 	for _, entry := range reg.Orchestrators {
 		if isProcessRunning(entry.PID) {
 			activeEntries = append(activeEntries, entry)
 		} else {
 			needsSave = true
+			// Clean up resources for dead orchestrator
+			rm.cleanupDeadOrchestratorUnlocked(entry, cleanupConfig)
 		}
 	}
 
@@ -373,4 +406,208 @@ func UpdateOrchestratorStatus(status OrchestratorStatus) error {
 // ListAllOrchestrators is a convenience function to list all orchestrators.
 func ListAllOrchestrators() ([]OrchestratorInfo, error) {
 	return GetGlobalRegistry().GetOrchestratorInfos()
+}
+
+// RegisterOrchestratorWithResources is a convenience function to register with full resource tracking.
+func RegisterOrchestratorWithResources(project string, port int, configPath string, numWorkers, totalIssues int, tmuxSession string, worktreeBases []string) error {
+	return GetGlobalRegistry().RegisterWithResources(project, port, configPath, numWorkers, totalIssues, tmuxSession, worktreeBases)
+}
+
+// RegisterOrchestratorWithFullResources is a convenience function to register with full resource tracking
+// including repo paths for proper git worktree cleanup.
+func RegisterOrchestratorWithFullResources(project string, port int, configPath string, numWorkers, totalIssues int, tmuxSession string, worktreeBases, repoPaths []string) error {
+	return GetGlobalRegistry().RegisterWithFullResources(project, port, configPath, numWorkers, totalIssues, tmuxSession, worktreeBases, repoPaths)
+}
+
+// CleanupDeadOrchestrators finds and cleans up all dead orchestrators.
+// Returns the number of dead orchestrators cleaned up.
+func CleanupDeadOrchestrators(config CleanupConfig) (int, error) {
+	rm := GetGlobalRegistry()
+	rm.mu.Lock()
+	defer rm.mu.Unlock()
+
+	reg, err := rm.loadRegistry()
+	if err != nil {
+		return 0, fmt.Errorf("loading registry: %w", err)
+	}
+
+	activeEntries := make([]OrchestratorEntry, 0, len(reg.Orchestrators))
+	cleanedUp := 0
+
+	for _, entry := range reg.Orchestrators {
+		if isProcessRunning(entry.PID) {
+			activeEntries = append(activeEntries, entry)
+		} else {
+			cleanedUp++
+			rm.cleanupDeadOrchestratorUnlocked(entry, config)
+		}
+	}
+
+	// Save updated registry
+	if cleanedUp > 0 {
+		reg.Orchestrators = activeEntries
+		if err := rm.saveRegistry(reg); err != nil {
+			return cleanedUp, fmt.Errorf("saving registry: %w", err)
+		}
+	}
+
+	return cleanedUp, nil
+}
+
+// CleanupDeadOrchestrator cleans up resources for a dead orchestrator.
+// It kills the tmux session, removes temp files, optionally removes worktrees,
+// and removes the registry entry.
+func (rm *RegistryManager) CleanupDeadOrchestrator(entry OrchestratorEntry, config CleanupConfig) error {
+	rm.mu.Lock()
+	defer rm.mu.Unlock()
+	return rm.cleanupDeadOrchestratorUnlocked(entry, config)
+}
+
+// cleanupDeadOrchestratorUnlocked is the internal cleanup function that doesn't acquire the lock.
+// Used when the caller already holds the lock.
+func (rm *RegistryManager) cleanupDeadOrchestratorUnlocked(entry OrchestratorEntry, config CleanupConfig) error {
+	if config.LogCleanupActions {
+		LogMsg(fmt.Sprintf("[cleanup] Cleaning up dead orchestrator: %s (PID %d)", entry.Project, entry.PID))
+	}
+
+	// Kill tmux session if it exists
+	if entry.TmuxSession != "" {
+		if SessionExists(entry.TmuxSession) {
+			if config.LogCleanupActions {
+				LogMsg(fmt.Sprintf("[cleanup] Killing tmux session: %s", entry.TmuxSession))
+			}
+			KillSession(entry.TmuxSession)
+		}
+	}
+
+	// Remove temp files (signals, logs, prompts)
+	projectSafe := sanitizeProject(entry.Project)
+	for i := 1; i <= entry.NumWorkers; i++ {
+		// Signal files
+		signalPath := fmt.Sprintf("/tmp/%s-signal-%d", projectSafe, i)
+		if _, err := os.Stat(signalPath); err == nil {
+			if config.LogCleanupActions {
+				LogMsg(fmt.Sprintf("[cleanup] Removing signal file: %s", signalPath))
+			}
+			os.Remove(signalPath)
+		}
+
+		// Log files
+		logPath := fmt.Sprintf("/tmp/%s-worker-%d.log", projectSafe, i)
+		if _, err := os.Stat(logPath); err == nil {
+			if config.LogCleanupActions {
+				LogMsg(fmt.Sprintf("[cleanup] Removing log file: %s", logPath))
+			}
+			os.Remove(logPath)
+		}
+
+		// Prompt files
+		promptPath := fmt.Sprintf("/tmp/%s-worker-prompt-%d.md", projectSafe, i)
+		if _, err := os.Stat(promptPath); err == nil {
+			if config.LogCleanupActions {
+				LogMsg(fmt.Sprintf("[cleanup] Removing prompt file: %s", promptPath))
+			}
+			os.Remove(promptPath)
+		}
+	}
+
+	// Handle worktrees based on config
+	if !config.PreserveWorktrees && len(entry.WorktreeBases) > 0 {
+		for idx, wtBase := range entry.WorktreeBases {
+			info, err := os.Stat(wtBase)
+			if err != nil || !info.IsDir() {
+				continue
+			}
+
+			if config.LogCleanupActions {
+				LogMsg(fmt.Sprintf("[cleanup] Removing worktrees in: %s", wtBase))
+			}
+
+			// Get repo path for proper git worktree removal
+			var repoPath string
+			if idx < len(entry.RepoPaths) {
+				repoPath = entry.RepoPaths[idx]
+			}
+
+			// Find all issue-* directories
+			dirEntries, _ := os.ReadDir(wtBase)
+			for _, e := range dirEntries {
+				if e.IsDir() && strings.HasPrefix(e.Name(), "issue-") {
+					wtDir := filepath.Join(wtBase, e.Name())
+					if config.LogCleanupActions {
+						LogMsg(fmt.Sprintf("[cleanup] Removing worktree: %s", wtDir))
+					}
+					// Use proper git worktree removal if we have the repo path
+					if repoPath != "" {
+						if !RemoveWorktree(repoPath, wtDir, true) {
+							// Fall back to force remove if git worktree remove fails
+							os.RemoveAll(wtDir)
+						}
+					} else {
+						// No repo path available, use force remove
+						os.RemoveAll(wtDir)
+					}
+				}
+			}
+
+			// Prune stale worktree references if we have the repo path
+			if repoPath != "" {
+				PruneWorktrees(repoPath)
+			}
+
+			// Remove the worktree base if empty
+			os.Remove(wtBase) // Will fail if not empty, that's fine
+		}
+	} else if config.PreserveWorktrees && config.LogCleanupActions {
+		LogMsg("[cleanup] Preserving worktrees (--preserve-worktrees)")
+	}
+
+	if config.LogCleanupActions {
+		LogMsg(fmt.Sprintf("[cleanup] Removing registry entry for: %s", entry.Project))
+	}
+
+	return nil
+}
+
+// ListOrchestratorsWithCleanup lists orchestrators and cleans up dead ones.
+// Returns the list of live orchestrators after cleanup.
+func (rm *RegistryManager) ListOrchestratorsWithCleanup(cleanupConfig CleanupConfig) ([]OrchestratorEntry, error) {
+	rm.mu.Lock()
+	defer rm.mu.Unlock()
+
+	reg, err := rm.loadRegistry()
+	if err != nil {
+		return nil, fmt.Errorf("loading registry: %w", err)
+	}
+
+	activeEntries := make([]OrchestratorEntry, 0, len(reg.Orchestrators))
+	needsSave := false
+
+	for _, entry := range reg.Orchestrators {
+		if isProcessRunning(entry.PID) {
+			activeEntries = append(activeEntries, entry)
+		} else {
+			// Process is dead, clean up its resources
+			needsSave = true
+			rm.CleanupDeadOrchestrator(entry, cleanupConfig)
+		}
+	}
+
+	// Save if we cleaned up any stale entries
+	if needsSave {
+		reg.Orchestrators = activeEntries
+		if err := rm.saveRegistry(reg); err != nil {
+			LogMsg(fmt.Sprintf("Warning: failed to save cleaned registry: %v", err))
+		}
+	}
+
+	return activeEntries, nil
+}
+
+// DefaultCleanupConfig returns the default cleanup configuration.
+func DefaultCleanupConfig() CleanupConfig {
+	return CleanupConfig{
+		PreserveWorktrees: true, // Safe default: preserve worktrees
+		LogCleanupActions: true,
+	}
 }

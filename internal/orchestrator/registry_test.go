@@ -177,3 +177,180 @@ func TestFormatUptime(t *testing.T) {
 		}
 	}
 }
+
+func TestRegisterWithResources(t *testing.T) {
+	tmpDir := t.TempDir()
+	testRegistryPath := filepath.Join(tmpDir, "registry.json")
+
+	rm := &RegistryManager{
+		registryPath: testRegistryPath,
+	}
+
+	worktreeBases := []string{"/tmp/test-worktrees"}
+	repoPaths := []string{"/path/to/repo"}
+
+	// Test registration with resources
+	err := rm.RegisterWithFullResources("resource-test", 8124, "/config.json", 3, 5, "test-session", worktreeBases, repoPaths)
+	if err != nil {
+		t.Fatalf("RegisterWithFullResources failed: %v", err)
+	}
+	defer rm.Deregister()
+
+	// Verify resources are tracked
+	entries, err := rm.ListOrchestrators()
+	if err != nil {
+		t.Fatalf("ListOrchestrators failed: %v", err)
+	}
+
+	if len(entries) != 1 {
+		t.Fatalf("Expected 1 entry, got %d", len(entries))
+	}
+
+	entry := entries[0]
+	if entry.TmuxSession != "test-session" {
+		t.Errorf("Expected TmuxSession 'test-session', got '%s'", entry.TmuxSession)
+	}
+	if len(entry.WorktreeBases) != 1 || entry.WorktreeBases[0] != "/tmp/test-worktrees" {
+		t.Errorf("WorktreeBases not set correctly: %v", entry.WorktreeBases)
+	}
+	if len(entry.RepoPaths) != 1 || entry.RepoPaths[0] != "/path/to/repo" {
+		t.Errorf("RepoPaths not set correctly: %v", entry.RepoPaths)
+	}
+}
+
+func TestCleanupDeadOrchestratorTempFiles(t *testing.T) {
+	tmpDir := t.TempDir()
+	testRegistryPath := filepath.Join(tmpDir, "registry.json")
+
+	rm := &RegistryManager{
+		registryPath: testRegistryPath,
+	}
+
+	// Create temp files that would be created by an orchestrator
+	project := "cleanup-test"
+	projectSafe := sanitizeProject(project)
+	numWorkers := 2
+
+	// Create signal, log, and prompt files
+	for i := 1; i <= numWorkers; i++ {
+		signalPath := filepath.Join("/tmp", projectSafe+"-signal-"+string(rune('0'+i)))
+		logPath := filepath.Join("/tmp", projectSafe+"-worker-"+string(rune('0'+i))+".log")
+		promptPath := filepath.Join("/tmp", projectSafe+"-worker-prompt-"+string(rune('0'+i))+".md")
+
+		os.WriteFile(signalPath, []byte("0"), 0644)
+		os.WriteFile(logPath, []byte("test log"), 0644)
+		os.WriteFile(promptPath, []byte("test prompt"), 0644)
+	}
+
+	// Create a registry entry for a dead orchestrator
+	entry := OrchestratorEntry{
+		Project:    project,
+		Port:       8999,
+		PID:        999999, // Non-existent PID
+		ConfigPath: "/config.json",
+		StartTime:  NowISO(),
+		Status:     StatusRunning,
+		NumWorkers: numWorkers,
+	}
+
+	// Clean up
+	config := CleanupConfig{
+		PreserveWorktrees: true,
+		LogCleanupActions: false, // Quiet for tests
+	}
+
+	err := rm.cleanupDeadOrchestratorUnlocked(entry, config)
+	if err != nil {
+		t.Fatalf("cleanupDeadOrchestratorUnlocked failed: %v", err)
+	}
+
+	// Verify temp files are removed
+	for i := 1; i <= numWorkers; i++ {
+		signalPath := filepath.Join("/tmp", projectSafe+"-signal-"+string(rune('0'+i)))
+		logPath := filepath.Join("/tmp", projectSafe+"-worker-"+string(rune('0'+i))+".log")
+		promptPath := filepath.Join("/tmp", projectSafe+"-worker-prompt-"+string(rune('0'+i))+".md")
+
+		if _, err := os.Stat(signalPath); !os.IsNotExist(err) {
+			t.Errorf("Signal file should be removed: %s", signalPath)
+		}
+		if _, err := os.Stat(logPath); !os.IsNotExist(err) {
+			t.Errorf("Log file should be removed: %s", logPath)
+		}
+		if _, err := os.Stat(promptPath); !os.IsNotExist(err) {
+			t.Errorf("Prompt file should be removed: %s", promptPath)
+		}
+	}
+}
+
+func TestCleanupConfigDefaults(t *testing.T) {
+	config := DefaultCleanupConfig()
+
+	// Default should preserve worktrees (safe default)
+	if !config.PreserveWorktrees {
+		t.Error("DefaultCleanupConfig should preserve worktrees by default")
+	}
+
+	// Default should log cleanup actions
+	if !config.LogCleanupActions {
+		t.Error("DefaultCleanupConfig should log cleanup actions by default")
+	}
+}
+
+func TestCleanupDeadOrchestrators(t *testing.T) {
+	tmpDir := t.TempDir()
+	testRegistryPath := filepath.Join(tmpDir, "registry.json")
+
+	// Create a custom registry manager for this test
+	rm := &RegistryManager{
+		registryPath: testRegistryPath,
+	}
+
+	// Manually create a registry with dead entries
+	reg := &Registry{
+		Orchestrators: []OrchestratorEntry{
+			{
+				Project:    "dead-project-1",
+				Port:       8001,
+				PID:        999997,
+				ConfigPath: "/config1.json",
+				StartTime:  NowISO(),
+				Status:     StatusRunning,
+				NumWorkers: 1,
+			},
+			{
+				Project:    "dead-project-2",
+				Port:       8002,
+				PID:        999998,
+				ConfigPath: "/config2.json",
+				StartTime:  NowISO(),
+				Status:     StatusRunning,
+				NumWorkers: 1,
+			},
+		},
+	}
+	rm.saveRegistry(reg)
+
+	// Verify entries exist
+	rawReg, _ := rm.loadRegistry()
+	if len(rawReg.Orchestrators) != 2 {
+		t.Fatalf("Expected 2 entries before cleanup, got %d", len(rawReg.Orchestrators))
+	}
+
+	// List should trigger cleanup
+	entries, err := rm.ListOrchestrators()
+	if err != nil {
+		t.Fatalf("ListOrchestrators failed: %v", err)
+	}
+
+	// Should have cleaned up both dead entries
+	if len(entries) != 0 {
+		t.Errorf("Expected 0 entries after cleanup, got %d", len(entries))
+	}
+
+	// Verify registry is updated
+	rawReg, _ = rm.loadRegistry()
+	if len(rawReg.Orchestrators) != 0 {
+		t.Errorf("Registry should be empty after cleanup, got %d entries", len(rawReg.Orchestrators))
+	}
+}
+
