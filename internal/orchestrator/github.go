@@ -87,9 +87,8 @@ func MergePRForIssue(issueNum int, branchName string, cfg *RunConfig) MergeResul
 		return MergeResult{Success: false, MergeError: "no PR found for branch"}
 	}
 
-	// Attempt to merge with squash
-	cmd := exec.Command("gh", "pr", "merge", fmt.Sprintf("%d", prNum),
-		"--squash", "--delete-branch")
+	// Attempt to merge with squash (don't use --delete-branch as it fails with worktrees)
+	cmd := exec.Command("gh", "pr", "merge", fmt.Sprintf("%d", prNum), "--squash")
 	cmd.Dir = repo.Path
 	out, err := cmd.CombinedOutput()
 	outStr := string(out)
@@ -111,6 +110,14 @@ func MergePRForIssue(issueNum int, branchName string, cfg *RunConfig) MergeResul
 			PRNumber:   prNum,
 			MergeError: fmt.Sprintf("gh pr merge: %v: %s", err, outStr),
 		}
+	}
+
+	// Delete remote branch separately (local branch stays for worktree)
+	delCmd := exec.Command("git", "push", "origin", "--delete", branchName)
+	delCmd.Dir = repo.Path
+	if delOut, delErr := delCmd.CombinedOutput(); delErr != nil {
+		// Log but don't fail - merge succeeded
+		LogMsg(fmt.Sprintf("[merge] Warning: failed to delete remote branch %s: %s", branchName, string(delOut)))
 	}
 
 	LogMsg(fmt.Sprintf("[merge] Successfully merged PR #%d for issue #%d", prNum, issueNum))
