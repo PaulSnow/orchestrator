@@ -38,3 +38,4 @@ Thumbs.db
 
 # MCP server binary
 mcp-server/orchestrator-mcp
+daemon

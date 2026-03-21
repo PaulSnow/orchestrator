@@ -1120,12 +1120,20 @@ const dashboardHTML = `<!DOCTYPE html>
         .header {
             display: flex;
             justify-content: space-between;
-            align-items: center;
+            align-items: flex-start;
             margin-bottom: 20px;
         }
         .header-left { display: block; }
         .header-right { text-align: right; color: #888; font-size: 12px; }
         .version { color: #666; font-size: 14px; }
+        .project-title {
+            color: #58a6ff !important;
+            font-size: 36px !important;
+            font-weight: 600 !important;
+            margin: 0 0 10px 0 !important;
+            line-height: 1.2 !important;
+            display: block !important;
+        }
 
         /* Phase indicator */
         .phase-bar {
@@ -1396,7 +1404,7 @@ const dashboardHTML = `<!DOCTYPE html>
 
         <div class="header">
             <div class="header-left">
-                <h1 id="project-name" style="color: #58a6ff; font-size: 36px; font-weight: 600; margin: 0 0 10px 0;"></h1>
+                <h1 id="project-name" class="project-title">Loading...</h1>
                 <div style="display: flex; align-items: center; gap: 20px;">
                     <div id="repos-info" style="font-size: 12px; color: #888;"></div>
                     <!-- Orchestrator switcher -->
