@@ -18,6 +18,7 @@ import (
 type DashboardServer struct {
 	cfg         *RunConfig
 	state       *StateManager
+	liveState   *LiveState
 	events      *EventBroadcaster
 	reviewGate  *ReviewGate
 	server      *http.Server
@@ -32,11 +33,12 @@ func NewDashboardServer(cfg *RunConfig, state *StateManager, events *EventBroadc
 		port = 8123
 	}
 	return &DashboardServer{
-		cfg:      cfg,
-		state:    state,
-		events:   events,
-		port:     port,
-		registry: GetGlobalRegistry(),
+		cfg:       cfg,
+		state:     state,
+		liveState: NewLiveState(cfg),
+		events:    events,
+		port:      port,
+		registry:  GetGlobalRegistry(),
 	}
 }
 
@@ -77,6 +79,7 @@ func (ds *DashboardServer) Start() error {
 
 	// Action endpoints
 	mux.HandleFunc("/api/open-tmux", ds.handleOpenTmux)
+	mux.HandleFunc("/api/reload", ds.handleReload)
 
 	// Dashboard HTML
 	mux.HandleFunc("/", ds.handleDashboard)
@@ -586,6 +589,38 @@ func (ds *DashboardServer) handleOpenTmux(w http.ResponseWriter, r *http.Request
 	}
 }
 
+// handleReload reloads state from GitHub (epic, issues, branches).
+func (ds *DashboardServer) handleReload(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+
+	// Sync issue status from GitHub
+	if err := ds.liveState.SyncIssueStatusFromGitHub(); err != nil {
+		json.NewEncoder(w).Encode(map[string]any{
+			"success": false,
+			"error":   err.Error(),
+		})
+		return
+	}
+
+	// Reload from epic if configured
+	if ds.cfg.EpicNumber > 0 {
+		if err := ReloadFromEpic(ds.cfg); err != nil {
+			json.NewEncoder(w).Encode(map[string]any{
+				"success": false,
+				"error":   "reload from epic: " + err.Error(),
+			})
+			return
+		}
+	}
+
+	json.NewEncoder(w).Encode(map[string]any{
+		"success": true,
+		"message": "Reloaded state from GitHub",
+		"issues":  len(ds.cfg.Issues),
+	})
+}
+
 // handleDashboard serves the HTML dashboard.
 func (ds *DashboardServer) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html")
@@ -879,6 +914,7 @@ const dashboardHTML = `<!DOCTYPE html>
                 <h3>Actions</h3>
                 <button class="control-btn" onclick="openTmux()">Open tmux session</button>
                 <button class="control-btn" onclick="refreshState()">Refresh state</button>
+                <button class="control-btn" onclick="syncFromGitHub()" style="background: #238636;">Sync from GitHub</button>
             </div>
         </div>
 
@@ -1118,6 +1154,21 @@ const dashboardHTML = `<!DOCTYPE html>
             fetch('/api/issues').then(r => r.json()).then(updateIssues);
             fetch('/api/progress').then(r => r.json()).then(updateProgress);
             fetch('/api/orchestrators').then(r => r.json()).then(updateControlPanel).catch(() => {});
+        }
+
+        function syncFromGitHub() {
+            fetch('/api/reload', {method: 'POST'})
+                .then(r => r.json())
+                .then(data => {
+                    if (data.success) {
+                        refreshState();
+                    } else {
+                        alert('Sync failed: ' + (data.error || 'Unknown error'));
+                    }
+                })
+                .catch(err => {
+                    alert('Sync error: ' + err);
+                });
         }
 
         function updateOrchestrators(data) {
