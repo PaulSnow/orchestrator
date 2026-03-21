@@ -1123,7 +1123,7 @@ const dashboardHTML = `<!DOCTYPE html>
             align-items: center;
             margin-bottom: 20px;
         }
-        .header-left { display: flex; align-items: center; gap: 20px; }
+        .header-left { display: block; }
         .header-right { text-align: right; color: #888; font-size: 12px; }
         .version { color: #666; font-size: 14px; }
 
@@ -1396,15 +1396,17 @@ const dashboardHTML = `<!DOCTYPE html>
 
         <div class="header">
             <div class="header-left">
-                <h1 id="project-name" style="color: #58a6ff; font-size: 40px; font-weight: 600;"></h1>
-                <div id="repos-info" style="font-size: 12px; color: #888;"></div>
-                <!-- Orchestrator switcher -->
-                <div class="orchestrator-switcher" id="orch-switcher">
-                    <button class="switcher-btn" onclick="toggleSwitcher()">
-                        <span id="switcher-current">Select Orchestrator</span>
-                        <span style="font-size: 10px; margin-left: 5px;">v</span>
-                    </button>
-                    <div class="switcher-dropdown" id="switcher-dropdown"></div>
+                <h1 id="project-name" style="color: #58a6ff; font-size: 36px; font-weight: 600; margin: 0 0 10px 0;"></h1>
+                <div style="display: flex; align-items: center; gap: 20px;">
+                    <div id="repos-info" style="font-size: 12px; color: #888;"></div>
+                    <!-- Orchestrator switcher -->
+                    <div class="orchestrator-switcher" id="orch-switcher">
+                        <button class="switcher-btn" onclick="toggleSwitcher()">
+                            <span id="switcher-current">Select Orchestrator</span>
+                            <span style="font-size: 10px; margin-left: 5px;">v</span>
+                        </button>
+                        <div class="switcher-dropdown" id="switcher-dropdown"></div>
+                    </div>
                 </div>
             </div>
             <div class="header-right">
@@ -2004,7 +2006,7 @@ const dashboardHTML = `<!DOCTYPE html>
                 return '<div class="switcher-item ' + currentClass + '" onclick="switchToOrchestrator(\'' + o.project + '\', ' + o.is_current + ')">' +
                     '<div>' +
                         '<div class="switcher-item-name">' + o.project + '</div>' +
-                        '<div class="switcher-item-info">' + o.status + ' · ' + o.uptime + '</div>' +
+                        '<div class="switcher-item-info">' + o.status + (o.uptime ? ' - ' + o.uptime : '') + '</div>' +
                     '</div>' +
                     '<div class="switcher-item-stats">' + stats + '</div>' +
                 '</div>';
