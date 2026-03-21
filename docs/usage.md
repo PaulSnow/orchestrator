@@ -87,7 +87,17 @@ Stop workers and clean up resources.
 
 # Keep worktrees for inspection
 ./orchestrator cleanup --config config/issues.json --keep-worktrees
+
+# Show dangling log files in /tmp
+./orchestrator cleanup --logs
+
+# Remove all log files for the project/epic
+./orchestrator cleanup --logs --all
+./orchestrator cleanup --config config/issues.json --logs --all
 ```
+
+Log files are automatically cleaned up when PRs are merged and when epics complete.
+The `--logs` option is useful for manual cleanup of orphaned log files.
 
 ### dashboard
 
