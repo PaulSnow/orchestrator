@@ -227,9 +227,20 @@ func CheckWorkAlreadyDone(issueNum int, cfg *RunConfig, state *StateManager) boo
 		}
 	}
 
-	// Mark as complete
+	// Mark as complete (may be reverted if merge fails)
 	LogMsg(fmt.Sprintf("[auto-complete] Marking issue #%d as completed (work already done)", issueNum))
 	state.UpdateIssueStatus(issueNum, "completed", nil)
+
+	// Create PR and attempt to merge
+	prResult := CreateAndMergePR(issueNum, issue.Title, branchName, cfg, state)
+	if prResult.Error != nil {
+		LogMsg(fmt.Sprintf("[auto-complete] WARNING: PR lifecycle failed for #%d: %v", issueNum, prResult.Error))
+	}
+	if prResult.IssueReopened {
+		// Issue was reopened due to merge conflict, don't emit completed event
+		LogMsg(fmt.Sprintf("[auto-complete] Issue #%d reopened for merge conflict resolution", issueNum))
+		return true // Still return true since we handled it
+	}
 
 	// Log to activity log and emit events
 	GetActivityLogger().LogIssueCompleted(issueNum, 0)
@@ -301,18 +312,23 @@ func ExecuteDecision(decision *Decision, cfg *RunConfig, state *StateManager) {
 			}
 		}
 
-		// Create PR if branch exists
+		// Create PR and attempt to merge
+		mergeConflict := false
 		if branchName != "" {
-			prURL, err := CreatePRForIssue(*issueNum, issueTitle, branchName, effCfg)
-			if err != nil {
-				LogMsg(fmt.Sprintf("WARNING: failed to create PR for #%d: %v", *issueNum, err))
-			} else if prURL != "" {
-				LogMsg(fmt.Sprintf("Created PR for #%d: %s", *issueNum, prURL))
+			prResult := CreateAndMergePR(*issueNum, issueTitle, branchName, effCfg, state)
+			if prResult.Error != nil {
+				LogMsg(fmt.Sprintf("WARNING: PR lifecycle failed for #%d: %v", *issueNum, prResult.Error))
+			}
+			if prResult.IssueReopened {
+				// Issue was reopened due to merge conflict
+				// Status already reverted to pending by CreateAndMergePR
+				mergeConflict = true
+				LogMsg(fmt.Sprintf("Issue #%d reopened for merge conflict resolution", *issueNum))
 			}
 		}
 
-		// Update epic checkbox if epic-based config
-		if effCfg.EpicNumber > 0 && effCfg.EpicURL != "" {
+		// Update epic checkbox if epic-based config (only if no merge conflict)
+		if !mergeConflict && effCfg.EpicNumber > 0 && effCfg.EpicURL != "" {
 			if err := UpdateEpicCheckbox(effCfg.EpicURL, *issueNum, true); err != nil {
 				LogMsg(fmt.Sprintf("WARNING: failed to update epic checkbox for #%d: %v", *issueNum, err))
 			}
@@ -323,13 +339,23 @@ func ExecuteDecision(decision *Decision, cfg *RunConfig, state *StateManager) {
 			worker.SourceConfig = ""
 			state.SaveWorker(worker)
 		}
-		state.LogEvent(map[string]any{"action": "mark_complete", "issue": issueNum})
-		// Log to activity log
-		GetActivityLogger().LogIssueCompleted(*issueNum, workerID)
-		// Emit worker completed event
-		if globalEventBroadcaster != nil {
-			globalEventBroadcaster.EmitWorkerCompleted(workerID, *issueNum, issueTitle)
-			globalEventBroadcaster.EmitIssueStatus(*issueNum, issueTitle, "completed", nil)
+
+		// Only emit completion events if no merge conflict
+		if !mergeConflict {
+			state.LogEvent(map[string]any{"action": "mark_complete", "issue": issueNum})
+			// Log to activity log
+			GetActivityLogger().LogIssueCompleted(*issueNum, workerID)
+			// Emit worker completed event
+			if globalEventBroadcaster != nil {
+				globalEventBroadcaster.EmitWorkerCompleted(workerID, *issueNum, issueTitle)
+				globalEventBroadcaster.EmitIssueStatus(*issueNum, issueTitle, "completed", nil)
+			}
+		} else {
+			state.LogEvent(map[string]any{"action": "merge_conflict", "issue": issueNum})
+			// Emit merge conflict event
+			if globalEventBroadcaster != nil {
+				globalEventBroadcaster.EmitIssueStatus(*issueNum, issueTitle, "pending", nil)
+			}
 		}
 
 	case "reassign":
@@ -575,17 +601,45 @@ func ExecuteDecision(decision *Decision, cfg *RunConfig, state *StateManager) {
 
 	case "skip":
 		issueNum := decision.Issue
-		LogMsg(fmt.Sprintf("Worker %d: skipping issue #%d (exceeded retries)", workerID, *issueNum))
+		LogMsg(fmt.Sprintf("Worker %d: checking issue #%d before marking as failed (exceeded retries)", workerID, *issueNum))
 
 		worker := state.LoadWorker(workerID)
+
+		// Before failing, check if work was actually completed
+		// The worker may have finished but the health check missed it
+		var effectiveCfg *RunConfig
+		var effectiveState *StateManager
 		if worker != nil && worker.SourceConfig != "" {
 			srcCfg, err := LoadConfig(worker.SourceConfig)
 			if err == nil {
-				srcState := NewStateManager(srcCfg)
-				srcState.UpdateIssueStatus(*issueNum, "failed", nil)
-			} else {
-				state.UpdateIssueStatus(*issueNum, "failed", nil)
+				effectiveCfg = srcCfg
+				effectiveState = NewStateManager(srcCfg)
 			}
+		}
+		if effectiveCfg == nil {
+			effectiveCfg = cfg
+			effectiveState = state
+		}
+
+		// Check if work was actually done (commits pushed, tests pass, etc.)
+		if CheckWorkAlreadyDone(*issueNum, effectiveCfg, effectiveState) {
+			LogMsg(fmt.Sprintf("Worker %d: issue #%d work was actually completed — avoiding false failure", workerID, *issueNum))
+			state.ClearSignal(workerID)
+			if worker != nil {
+				worker.Status = "idle"
+				worker.IssueNumber = nil
+				worker.Stage = ""
+				worker.SourceConfig = ""
+				state.SaveWorker(worker)
+			}
+			state.LogEvent(map[string]any{"action": "auto_complete", "worker": workerID, "issue": issueNum})
+			return
+		}
+
+		// Work was not done, mark as failed
+		LogMsg(fmt.Sprintf("Worker %d: skipping issue #%d (exceeded retries, no completed work found)", workerID, *issueNum))
+		if worker != nil && worker.SourceConfig != "" {
+			effectiveState.UpdateIssueStatus(*issueNum, "failed", nil)
 		} else {
 			state.UpdateIssueStatus(*issueNum, "failed", nil)
 		}

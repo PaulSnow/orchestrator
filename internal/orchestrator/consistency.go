@@ -30,6 +30,8 @@ const (
 	InconsistencyOrchestratorStuck InconsistencyType = "orchestrator_stuck"
 	// InconsistencyDashboardStateMismatch - dashboard reports different state than backend
 	InconsistencyDashboardStateMismatch InconsistencyType = "dashboard_state_mismatch"
+	// InconsistencyBranchExistsButFailed - issue is failed but branch has completed work
+	InconsistencyBranchExistsButFailed InconsistencyType = "branch_exists_but_failed"
 )
 
 // Inconsistency represents a detected state inconsistency.
@@ -333,6 +335,24 @@ func (cc *ConsistencyChecker) checkBranchVsStatus() []Inconsistency {
 				})
 			}
 		}
+
+		// Check failed issues - they may have actually completed work (false failure)
+		if issue.Status == "failed" && hasRemoteBranch && hasCommits {
+			if cc.branchAppearsComplete(branchName, issue.Number) {
+				issues = append(issues, Inconsistency{
+					Type:        InconsistencyBranchExistsButFailed,
+					Description: fmt.Sprintf("Issue #%d is failed but branch %s has completed work (false failure)", issue.Number, branchName),
+					IssueNumber: &issue.Number,
+					DetectedAt:  time.Now(),
+					AutoFixable: true,
+					SuggestedFix: "Mark issue as completed and create PR",
+					Details: map[string]any{
+						"branch": branchName,
+						"status": issue.Status,
+					},
+				})
+			}
+		}
 	}
 
 	return issues
@@ -501,6 +521,50 @@ func (cc *ConsistencyChecker) AutoFix(inc Inconsistency) error {
 		if inc.IssueNumber != nil {
 			cc.state.UpdateIssueStatus(*inc.IssueNumber, "completed", nil)
 			LogMsg(fmt.Sprintf("[consistency] Auto-fixed: marked issue #%d as completed", *inc.IssueNumber))
+		}
+
+	case InconsistencyBranchExistsButFailed:
+		// Issue was marked failed but work was actually completed (false failure)
+		if inc.IssueNumber != nil {
+			issueNum := *inc.IssueNumber
+			issue := cc.cfg.GetIssue(issueNum)
+			if issue == nil {
+				return fmt.Errorf("issue #%d not found", issueNum)
+			}
+
+			// Get branch name from details or construct it
+			branchName := ""
+			if inc.Details != nil {
+				if bn, ok := inc.Details["branch"].(string); ok {
+					branchName = bn
+				}
+			}
+			if branchName == "" {
+				repo, _ := cc.cfg.PrimaryRepo()
+				if repo != nil {
+					branchName = repo.BranchPrefix + fmt.Sprintf("%d", issueNum)
+				}
+			}
+
+			// Mark as completed
+			cc.state.UpdateIssueStatus(issueNum, "completed", nil)
+			LogMsg(fmt.Sprintf("[consistency] Auto-fixed: marked falsely-failed issue #%d as completed", issueNum))
+
+			// Create PR if branch exists
+			if branchName != "" {
+				prURL, err := CreatePRForIssue(issueNum, issue.Title, branchName, cc.cfg)
+				if err != nil {
+					LogMsg(fmt.Sprintf("[consistency] WARNING: failed to create PR for #%d: %v", issueNum, err))
+				} else if prURL != "" {
+					LogMsg(fmt.Sprintf("[consistency] Created PR for #%d: %s", issueNum, prURL))
+				}
+			}
+
+			// Log to activity log and emit events
+			GetActivityLogger().LogIssueCompleted(issueNum, 0)
+			if globalEventBroadcaster != nil {
+				globalEventBroadcaster.EmitIssueStatus(issueNum, issue.Title, "completed", nil)
+			}
 		}
 
 	case InconsistencyWorkerRunningNoIssue:
