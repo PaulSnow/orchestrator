@@ -1,0 +1,10 @@
+[2024-01-15T08:00:00Z] Worker 3 starting on issue #99
+[2024-01-15T08:00:05Z] Creating worktree at /tmp/test-worktrees/issue-99
+[2024-01-15T08:00:10Z] Worktree created successfully
+[2024-01-15T08:00:15Z] Starting Claude Code session
+[2024-01-15T08:05:00Z] ERROR: Build failed
+[2024-01-15T08:05:01Z] Error details: undefined reference to 'main'
+[2024-01-15T08:05:02Z] Attempting to fix...
+[2024-01-15T08:10:00Z] ERROR: Build still failing
+[2024-01-15T08:10:05Z] Maximum retries exceeded
+[2024-01-15T08:10:10Z] Worker failed with exit code 1

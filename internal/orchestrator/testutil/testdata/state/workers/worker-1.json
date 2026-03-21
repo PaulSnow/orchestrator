@@ -1,0 +1,15 @@
+{
+  "worker_id": 1,
+  "issue_number": 42,
+  "branch": "feature/issue-42",
+  "worktree": "/tmp/test-worktrees/issue-42",
+  "status": "running",
+  "started_at": "2024-01-15T10:30:00Z",
+  "last_log_size": 4096,
+  "last_log_update": "2024-01-15T10:45:00Z",
+  "retry_count": 0,
+  "commits": ["abc1234 feat: initial implementation"],
+  "claude_pid": 12345,
+  "stage": "implement",
+  "source_config": "/tmp/config/test-issues.json"
+}

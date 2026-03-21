@@ -1,0 +1,48 @@
+{
+  "project": "pipeline-project",
+  "tmux_session": "pipeline-orchestrator",
+  "num_workers": 2,
+  "cycle_interval": 30,
+  "max_retries": 2,
+  "stall_timeout": 300,
+  "wall_clock_timeout": 600,
+  "prompt_type": "implement",
+  "pipeline": ["implement", "test", "review"],
+  "stagger_delay": 5,
+  "repos": {
+    "main": {
+      "path": "/tmp/main-repo",
+      "default_branch": "main",
+      "worktree_base": "/tmp/main-worktrees",
+      "branch_prefix": "feature/issue-",
+      "platform": "github"
+    }
+  },
+  "issues": [
+    {
+      "number": 100,
+      "title": "Implement feature",
+      "priority": 1,
+      "wave": 1,
+      "status": "pending",
+      "task_type": "implement",
+      "pipeline_stage": 0,
+      "repo": "main",
+      "description": "Implement the main feature as described in the spec."
+    },
+    {
+      "number": 101,
+      "title": "Implement tests",
+      "priority": 2,
+      "wave": 1,
+      "status": "pending",
+      "task_type": "test",
+      "pipeline_stage": 0,
+      "repo": "main",
+      "depends_on": [100]
+    }
+  ],
+  "initial_assignments": {
+    "1": 100
+  }
+}
