@@ -521,6 +521,12 @@ func ExecuteDecision(decision *Decision, cfg *RunConfig, state *StateManager) {
 		issue.PipelineStage++
 		effState.UpdateIssueStage(issue.Number, issue.PipelineStage)
 
+		// Bounds check - should not happen if decision logic is correct
+		if issue.PipelineStage >= len(effCfg.Pipeline) {
+			LogMsg(fmt.Sprintf("Worker %d: ERROR - pipeline stage %d out of bounds (max %d)", workerID, issue.PipelineStage, len(effCfg.Pipeline)-1))
+			return
+		}
+
 		nextStage := effCfg.Pipeline[issue.PipelineStage]
 		LogMsg(fmt.Sprintf("Worker %d: advancing issue #%d from %s to %s", workerID, *issueNum, oldStage, nextStage))
 
