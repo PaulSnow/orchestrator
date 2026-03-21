@@ -1389,20 +1389,20 @@ const dashboardHTML = `<!DOCTYPE html>
         <!-- Breadcrumb navigation (shown when viewing other orchestrator) -->
         <div class="breadcrumb" id="breadcrumb" style="display: none;">
             <a href="/" onclick="returnToHub(); return false;">Hub</a>
-            <span class="separator">›</span>
+            <span class="separator">&gt;</span>
             <span class="current" id="breadcrumb-current"></span>
             <span class="viewing-badge">viewing via proxy</span>
         </div>
 
         <div class="header">
             <div class="header-left">
-                <h1 id="project-name" style="color: #58a6ff; font-size: 24px;"></h1>
+                <h1 id="project-name" style="color: #58a6ff; font-size: 32px; font-weight: 600;"></h1>
                 <div id="repos-info" style="font-size: 12px; color: #888;"></div>
                 <!-- Orchestrator switcher -->
                 <div class="orchestrator-switcher" id="orch-switcher">
                     <button class="switcher-btn" onclick="toggleSwitcher()">
                         <span id="switcher-current">Select Orchestrator</span>
-                        <span>▼</span>
+                        <span style="font-size: 10px; margin-left: 5px;">v</span>
                     </button>
                     <div class="switcher-dropdown" id="switcher-dropdown"></div>
                 </div>
