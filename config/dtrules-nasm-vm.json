@@ -1,0 +1,120 @@
+{
+  "project": "dtrules-nasm",
+  "repo": "dtrules",
+  "repo_path": "/home/paul/go/src/github.com/DTRules/DTRules",
+  "worktree_base": "/home/paul/go/src/github.com/DTRules/DTRules-worktrees",
+  "branch_prefix": "feat/nasm-",
+  "platform": "github",
+  "tmux_session": "dtrules-nasm",
+  "num_workers": 4,
+  "stagger_delay": 30,
+  "pipeline": [
+    "implement",
+    "validate",
+    "review"
+  ],
+  "project_context": {
+    "language": "nasm and c",
+    "build_command": "cd nasm-vm && make > /tmp/nasm-build.log 2>&1",
+    "test_command": "cd nasm-vm && make test > /tmp/nasm-test.log 2>&1",
+    "safety_rules": [
+      "This is an AI capability experiment - AI writes NASM assembly.",
+      "Follow the Fifth/AISynth architecture pattern from aisynth/reference-impl/.",
+      "Single entry/exit - no CGO-style per-operation calls.",
+      "Jump table dispatch - jmp [table + opcode*8], not if-else chains.",
+      "Each handler ends with jmp dispatch, not ret.",
+      "Trace recording writes to buffer, not function calls.",
+      "Test each opcode independently before integrating.",
+      "Compare traces with Go runtime to validate correctness."
+    ],
+    "commit_prefix": "feat",
+    "key_files": [
+      "nasm-vm/vm_core.asm",
+      "nasm-vm/vm_entry.asm",
+      "nasm-vm/vm_jump_table.asm",
+      "nasm-vm/Makefile"
+    ],
+    "reference_impl": "/home/paul/go/src/github.com/PaulSnow/aisynth/reference-impl/"
+  },
+  "issues": [
+    {
+      "number": 162,
+      "title": "NASM VM: Scaffolding",
+      "priority": 1,
+      "depends_on": [],
+      "wave": 1,
+      "status": "pending"
+    },
+    {
+      "number": 163,
+      "title": "NASM VM: Stack operations",
+      "priority": 1,
+      "depends_on": [162],
+      "wave": 2,
+      "status": "pending"
+    },
+    {
+      "number": 164,
+      "title": "NASM VM: Arithmetic operations",
+      "priority": 1,
+      "depends_on": [162],
+      "wave": 2,
+      "status": "pending"
+    },
+    {
+      "number": 165,
+      "title": "NASM VM: Comparison operations",
+      "priority": 1,
+      "depends_on": [162],
+      "wave": 2,
+      "status": "pending"
+    },
+    {
+      "number": 166,
+      "title": "NASM VM: Boolean operations",
+      "priority": 1,
+      "depends_on": [162],
+      "wave": 2,
+      "status": "pending"
+    },
+    {
+      "number": 167,
+      "title": "NASM VM: Control flow",
+      "priority": 1,
+      "depends_on": [162, 163],
+      "wave": 3,
+      "status": "pending"
+    },
+    {
+      "number": 168,
+      "title": "NASM VM: Entity operations",
+      "priority": 1,
+      "depends_on": [162, 167],
+      "wave": 4,
+      "status": "pending"
+    },
+    {
+      "number": 169,
+      "title": "NASM VM: Trace recording",
+      "priority": 1,
+      "depends_on": [162],
+      "wave": 2,
+      "status": "pending"
+    },
+    {
+      "number": 170,
+      "title": "Cross-runtime trace validation",
+      "priority": 1,
+      "depends_on": [163, 164, 165, 166, 167, 168, 169],
+      "wave": 5,
+      "status": "pending"
+    }
+  ],
+  "wave_order": [
+    {"wave": 1, "issues": [162]},
+    {"wave": 2, "issues": [163, 164, 165, 166, 169]},
+    {"wave": 3, "issues": [167]},
+    {"wave": 4, "issues": [168]},
+    {"wave": 5, "issues": [170]}
+  ]
+}
