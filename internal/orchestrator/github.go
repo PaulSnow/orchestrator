@@ -338,6 +338,11 @@ func RetryPRPendingMerges(cfg *RunConfig, state *StateManager) int {
 			LogMsg(fmt.Sprintf("[pr-retry] Issue #%d merged successfully", issue.Number))
 			merged++
 
+			// Clean up log files for this completed issue
+			if cleaned := state.CleanupIssueLogFiles(issue.Number); cleaned > 0 {
+				LogMsg(fmt.Sprintf("[pr-retry] Cleaned up %d log files for issue #%d", cleaned, issue.Number))
+			}
+
 			// Update epic checkbox if applicable
 			if cfg.EpicNumber > 0 && cfg.EpicURL != "" {
 				if err := UpdateEpicCheckbox(cfg.EpicURL, issue.Number, true); err != nil {

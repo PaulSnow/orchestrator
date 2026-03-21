@@ -242,6 +242,10 @@ func CheckWorkAlreadyDone(issueNum int, cfg *RunConfig, state *StateManager) boo
 		// PR merged successfully - NOW mark as completed
 		LogMsg(fmt.Sprintf("[auto-complete] Issue #%d: PR merged, marking completed", issueNum))
 		state.UpdateIssueStatus(issueNum, "completed", nil)
+		// Clean up log files for this completed issue
+		if cleaned := state.CleanupIssueLogFiles(issueNum); cleaned > 0 {
+			LogMsg(fmt.Sprintf("[auto-complete] Cleaned up %d log files for issue #%d", cleaned, issueNum))
+		}
 		GetActivityLogger().LogIssueCompleted(issueNum, 0)
 		if globalEventBroadcaster != nil {
 			globalEventBroadcaster.EmitIssueStatus(issueNum, issue.Title, "completed", nil)
@@ -335,6 +339,10 @@ func ExecuteDecision(decision *Decision, cfg *RunConfig, state *StateManager) {
 				// NOW we can mark as completed - PR is actually merged
 				LogMsg(fmt.Sprintf("Issue #%d: PR merged successfully, marking completed", *issueNum))
 				effState.UpdateIssueStatus(*issueNum, "completed", nil)
+				// Clean up log files for this completed issue
+				if cleaned := effState.CleanupIssueLogFiles(*issueNum); cleaned > 0 {
+					LogMsg(fmt.Sprintf("Cleaned up %d log files for issue #%d", cleaned, *issueNum))
+				}
 			} else if prResult.IssueReopened {
 				// Issue was reopened due to merge conflict
 				// CreateAndMergePR already set status to pending
@@ -1238,6 +1246,12 @@ func RunMonitorLoop(cfg *RunConfig, state *StateManager, noDelay bool) {
 
 		// Check if all work is done
 		if AllDone(cfg, state) {
+			// Clean up all log files for this epic since all work is done
+			if cfg.EpicNumber > 0 {
+				if cleaned := state.CleanupEpicLogFiles(); cleaned > 0 {
+					LogMsg(fmt.Sprintf("Cleaned up %d log files for epic #%d", cleaned, cfg.EpicNumber))
+				}
+			}
 			LogMsg("All issues completed or failed. Orchestrator shutting down.")
 			state.LogEvent(map[string]any{"action": "shutdown", "reason": "all_done"})
 			// Log completion to activity log
@@ -1393,6 +1407,15 @@ func RunMonitorLoopGlobal(
 
 		// Check if all work is done
 		if AllDoneGlobal(configs, state, numWorkers) {
+			// Clean up all log files for all epics since all work is done
+			for _, cfg := range configs {
+				if cfg.EpicNumber > 0 {
+					cfgState := NewStateManager(cfg)
+					if cleaned := cfgState.CleanupEpicLogFiles(); cleaned > 0 {
+						LogMsg(fmt.Sprintf("Cleaned up %d log files for epic #%d", cleaned, cfg.EpicNumber))
+					}
+				}
+			}
 			LogMsg("All issues completed or failed. Orchestrator shutting down.")
 			state.LogEvent(map[string]any{"action": "shutdown", "reason": "all_done"})
 			printSummaryGlobal(configs, state)

@@ -1,6 +1,7 @@
 package orchestrator
 
 import (
+	"fmt"
 	"os"
 	"strings"
 	"sync"
@@ -445,6 +446,174 @@ func TestSanitizeProject(t *testing.T) {
 		result := sanitizeProject(tt.input)
 		if result != tt.expected {
 			t.Errorf("sanitizeProject(%q) = %q, want %q", tt.input, result, tt.expected)
+		}
+	}
+}
+
+func TestIssueLogPath(t *testing.T) {
+	cfg := &RunConfig{
+		Project:    "owner/repo",
+		EpicNumber: 42,
+	}
+	sm := NewStateManager(cfg)
+
+	path := sm.IssueLogPath(1, 101)
+	expected := "/tmp/orchestrator-owner-repo-epic42-issue101-worker1.log"
+	if path != expected {
+		t.Errorf("IssueLogPath(1, 101) = %q, want %q", path, expected)
+	}
+}
+
+func TestIssuePromptPath(t *testing.T) {
+	cfg := &RunConfig{
+		Project:    "owner/repo",
+		EpicNumber: 42,
+	}
+	sm := NewStateManager(cfg)
+
+	path := sm.IssuePromptPath(1, 101)
+	expected := "/tmp/orchestrator-owner-repo-epic42-issue101-worker1-prompt.md"
+	if path != expected {
+		t.Errorf("IssuePromptPath(1, 101) = %q, want %q", path, expected)
+	}
+}
+
+func TestIssueSignalPath(t *testing.T) {
+	cfg := &RunConfig{
+		Project:    "owner/repo",
+		EpicNumber: 42,
+	}
+	sm := NewStateManager(cfg)
+
+	path := sm.IssueSignalPath(1, 101)
+	expected := "/tmp/orchestrator-owner-repo-epic42-issue101-worker1-signal"
+	if path != expected {
+		t.Errorf("IssueSignalPath(1, 101) = %q, want %q", path, expected)
+	}
+}
+
+func TestCleanupIssueLogFiles(t *testing.T) {
+	cfg := &RunConfig{
+		Project:    "test/cleanup-test",
+		EpicNumber: 99,
+		NumWorkers: 2,
+	}
+	sm := NewStateManager(cfg)
+
+	// Create some test log files
+	testFiles := []string{
+		sm.IssueLogPath(1, 100),
+		sm.IssuePromptPath(1, 100),
+		sm.IssueSignalPath(1, 100),
+		sm.IssueLogPath(2, 100), // Same issue, different worker
+		sm.IssueLogPath(1, 101), // Different issue - should not be cleaned
+	}
+
+	for _, f := range testFiles {
+		if err := os.WriteFile(f, []byte("test"), 0644); err != nil {
+			t.Fatalf("Failed to create test file %s: %v", f, err)
+		}
+	}
+	defer func() {
+		// Cleanup remaining files
+		for _, f := range testFiles {
+			os.Remove(f)
+		}
+	}()
+
+	// Clean up issue 100
+	cleaned := sm.CleanupIssueLogFiles(100)
+	if cleaned != 4 {
+		t.Errorf("CleanupIssueLogFiles(100) = %d, want 4", cleaned)
+	}
+
+	// Verify issue 100 files are gone
+	for _, f := range testFiles[:4] {
+		if _, err := os.Stat(f); !os.IsNotExist(err) {
+			t.Errorf("Expected file %s to be deleted", f)
+		}
+	}
+
+	// Verify issue 101 file still exists
+	if _, err := os.Stat(testFiles[4]); os.IsNotExist(err) {
+		t.Error("Expected issue 101 file to still exist")
+	}
+}
+
+func TestCleanupEpicLogFiles(t *testing.T) {
+	cfg := &RunConfig{
+		Project:    "test/epic-cleanup-test",
+		EpicNumber: 88,
+		NumWorkers: 2,
+	}
+	sm := NewStateManager(cfg)
+
+	// Create test log files for multiple issues
+	testFiles := []string{
+		sm.IssueLogPath(1, 200),
+		sm.IssueLogPath(1, 201),
+		sm.IssueLogPath(2, 202),
+	}
+
+	for _, f := range testFiles {
+		if err := os.WriteFile(f, []byte("test"), 0644); err != nil {
+			t.Fatalf("Failed to create test file %s: %v", f, err)
+		}
+	}
+	defer func() {
+		for _, f := range testFiles {
+			os.Remove(f)
+		}
+	}()
+
+	// Clean up all epic files
+	cleaned := sm.CleanupEpicLogFiles()
+	if cleaned != 3 {
+		t.Errorf("CleanupEpicLogFiles() = %d, want 3", cleaned)
+	}
+
+	// Verify all files are gone
+	for _, f := range testFiles {
+		if _, err := os.Stat(f); !os.IsNotExist(err) {
+			t.Errorf("Expected file %s to be deleted", f)
+		}
+	}
+}
+
+func TestFindDanglingLogs(t *testing.T) {
+	project := "test/dangling-test"
+	sanitized := "test-dangling-test"
+
+	// Create some test log files
+	testFiles := []string{
+		fmt.Sprintf("/tmp/orchestrator-%s-epic50-issue301-worker1.log", sanitized),
+		fmt.Sprintf("/tmp/orchestrator-%s-epic50-issue302-worker2.log", sanitized),
+	}
+
+	for _, f := range testFiles {
+		if err := os.WriteFile(f, []byte("test"), 0644); err != nil {
+			t.Fatalf("Failed to create test file %s: %v", f, err)
+		}
+	}
+	defer func() {
+		for _, f := range testFiles {
+			os.Remove(f)
+		}
+	}()
+
+	// Find dangling logs
+	dangling := FindDanglingLogs(project)
+	if len(dangling) != 2 {
+		t.Errorf("FindDanglingLogs() returned %d entries, want 2", len(dangling))
+	}
+
+	// Verify parsed info
+	for _, d := range dangling {
+		if d.EpicNumber != 50 {
+			t.Errorf("Expected epic number 50, got %d", d.EpicNumber)
+		}
+		if d.IssueNumber != 301 && d.IssueNumber != 302 {
+			t.Errorf("Unexpected issue number %d", d.IssueNumber)
 		}
 	}
 }

@@ -178,21 +178,64 @@ func sanitizeProject(project string) string {
 	return strings.ReplaceAll(project, "/", "-")
 }
 
+// IssueLogPath returns the log file path for a worker working on a specific issue.
+// Format: /tmp/orchestrator-{project}-epic{N}-issue{M}-worker{W}.log
+// This allows cleanup by issue or epic.
+func (sm *StateManager) IssueLogPath(workerID, issueNumber int) string {
+	return fmt.Sprintf("/tmp/orchestrator-%s-epic%d-issue%d-worker%d.log",
+		sanitizeProject(sm.cfg.Project), sm.cfg.EpicNumber, issueNumber, workerID)
+}
+
+// IssuePromptPath returns the prompt file path for a worker working on a specific issue.
+// Format: /tmp/orchestrator-{project}-epic{N}-issue{M}-worker{W}-prompt.md
+func (sm *StateManager) IssuePromptPath(workerID, issueNumber int) string {
+	return fmt.Sprintf("/tmp/orchestrator-%s-epic%d-issue%d-worker%d-prompt.md",
+		sanitizeProject(sm.cfg.Project), sm.cfg.EpicNumber, issueNumber, workerID)
+}
+
+// IssueSignalPath returns the signal file path for a worker working on a specific issue.
+// Format: /tmp/orchestrator-{project}-epic{N}-issue{M}-worker{W}-signal
+func (sm *StateManager) IssueSignalPath(workerID, issueNumber int) string {
+	return fmt.Sprintf("/tmp/orchestrator-%s-epic%d-issue%d-worker%d-signal",
+		sanitizeProject(sm.cfg.Project), sm.cfg.EpicNumber, issueNumber, workerID)
+}
+
 // SignalPath returns the signal file path for a worker.
 // Signal files are transient process communication, not persistent state.
+// Deprecated: Use IssueSignalPath for new code.
 func (sm *StateManager) SignalPath(workerID int) string {
+	// Check if worker has an issue assigned - use new format if so
+	worker := sm.GetWorker(workerID)
+	if worker != nil && worker.IssueNumber != nil && sm.cfg.EpicNumber > 0 {
+		return sm.IssueSignalPath(workerID, *worker.IssueNumber)
+	}
+	// Fallback to legacy format
 	return fmt.Sprintf("/tmp/%s-signal-%d", sanitizeProject(sm.cfg.Project), workerID)
 }
 
 // LogPath returns the log file path for a worker.
 // Log files are transient process output, not persistent state.
+// Deprecated: Use IssueLogPath for new code.
 func (sm *StateManager) LogPath(workerID int) string {
+	// Check if worker has an issue assigned - use new format if so
+	worker := sm.GetWorker(workerID)
+	if worker != nil && worker.IssueNumber != nil && sm.cfg.EpicNumber > 0 {
+		return sm.IssueLogPath(workerID, *worker.IssueNumber)
+	}
+	// Fallback to legacy format
 	return fmt.Sprintf("/tmp/%s-worker-%d.log", sanitizeProject(sm.cfg.Project), workerID)
 }
 
 // PromptPath returns the prompt file path for a worker.
 // Prompt files are transient process input, not persistent state.
+// Deprecated: Use IssuePromptPath for new code.
 func (sm *StateManager) PromptPath(workerID int) string {
+	// Check if worker has an issue assigned - use new format if so
+	worker := sm.GetWorker(workerID)
+	if worker != nil && worker.IssueNumber != nil && sm.cfg.EpicNumber > 0 {
+		return sm.IssuePromptPath(workerID, *worker.IssueNumber)
+	}
+	// Fallback to legacy format
 	return fmt.Sprintf("/tmp/%s-worker-prompt-%d.md", sanitizeProject(sm.cfg.Project), workerID)
 }
 
@@ -262,4 +305,136 @@ func (sm *StateManager) ClearAllWorkers() {
 // Worker state is no longer persisted to files.
 func (sm *StateManager) WorkerPath(workerID int) string {
 	return ""
+}
+
+// CleanupIssueLogFiles removes all log files for a specific issue.
+// Called when an issue's PR is merged and the issue is complete.
+func (sm *StateManager) CleanupIssueLogFiles(issueNumber int) int {
+	project := sanitizeProject(sm.cfg.Project)
+	epicNum := sm.cfg.EpicNumber
+
+	// Pattern to match: orchestrator-{project}-epic{N}-issue{M}-worker*
+	pattern := fmt.Sprintf("/tmp/orchestrator-%s-epic%d-issue%d-worker*", project, epicNum, issueNumber)
+	matches, err := filepath.Glob(pattern)
+	if err != nil {
+		return 0
+	}
+
+	removed := 0
+	for _, f := range matches {
+		if os.Remove(f) == nil {
+			removed++
+		}
+	}
+
+	// Also clean up legacy format if exists
+	for i := 1; i <= sm.cfg.NumWorkers; i++ {
+		legacyLog := fmt.Sprintf("/tmp/%s-worker-%d.log", project, i)
+		legacyPrompt := fmt.Sprintf("/tmp/%s-worker-prompt-%d.md", project, i)
+		legacySignal := fmt.Sprintf("/tmp/%s-signal-%d", project, i)
+		if os.Remove(legacyLog) == nil {
+			removed++
+		}
+		if os.Remove(legacyPrompt) == nil {
+			removed++
+		}
+		if os.Remove(legacySignal) == nil {
+			removed++
+		}
+	}
+
+	return removed
+}
+
+// CleanupEpicLogFiles removes all log files for an entire epic.
+// Called when an epic is fully complete and closed.
+func (sm *StateManager) CleanupEpicLogFiles() int {
+	project := sanitizeProject(sm.cfg.Project)
+	epicNum := sm.cfg.EpicNumber
+
+	// Pattern to match all issues in this epic: orchestrator-{project}-epic{N}-*
+	pattern := fmt.Sprintf("/tmp/orchestrator-%s-epic%d-*", project, epicNum)
+	matches, err := filepath.Glob(pattern)
+	if err != nil {
+		return 0
+	}
+
+	removed := 0
+	for _, f := range matches {
+		if os.Remove(f) == nil {
+			removed++
+		}
+	}
+
+	// Also clean up legacy format
+	for i := 1; i <= sm.cfg.NumWorkers; i++ {
+		legacyLog := fmt.Sprintf("/tmp/%s-worker-%d.log", project, i)
+		legacyPrompt := fmt.Sprintf("/tmp/%s-worker-prompt-%d.md", project, i)
+		legacySignal := fmt.Sprintf("/tmp/%s-signal-%d", project, i)
+		if os.Remove(legacyLog) == nil {
+			removed++
+		}
+		if os.Remove(legacyPrompt) == nil {
+			removed++
+		}
+		if os.Remove(legacySignal) == nil {
+			removed++
+		}
+	}
+
+	return removed
+}
+
+// DanglingLogInfo represents a log file that may be orphaned.
+type DanglingLogInfo struct {
+	Path       string
+	Project    string
+	EpicNumber int
+	IssueNumber int
+	WorkerID   int
+	ModTime    time.Time
+}
+
+// FindDanglingLogs scans /tmp for orchestrator log files that may be orphaned.
+// Returns info about logs whose issues may no longer be active.
+func FindDanglingLogs(project string) []DanglingLogInfo {
+	sanitized := sanitizeProject(project)
+
+	// Find all orchestrator logs for this project
+	pattern := fmt.Sprintf("/tmp/orchestrator-%s-epic*-issue*-worker*.log", sanitized)
+	matches, err := filepath.Glob(pattern)
+	if err != nil {
+		return nil
+	}
+
+	var dangling []DanglingLogInfo
+
+	for _, path := range matches {
+		// Parse the filename: orchestrator-{project}-epic{N}-issue{M}-worker{W}.log
+		base := filepath.Base(path)
+
+		var epicNum, issueNum, workerID int
+		// Extract numbers from filename
+		n, _ := fmt.Sscanf(base, "orchestrator-"+sanitized+"-epic%d-issue%d-worker%d.log",
+			&epicNum, &issueNum, &workerID)
+		if n != 3 {
+			continue
+		}
+
+		info, err := os.Stat(path)
+		if err != nil {
+			continue
+		}
+
+		dangling = append(dangling, DanglingLogInfo{
+			Path:        path,
+			Project:     project,
+			EpicNumber:  epicNum,
+			IssueNumber: issueNum,
+			WorkerID:    workerID,
+			ModTime:     info.ModTime(),
+		})
+	}
+
+	return dangling
 }

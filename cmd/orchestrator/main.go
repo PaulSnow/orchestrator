@@ -773,19 +773,111 @@ DESCRIPTION
   - Removes git worktrees (unless --keep-worktrees)
   - Clears state files
 
+  With --logs: Cleans up log files in /tmp for completed issues/epics.
+  With --logs --all: Removes ALL orchestrator log files for the project.
+
 USAGE
   orchestrator cleanup --config <file>
   orchestrator cleanup --config <file> --keep-worktrees
+  orchestrator cleanup --config <file> --logs
+  orchestrator cleanup --logs              # Uses auto-detected repo
 
 OPTIONS`)
 		fs.PrintDefaults()
 	}
 	keepWorktrees := fs.Bool("keep-worktrees", false, "Keep worktrees (don't delete)")
+	cleanLogs := fs.Bool("logs", false, "Clean up log files in /tmp")
+	cleanAllLogs := fs.Bool("all", false, "With --logs: remove ALL logs for project (not just dangling)")
 	config := fs.String("config", defaultConfigPath(), "Config file")
 	fs.Parse(args)
 
+	// Handle log cleanup
+	if *cleanLogs {
+		// Try to load config to get project name
+		cfg, err := orchestrator.LoadConfig(*config)
+		if err != nil {
+			// Try to detect from current repo
+			repoInfo, repoErr := orchestrator.DetectRepoInfo()
+			if repoErr != nil {
+				fmt.Fprintf(os.Stderr, "Error: cannot determine project - provide --config or run from a git repo\n")
+				os.Exit(1)
+			}
+			project := repoInfo.Owner + "/" + repoInfo.Name
+			if *cleanAllLogs {
+				// Clean all logs for this project
+				cleaned := cleanAllProjectLogs(project)
+				fmt.Printf("Cleaned up %d log files for project %s\n", cleaned, project)
+			} else {
+				// Show dangling logs
+				dangling := orchestrator.FindDanglingLogs(project)
+				if len(dangling) == 0 {
+					fmt.Println("No dangling log files found.")
+				} else {
+					fmt.Printf("Found %d potentially dangling log files:\n", len(dangling))
+					for _, d := range dangling {
+						fmt.Printf("  %s (epic %d, issue %d, modified %s)\n",
+							d.Path, d.EpicNumber, d.IssueNumber, d.ModTime.Format("2006-01-02 15:04:05"))
+					}
+					fmt.Println("\nUse --all to remove these files.")
+				}
+			}
+			return
+		}
+
+		state := orchestrator.NewStateManager(cfg)
+		if *cleanAllLogs {
+			// Clean all logs for this epic
+			cleaned := state.CleanupEpicLogFiles()
+			fmt.Printf("Cleaned up %d log files for epic #%d\n", cleaned, cfg.EpicNumber)
+		} else {
+			// Show dangling logs
+			dangling := orchestrator.FindDanglingLogs(cfg.Project)
+			if len(dangling) == 0 {
+				fmt.Println("No dangling log files found.")
+			} else {
+				fmt.Printf("Found %d potentially dangling log files:\n", len(dangling))
+				for _, d := range dangling {
+					fmt.Printf("  %s (epic %d, issue %d, modified %s)\n",
+						d.Path, d.EpicNumber, d.IssueNumber, d.ModTime.Format("2006-01-02 15:04:05"))
+				}
+				fmt.Println("\nUse --all to remove these files.")
+			}
+		}
+		return
+	}
+
 	cfg, _ := orchestrator.LoadConfig(*config)
 	orchestrator.RunCleanup(cfg, *keepWorktrees)
+}
+
+// cleanAllProjectLogs removes all orchestrator log files for a project.
+func cleanAllProjectLogs(project string) int {
+	sanitized := strings.ReplaceAll(project, "/", "-")
+	pattern := fmt.Sprintf("/tmp/orchestrator-%s-*", sanitized)
+	matches, err := filepath.Glob(pattern)
+	if err != nil {
+		return 0
+	}
+
+	removed := 0
+	for _, f := range matches {
+		if os.Remove(f) == nil {
+			removed++
+		}
+	}
+
+	// Also clean legacy format
+	legacyPattern := fmt.Sprintf("/tmp/%s-*", sanitized)
+	legacyMatches, err := filepath.Glob(legacyPattern)
+	if err == nil {
+		for _, f := range legacyMatches {
+			if os.Remove(f) == nil {
+				removed++
+			}
+		}
+	}
+
+	return removed
 }
 
 func cmdStatus(args []string) {
