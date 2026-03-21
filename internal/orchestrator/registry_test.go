@@ -337,3 +337,121 @@ func TestListOrchestratorsByStatus(t *testing.T) {
 		t.Errorf("Expected 0 running orchestrators after status change, got %d", len(infos))
 	}
 }
+
+func TestListAllOrchestratorsRaw(t *testing.T) {
+	tmpDir := t.TempDir()
+	testRegistryPath := filepath.Join(tmpDir, "registry.json")
+
+	rm := &RegistryManager{
+		registryPath: testRegistryPath,
+	}
+
+	// Create a registry with both running and stale entries
+	reg := &Registry{
+		Orchestrators: []OrchestratorEntry{
+			{
+				Project:    "running-project",
+				Port:       8001,
+				PID:        os.Getpid(), // Current process is running
+				ConfigPath: "/config1.json",
+				StartTime:  NowISO(),
+				Status:     StatusRunning,
+			},
+			{
+				Project:    "stale-project",
+				Port:       8002,
+				PID:        999999, // Non-existent PID
+				ConfigPath: "/config2.json",
+				StartTime:  NowISO(),
+				Status:     StatusRunning,
+			},
+		},
+	}
+	rm.saveRegistry(reg)
+
+	// ListAllOrchestratorsRaw should return all entries without filtering
+	entries, err := rm.ListAllOrchestratorsRaw()
+	if err != nil {
+		t.Fatalf("ListAllOrchestratorsRaw failed: %v", err)
+	}
+
+	if len(entries) != 2 {
+		t.Errorf("Expected 2 entries (including stale), got %d", len(entries))
+	}
+
+	// ListOrchestrators should only return running entries
+	activeEntries, err := rm.ListOrchestrators()
+	if err != nil {
+		t.Fatalf("ListOrchestrators failed: %v", err)
+	}
+
+	if len(activeEntries) != 1 {
+		t.Errorf("Expected 1 active entry, got %d", len(activeEntries))
+	}
+}
+
+func TestGetOrchestratorInfosWithOffline(t *testing.T) {
+	tmpDir := t.TempDir()
+	testRegistryPath := filepath.Join(tmpDir, "registry.json")
+
+	rm := &RegistryManager{
+		registryPath: testRegistryPath,
+	}
+
+	// Create a registry with both running and offline entries
+	reg := &Registry{
+		Orchestrators: []OrchestratorEntry{
+			{
+				Project:    "running-project",
+				Port:       8001,
+				PID:        os.Getpid(),
+				ConfigPath: "/config1.json",
+				StartTime:  NowISO(),
+				Status:     StatusRunning,
+			},
+			{
+				Project:    "offline-project",
+				Port:       8002,
+				PID:        999999,
+				ConfigPath: "/config2.json",
+				StartTime:  NowISO(),
+				Status:     StatusRunning,
+			},
+		},
+	}
+	rm.saveRegistry(reg)
+
+	// GetOrchestratorInfos should return both with IsOnline flag set correctly
+	infos, err := rm.GetOrchestratorInfos()
+	if err != nil {
+		t.Fatalf("GetOrchestratorInfos failed: %v", err)
+	}
+
+	if len(infos) != 2 {
+		t.Fatalf("Expected 2 infos, got %d", len(infos))
+	}
+
+	// Find each entry and check IsOnline
+	var runningInfo, offlineInfo *OrchestratorInfo
+	for i := range infos {
+		if infos[i].Project == "running-project" {
+			runningInfo = &infos[i]
+		} else if infos[i].Project == "offline-project" {
+			offlineInfo = &infos[i]
+		}
+	}
+
+	if runningInfo == nil {
+		t.Fatal("Expected to find running-project info")
+	}
+	if !runningInfo.IsOnline {
+		t.Error("Expected running-project to be online")
+	}
+
+	if offlineInfo == nil {
+		t.Fatal("Expected to find offline-project info")
+	}
+	if offlineInfo.IsOnline {
+		t.Error("Expected offline-project to be offline")
+	}
+}

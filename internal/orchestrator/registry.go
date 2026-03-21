@@ -250,9 +250,24 @@ func (rm *RegistryManager) ListOrchestrators() ([]OrchestratorEntry, error) {
 	return activeEntries, nil
 }
 
+// ListAllOrchestratorsRaw returns all registered orchestrators including offline ones.
+// It does not clean up stale entries and includes an IsOnline flag for each entry.
+func (rm *RegistryManager) ListAllOrchestratorsRaw() ([]OrchestratorEntry, error) {
+	rm.mu.RLock()
+	defer rm.mu.RUnlock()
+
+	reg, err := rm.loadRegistry()
+	if err != nil {
+		return nil, fmt.Errorf("loading registry: %w", err)
+	}
+
+	return reg.Orchestrators, nil
+}
+
 // GetOrchestratorByProject finds an orchestrator by project name.
+// This includes offline orchestrators.
 func (rm *RegistryManager) GetOrchestratorByProject(project string) (*OrchestratorEntry, error) {
-	entries, err := rm.ListOrchestrators()
+	entries, err := rm.ListAllOrchestratorsRaw()
 	if err != nil {
 		return nil, err
 	}
@@ -276,6 +291,7 @@ func (rm *RegistryManager) GetOrchestratorInfoByProject(project string) (*Orches
 	}
 
 	currentPID := os.Getpid()
+	isOnline := isProcessRunning(entry.PID)
 	info := &OrchestratorInfo{
 		Project:      entry.Project,
 		Port:         entry.Port,
@@ -287,6 +303,7 @@ func (rm *RegistryManager) GetOrchestratorInfoByProject(project string) (*Orches
 		TotalIssues:  entry.TotalIssues,
 		DashboardURL: fmt.Sprintf("http://localhost:%d", entry.Port),
 		IsCurrent:    entry.PID == currentPID,
+		IsOnline:     isOnline,
 	}
 
 	// Calculate uptime
@@ -386,15 +403,18 @@ type OrchestratorInfo struct {
 	DashboardURL string             `json:"dashboard_url"`
 	Uptime       string             `json:"uptime"`
 	IsCurrent    bool               `json:"is_current"`
+	// IsOnline indicates if the orchestrator process is still running (PID check)
+	IsOnline bool `json:"is_online"`
 	// Connectivity indicates if the orchestrator's dashboard is reachable
 	Connectivity ConnectivityStatus `json:"connectivity"`
 	// LastSeen is the timestamp when the orchestrator was last seen online (for offline orchestrators)
 	LastSeen string `json:"last_seen,omitempty"`
 }
 
-// GetOrchestratorInfos returns enriched orchestrator information.
+// GetOrchestratorInfos returns enriched orchestrator information for all orchestrators
+// including offline ones. The IsOnline field indicates if the process is still running.
 func (rm *RegistryManager) GetOrchestratorInfos() ([]OrchestratorInfo, error) {
-	entries, err := rm.ListOrchestrators()
+	entries, err := rm.ListAllOrchestratorsRaw()
 	if err != nil {
 		return nil, err
 	}
@@ -403,6 +423,7 @@ func (rm *RegistryManager) GetOrchestratorInfos() ([]OrchestratorInfo, error) {
 	infos := make([]OrchestratorInfo, 0, len(entries))
 
 	for _, entry := range entries {
+		isOnline := isProcessRunning(entry.PID)
 		info := OrchestratorInfo{
 			Project:      entry.Project,
 			Port:         entry.Port,
@@ -414,6 +435,7 @@ func (rm *RegistryManager) GetOrchestratorInfos() ([]OrchestratorInfo, error) {
 			TotalIssues:  entry.TotalIssues,
 			DashboardURL: fmt.Sprintf("http://localhost:%d", entry.Port),
 			IsCurrent:    entry.PID == currentPID,
+			IsOnline:     isOnline,
 		}
 
 		// Calculate uptime

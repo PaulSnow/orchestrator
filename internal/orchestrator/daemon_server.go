@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 )
@@ -37,6 +38,7 @@ func (ds *DaemonServer) Start() error {
 
 	// API endpoints
 	mux.HandleFunc("/api/orchestrators", ds.handleOrchestrators)
+	mux.HandleFunc("/api/orchestrators/", ds.handleOrchestratorByProject)
 	mux.HandleFunc("/api/health", ds.handleHealth)
 	mux.HandleFunc("/api/events", ds.handleSSE)
 
@@ -136,16 +138,19 @@ func (ds *DaemonServer) handleOrchestrators(w http.ResponseWriter, r *http.Reque
 			"dashboard_url": info.DashboardURL,
 			"uptime":        info.Uptime,
 			"is_current":    info.IsCurrent,
+			"is_online":     info.IsOnline,
 		}
 
-		// Try to fetch live progress from the orchestrator's API
-		progress := ds.fetchProgress(info.Port)
-		if progress != nil {
-			enriched["completed"] = progress["completed"]
-			enriched["in_progress"] = progress["in_progress"]
-			enriched["pending"] = progress["pending"]
-			enriched["failed"] = progress["failed"]
-			enriched["active_workers"] = progress["active_workers"]
+		// Try to fetch live progress from the orchestrator's API (only if online)
+		if info.IsOnline {
+			progress := ds.fetchProgress(info.Port)
+			if progress != nil {
+				enriched["completed"] = progress["completed"]
+				enriched["in_progress"] = progress["in_progress"]
+				enriched["pending"] = progress["pending"]
+				enriched["failed"] = progress["failed"]
+				enriched["active_workers"] = progress["active_workers"]
+			}
 		}
 
 		enrichedInfos = append(enrichedInfos, enriched)
@@ -181,6 +186,120 @@ func (ds *DaemonServer) handleHealth(w http.ResponseWriter, r *http.Request) {
 		"timestamp":    NowISO(),
 		"orchestrators": len(infos),
 	})
+}
+
+// handleOrchestratorByProject handles operations on a specific orchestrator by project name.
+// DELETE /api/orchestrators/{project} - Remove an offline orchestrator from the registry.
+func (ds *DaemonServer) handleOrchestratorByProject(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Control-Allow-Methods", "GET, DELETE, OPTIONS")
+	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+
+	// Handle preflight
+	if r.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+
+	// Extract project from URL path: /api/orchestrators/{project}
+	project := strings.TrimPrefix(r.URL.Path, "/api/orchestrators/")
+	if project == "" {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{
+			"error": "project name required",
+		})
+		return
+	}
+
+	switch r.Method {
+	case http.MethodDelete:
+		ds.handleDeleteOrchestrator(w, r, project)
+	case http.MethodGet:
+		ds.handleGetOrchestrator(w, r, project)
+	default:
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		json.NewEncoder(w).Encode(map[string]string{
+			"error": "method not allowed",
+		})
+	}
+}
+
+// handleDeleteOrchestrator removes an offline orchestrator from the registry.
+func (ds *DaemonServer) handleDeleteOrchestrator(w http.ResponseWriter, r *http.Request, project string) {
+	// First check if the orchestrator exists and is offline
+	info, err := ds.registry.GetOrchestratorInfoByProject(project)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{
+			"error": err.Error(),
+		})
+		return
+	}
+
+	if info == nil {
+		w.WriteHeader(http.StatusNotFound)
+		json.NewEncoder(w).Encode(map[string]string{
+			"error": "orchestrator not found",
+		})
+		return
+	}
+
+	// Cannot remove online orchestrators
+	if info.IsOnline {
+		w.WriteHeader(http.StatusConflict)
+		json.NewEncoder(w).Encode(map[string]string{
+			"error": "cannot remove online orchestrator - stop it first",
+		})
+		return
+	}
+
+	// Remove from registry
+	removed, err := ds.registry.ForceDeregisterByProject(project)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{
+			"error": err.Error(),
+		})
+		return
+	}
+
+	if !removed {
+		w.WriteHeader(http.StatusNotFound)
+		json.NewEncoder(w).Encode(map[string]string{
+			"error": "orchestrator not found",
+		})
+		return
+	}
+
+	// Return success response
+	json.NewEncoder(w).Encode(map[string]any{
+		"removed":           true,
+		"project":           project,
+		"resources_cleaned": []string{"registry_entry"},
+	})
+}
+
+// handleGetOrchestrator returns info for a specific orchestrator.
+func (ds *DaemonServer) handleGetOrchestrator(w http.ResponseWriter, r *http.Request, project string) {
+	info, err := ds.registry.GetOrchestratorInfoByProject(project)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{
+			"error": err.Error(),
+		})
+		return
+	}
+
+	if info == nil {
+		w.WriteHeader(http.StatusNotFound)
+		json.NewEncoder(w).Encode(map[string]string{
+			"error": "orchestrator not found",
+		})
+		return
+	}
+
+	json.NewEncoder(w).Encode(info)
 }
 
 // handleSSE handles Server-Sent Events connections.
@@ -256,15 +375,19 @@ func (ds *DaemonServer) broadcastLoop() {
 				"total_issues":  info.TotalIssues,
 				"dashboard_url": info.DashboardURL,
 				"uptime":        info.Uptime,
+				"is_online":     info.IsOnline,
 			}
 
-			progress := ds.fetchProgress(info.Port)
-			if progress != nil {
-				enriched["completed"] = progress["completed"]
-				enriched["in_progress"] = progress["in_progress"]
-				enriched["pending"] = progress["pending"]
-				enriched["failed"] = progress["failed"]
-				enriched["active_workers"] = progress["active_workers"]
+			// Only fetch progress for online orchestrators
+			if info.IsOnline {
+				progress := ds.fetchProgress(info.Port)
+				if progress != nil {
+					enriched["completed"] = progress["completed"]
+					enriched["in_progress"] = progress["in_progress"]
+					enriched["pending"] = progress["pending"]
+					enriched["failed"] = progress["failed"]
+					enriched["active_workers"] = progress["active_workers"]
+				}
 			}
 
 			enrichedInfos = append(enrichedInfos, enriched)
@@ -440,9 +563,98 @@ const daemonDashboardHTML = `<!DOCTYPE html>
             font-size: 12px;
             font-weight: 500;
             transition: background 0.2s;
+            margin-right: 8px;
         }
         .view-btn:hover {
             background: #0d4a6f;
+        }
+
+        /* Remove button */
+        .remove-btn {
+            background: #3d1a1a;
+            border: 1px solid #ff4444;
+            color: #ff4444;
+            padding: 8px 16px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 12px;
+            font-weight: 500;
+            transition: background 0.2s;
+        }
+        .remove-btn:hover {
+            background: #4d2a2a;
+        }
+        .remove-btn:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+
+        /* Offline status */
+        .status-offline { background: #88888822; color: #888; }
+        .offline-row { opacity: 0.7; }
+
+        /* Confirmation modal */
+        .modal-overlay {
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0, 0, 0, 0.7);
+            z-index: 1000;
+            justify-content: center;
+            align-items: center;
+        }
+        .modal-overlay.active {
+            display: flex;
+        }
+        .modal {
+            background: #16213e;
+            border-radius: 12px;
+            padding: 24px;
+            max-width: 400px;
+            width: 90%;
+            border: 1px solid #0f3460;
+        }
+        .modal h3 {
+            margin: 0 0 16px 0;
+            color: #ff4444;
+        }
+        .modal p {
+            margin: 0 0 20px 0;
+            color: #aaa;
+            font-size: 14px;
+        }
+        .modal-buttons {
+            display: flex;
+            gap: 12px;
+            justify-content: flex-end;
+        }
+        .modal-btn {
+            padding: 10px 20px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 14px;
+            font-weight: 500;
+            border: none;
+        }
+        .modal-btn.cancel {
+            background: #333;
+            color: #aaa;
+        }
+        .modal-btn.cancel:hover {
+            background: #444;
+        }
+        .modal-btn.confirm {
+            background: #ff4444;
+            color: white;
+        }
+        .modal-btn.confirm:hover {
+            background: #ff5555;
+        }
+        .actions-cell {
+            white-space: nowrap;
         }
 
         /* Empty state */
@@ -496,12 +708,12 @@ const daemonDashboardHTML = `<!DOCTYPE html>
             <div class="header-right">
                 <div class="stats-summary" id="stats-summary">
                     <div class="summary-stat">
-                        <span class="summary-label">Running:</span>
+                        <span class="summary-label">Online:</span>
                         <span class="summary-value running" id="running-count">0</span>
                     </div>
                     <div class="summary-stat">
-                        <span class="summary-label">Completed:</span>
-                        <span class="summary-value completed" id="completed-count">0</span>
+                        <span class="summary-label">Offline:</span>
+                        <span class="summary-value" id="completed-count" style="color: #888;">0</span>
                     </div>
                 </div>
                 <div class="connection-status">
@@ -536,9 +748,22 @@ const daemonDashboardHTML = `<!DOCTYPE html>
         </div>
     </div>
 
+    <!-- Confirmation Modal -->
+    <div class="modal-overlay" id="remove-modal">
+        <div class="modal">
+            <h3>Remove Orchestrator</h3>
+            <p>Are you sure you want to remove <strong id="remove-project-name"></strong> from the registry?</p>
+            <div class="modal-buttons">
+                <button class="modal-btn cancel" onclick="closeRemoveModal()">Cancel</button>
+                <button class="modal-btn confirm" onclick="confirmRemove()">Remove</button>
+            </div>
+        </div>
+    </div>
+
     <script>
         let orchestrators = [];
         let evtSource = null;
+        let removeProject = null;
 
         function updateConnectionStatus(connected) {
             const dot = document.getElementById('connection-dot');
@@ -554,13 +779,13 @@ const daemonDashboardHTML = `<!DOCTYPE html>
 
         function updateSummary(data) {
             let running = 0;
-            let completed = 0;
+            let offline = 0;
             data.forEach(o => {
-                if (o.status === 'running') running++;
-                else if (o.status === 'completed') completed++;
+                if (o.is_online !== false) running++;
+                else offline++;
             });
             document.getElementById('running-count').textContent = running;
-            document.getElementById('completed-count').textContent = completed;
+            document.getElementById('completed-count').textContent = offline;
         }
 
         function updateTable(data) {
@@ -568,16 +793,16 @@ const daemonDashboardHTML = `<!DOCTYPE html>
             const tbody = document.getElementById('orchestrators-table');
 
             if (orchestrators.length === 0) {
-                tbody.innerHTML = '<tr><td colspan="6"><div class="empty-state"><h2>No Orchestrators Running</h2><p>Start an orchestrator with: orchestrator launch &lt;epic-number&gt;</p></div></td></tr>';
+                tbody.innerHTML = '<tr><td colspan="6"><div class="empty-state"><h2>No Orchestrators</h2><p>Start an orchestrator with: orchestrator launch &lt;epic-number&gt;</p></div></td></tr>';
                 return;
             }
 
             tbody.innerHTML = orchestrators.map(o => {
-                const statusClass = 'status-' + o.status;
+                const isOnline = o.is_online !== false;
+                const statusClass = isOnline ? 'status-' + o.status : 'status-offline';
+                const rowClass = isOnline ? statusClass : 'offline-row';
                 const total = o.total_issues || 0;
                 const completed = o.completed || 0;
-                const inProgress = o.in_progress || 0;
-                const failed = o.failed || 0;
                 const percent = total > 0 ? Math.round((completed / total) * 100) : 0;
 
                 const activeWorkers = o.active_workers || 0;
@@ -585,21 +810,73 @@ const daemonDashboardHTML = `<!DOCTYPE html>
 
                 const progressText = completed + '/' + total + ' (' + percent + '%)';
 
-                return '<tr class="' + statusClass + '">' +
-                    '<td><div class="project-name">' + (o.project || 'Unknown') + '</div>' +
-                    '<div class="project-path">' + (o.config_path || '') + '</div></td>' +
-                    '<td><span class="status-badge ' + statusClass + '">' + o.status + '</span></td>' +
+                // Show different status badge for offline orchestrators
+                const statusText = isOnline ? o.status : 'offline';
+                const statusBadgeClass = isOnline ? statusClass : 'status-offline';
+
+                // Build actions based on online status
+                let actionsHtml = '';
+                if (isOnline) {
+                    actionsHtml = '<a href="' + o.dashboard_url + '" class="view-btn" target="_blank">View</a>';
+                } else {
+                    actionsHtml = '<button class="remove-btn" onclick="showRemoveModal(\'' + escapeHtml(o.project) + '\')">Remove</button>';
+                }
+
+                return '<tr class="' + rowClass + '">' +
+                    '<td><div class="project-name">' + escapeHtml(o.project || 'Unknown') + '</div>' +
+                    '<div class="project-path">' + escapeHtml(o.config_path || '') + '</div></td>' +
+                    '<td><span class="status-badge ' + statusBadgeClass + '">' + statusText + '</span></td>' +
                     '<td><div class="workers-display"><span class="workers-count">' + activeWorkers + '</span>' +
                     '<span class="workers-total">/ ' + totalWorkers + '</span></div></td>' +
                     '<td><div class="progress-cell">' +
                     '<div class="progress-bar"><div class="progress-fill" style="width: ' + percent + '%"></div></div>' +
                     '<div class="progress-text">' + progressText + '</div></div></td>' +
-                    '<td><span class="uptime">' + (o.uptime || '--') + '</span></td>' +
-                    '<td><a href="' + o.dashboard_url + '" class="view-btn" target="_blank">View</a></td>' +
+                    '<td><span class="uptime">' + (isOnline ? (o.uptime || '--') : '--') + '</span></td>' +
+                    '<td class="actions-cell">' + actionsHtml + '</td>' +
                 '</tr>';
             }).join('');
 
             updateSummary(data);
+        }
+
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+
+        function showRemoveModal(project) {
+            removeProject = project;
+            document.getElementById('remove-project-name').textContent = project;
+            document.getElementById('remove-modal').classList.add('active');
+        }
+
+        function closeRemoveModal() {
+            removeProject = null;
+            document.getElementById('remove-modal').classList.remove('active');
+        }
+
+        function confirmRemove() {
+            if (!removeProject) return;
+
+            const project = removeProject;
+            closeRemoveModal();
+
+            fetch('/api/orchestrators/' + encodeURIComponent(project), {
+                method: 'DELETE'
+            })
+            .then(r => r.json())
+            .then(data => {
+                if (data.error) {
+                    alert('Error removing orchestrator: ' + data.error);
+                } else {
+                    // Refresh the list
+                    fetchOrchestrators();
+                }
+            })
+            .catch(err => {
+                alert('Error removing orchestrator: ' + err.message);
+            });
         }
 
         function fetchOrchestrators() {

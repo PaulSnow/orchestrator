@@ -612,14 +612,49 @@ func (ds *DashboardServer) handleGetOrchestrator(w http.ResponseWriter, project 
 	json.NewEncoder(w).Encode(info)
 }
 
-// handleDeleteOrchestrator force-removes an orchestrator from the registry.
-// This is an admin action for cleanup purposes.
+// handleDeleteOrchestrator removes an offline orchestrator from the registry.
+// Only offline orchestrators can be removed this way.
 func (ds *DashboardServer) handleDeleteOrchestrator(w http.ResponseWriter, project string) {
+	// First, check if the orchestrator exists and is offline
+	info, err := ds.registry.GetOrchestratorInfoByProject(project)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]any{
+			"removed": false,
+			"project": project,
+			"error":   err.Error(),
+		})
+		return
+	}
+
+	if info == nil {
+		w.WriteHeader(http.StatusNotFound)
+		json.NewEncoder(w).Encode(map[string]any{
+			"removed": false,
+			"project": project,
+			"error":   "orchestrator not found",
+		})
+		return
+	}
+
+	// Check if the orchestrator is online - cannot remove online orchestrators
+	if info.IsOnline {
+		w.WriteHeader(http.StatusConflict)
+		json.NewEncoder(w).Encode(map[string]any{
+			"removed": false,
+			"project": project,
+			"error":   "cannot remove online orchestrator; stop it first",
+		})
+		return
+	}
+
+	// Remove the orchestrator from the registry
 	removed, err := ds.registry.ForceDeregisterByProject(project)
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
 		json.NewEncoder(w).Encode(map[string]any{
-			"success": false,
+			"removed": false,
+			"project": project,
 			"error":   err.Error(),
 		})
 		return
@@ -628,15 +663,18 @@ func (ds *DashboardServer) handleDeleteOrchestrator(w http.ResponseWriter, proje
 	if !removed {
 		w.WriteHeader(http.StatusNotFound)
 		json.NewEncoder(w).Encode(map[string]any{
-			"success": false,
+			"removed": false,
+			"project": project,
 			"error":   "orchestrator not found",
 		})
 		return
 	}
 
+	// Return success response with resources cleaned
 	json.NewEncoder(w).Encode(map[string]any{
-		"success": true,
-		"message": fmt.Sprintf("Orchestrator '%s' removed from registry", project),
+		"removed":           true,
+		"project":           project,
+		"resources_cleaned": []string{"registry_entry"},
 	})
 }
 
@@ -1091,6 +1129,9 @@ const dashboardHTML = `<!DOCTYPE html>
         .status-idle { background: #88888822; color: #888; }
         .status-failed { background: #ff444422; color: #ff4444; }
         .status-completed { background: #00ff8822; color: #00ff88; }
+        .status-offline { background: #66666622; color: #666; }
+        .remove-link { color: #ff6666; }
+        .remove-link:hover { color: #ff4444; }
         .log-preview {
             font-family: monospace;
             font-size: 11px;
@@ -1599,7 +1640,8 @@ const dashboardHTML = `<!DOCTYPE html>
             }
 
             container.innerHTML = otherOrchestrators.map(o => {
-                const statusClass = 'status-' + o.status;
+                const statusClass = o.is_online ? 'status-' + o.status : 'status-offline';
+                const statusText = o.is_online ? o.status : 'offline';
                 const statsStr = o.num_workers + ' workers, ' + o.total_issues + ' issues';
 
                 // Connectivity status indicator
@@ -1620,7 +1662,7 @@ const dashboardHTML = `<!DOCTYPE html>
                         lastSeenStr +
                     '</span>' +
                     '<span class="orch-project">' + o.project + '</span>' +
-                    '<span class="orch-status"><span class="status-badge ' + statusClass + '">' + o.status + '</span></span>' +
+                    '<span class="orch-status"><span class="status-badge ' + statusClass + '">' + statusText + '</span></span>' +
                     '<span class="orch-stats">' + statsStr + '</span>' +
                     '<span class="orch-uptime">' + (o.uptime || '--') + '</span>' +
                     '<span class="orch-link">' + actionLinks + '</span>' +
@@ -2080,6 +2122,37 @@ const dashboardHTML = `<!DOCTYPE html>
         // Initial switcher update
         if (orchestrators && orchestrators.length > 0) {
             updateSwitcherDropdown(orchestrators);
+        }
+
+        // ========================================
+        // Orchestrator Removal Functions
+        // ========================================
+
+        // Show confirmation dialog before removing an orchestrator
+        function confirmRemoveOrchestrator(project) {
+            if (confirm('Remove orchestrator "' + project + '" from the registry?\\n\\nThis will remove the offline entry from the list. Any associated worktrees will not be deleted.')) {
+                removeOrchestrator(project);
+            }
+        }
+
+        // Remove an offline orchestrator from the registry
+        function removeOrchestrator(project) {
+            fetch('/api/orchestrators/' + encodeURIComponent(project), {
+                method: 'DELETE'
+            })
+            .then(r => r.json())
+            .then(data => {
+                if (data.removed) {
+                    addEvent('orchestrator_removed', { project: project, resources_cleaned: data.resources_cleaned });
+                    // Refresh the orchestrators list
+                    fetchOrchestrators();
+                } else {
+                    alert('Failed to remove orchestrator: ' + (data.error || 'Unknown error'));
+                }
+            })
+            .catch(err => {
+                alert('Error removing orchestrator: ' + err);
+            });
         }
     </script>
 </body>
