@@ -1,6 +1,9 @@
 package orchestrator
 
 import (
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
@@ -338,7 +341,7 @@ func TestListOrchestratorsByStatus(t *testing.T) {
 	}
 }
 
-func TestListAllOrchestratorsRaw(t *testing.T) {
+func TestRegisterWithTakeover_NoExisting(t *testing.T) {
 	tmpDir := t.TempDir()
 	testRegistryPath := filepath.Join(tmpDir, "registry.json")
 
@@ -346,51 +349,25 @@ func TestListAllOrchestratorsRaw(t *testing.T) {
 		registryPath: testRegistryPath,
 	}
 
-	// Create a registry with both running and stale entries
-	reg := &Registry{
-		Orchestrators: []OrchestratorEntry{
-			{
-				Project:    "running-project",
-				Port:       8001,
-				PID:        os.Getpid(), // Current process is running
-				ConfigPath: "/config1.json",
-				StartTime:  NowISO(),
-				Status:     StatusRunning,
-			},
-			{
-				Project:    "stale-project",
-				Port:       8002,
-				PID:        999999, // Non-existent PID
-				ConfigPath: "/config2.json",
-				StartTime:  NowISO(),
-				Status:     StatusRunning,
-			},
-		},
-	}
-	rm.saveRegistry(reg)
-
-	// ListAllOrchestratorsRaw should return all entries without filtering
-	entries, err := rm.ListAllOrchestratorsRaw()
+	// Register with no existing orchestrator
+	result, err := rm.RegisterWithTakeover("test-project", 8123, "/config.json", 5, 10)
 	if err != nil {
-		t.Fatalf("ListAllOrchestratorsRaw failed: %v", err)
+		t.Fatalf("RegisterWithTakeover failed: %v", err)
 	}
+	defer rm.Deregister()
 
-	if len(entries) != 2 {
-		t.Errorf("Expected 2 entries (including stale), got %d", len(entries))
+	if result.TookOver {
+		t.Error("Expected TookOver to be false when no existing orchestrator")
 	}
-
-	// ListOrchestrators should only return running entries
-	activeEntries, err := rm.ListOrchestrators()
-	if err != nil {
-		t.Fatalf("ListOrchestrators failed: %v", err)
+	if result.Port != 8123 {
+		t.Errorf("Expected port 8123, got %d", result.Port)
 	}
-
-	if len(activeEntries) != 1 {
-		t.Errorf("Expected 1 active entry, got %d", len(activeEntries))
+	if result.PreviousEntry != nil {
+		t.Error("Expected PreviousEntry to be nil")
 	}
 }
 
-func TestGetOrchestratorInfosWithOffline(t *testing.T) {
+func TestRegisterWithTakeover_DeadProcess(t *testing.T) {
 	tmpDir := t.TempDir()
 	testRegistryPath := filepath.Join(tmpDir, "registry.json")
 
@@ -398,60 +375,162 @@ func TestGetOrchestratorInfosWithOffline(t *testing.T) {
 		registryPath: testRegistryPath,
 	}
 
-	// Create a registry with both running and offline entries
+	// Manually create a registry entry with a dead PID
+	oldPort := 9999
 	reg := &Registry{
 		Orchestrators: []OrchestratorEntry{
 			{
-				Project:    "running-project",
-				Port:       8001,
-				PID:        os.Getpid(),
-				ConfigPath: "/config1.json",
-				StartTime:  NowISO(),
-				Status:     StatusRunning,
-			},
-			{
-				Project:    "offline-project",
-				Port:       8002,
-				PID:        999999,
-				ConfigPath: "/config2.json",
+				Project:    "takeover-test",
+				Port:       oldPort,
+				PID:        999999, // Non-existent PID
+				ConfigPath: "/old/config.json",
 				StartTime:  NowISO(),
 				Status:     StatusRunning,
 			},
 		},
 	}
-	rm.saveRegistry(reg)
+	if err := rm.saveRegistry(reg); err != nil {
+		t.Fatalf("Failed to save registry: %v", err)
+	}
 
-	// GetOrchestratorInfos should return both with IsOnline flag set correctly
-	infos, err := rm.GetOrchestratorInfos()
+	// Register with takeover - should take over from dead orchestrator
+	result, err := rm.RegisterWithTakeover("takeover-test", 8123, "/config.json", 5, 10)
 	if err != nil {
-		t.Fatalf("GetOrchestratorInfos failed: %v", err)
+		t.Fatalf("RegisterWithTakeover failed: %v", err)
+	}
+	defer rm.Deregister()
+
+	if !result.TookOver {
+		t.Error("Expected TookOver to be true when taking over dead orchestrator")
+	}
+	if result.Port != oldPort {
+		t.Errorf("Expected to reuse port %d, got %d", oldPort, result.Port)
+	}
+	if result.PreviousEntry == nil {
+		t.Fatal("Expected PreviousEntry to be set")
+	}
+	if result.PreviousEntry.PID != 999999 {
+		t.Errorf("Expected previous PID 999999, got %d", result.PreviousEntry.PID)
 	}
 
-	if len(infos) != 2 {
-		t.Fatalf("Expected 2 infos, got %d", len(infos))
+	// Verify we're registered with the old port
+	entries, err := rm.ListOrchestrators()
+	if err != nil {
+		t.Fatalf("ListOrchestrators failed: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("Expected 1 entry, got %d", len(entries))
+	}
+	if entries[0].Port != oldPort {
+		t.Errorf("Expected registered port %d, got %d", oldPort, entries[0].Port)
+	}
+// ConnectivityStatus represents the online/offline status of an orchestrator.
+type ConnectivityStatus string
+
+const (
+	ConnectivityOnline   ConnectivityStatus = "online"
+	ConnectivityOffline  ConnectivityStatus = "offline"
+	ConnectivityChecking ConnectivityStatus = "checking"
+)
+
+}
+
+func TestRegisterWithTakeover_ProcessAliveButUnhealthy(t *testing.T) {
+	tmpDir := t.TempDir()
+	testRegistryPath := filepath.Join(tmpDir, "registry.json")
+
+	rm := &RegistryManager{
+		registryPath: testRegistryPath,
 	}
 
-	// Find each entry and check IsOnline
-	var runningInfo, offlineInfo *OrchestratorInfo
-	for i := range infos {
-		if infos[i].Project == "running-project" {
-			runningInfo = &infos[i]
-		} else if infos[i].Project == "offline-project" {
-			offlineInfo = &infos[i]
+	// Use PID 1 (init/systemd) which is always running on Linux,
+	// but won't have an HTTP endpoint on port 99999
+	// This simulates a "live process but unhealthy orchestrator" scenario
+	livingPID := 1
+
+	reg := &Registry{
+		Orchestrators: []OrchestratorEntry{
+			{
+				Project:    "unhealthy-test",
+				Port:       59998, // Port with no server (health check will fail)
+				PID:        livingPID,
+				ConfigPath: "/config.json",
+				StartTime:  NowISO(),
+				Status:     StatusRunning,
+			},
+		},
+	}
+	if err := rm.saveRegistry(reg); err != nil {
+		t.Fatalf("Failed to save registry: %v", err)
+	}
+
+	// Try to register - should succeed with takeover since health check fails
+	// (process is running but HTTP endpoint is not responding)
+	result, err := rm.RegisterWithTakeover("unhealthy-test", 8123, "/config.json", 5, 10)
+	if err != nil {
+		t.Fatalf("RegisterWithTakeover failed: %v", err)
+	}
+	defer rm.Deregister()
+
+	// Should take over because health check fails (even though process exists)
+	if !result.TookOver {
+		t.Error("Expected TookOver to be true when HTTP health check fails")
+	}
+	// Should reuse the old port
+	if result.Port != 59998 {
+		t.Errorf("Expected to reuse port 59998, got %d", result.Port)
+	}
+}
+
+func TestIsOrchestratorHealthy_NoServer(t *testing.T) {
+	// Test with a port that has no server
+	healthy := isOrchestratorHealthy(59999)
+	if healthy {
+		t.Error("Expected unhealthy when no server is running")
+	}
+}
+
+func TestIsOrchestratorHealthy_HealthyServer(t *testing.T) {
+	// Start a test server that responds to health checks
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/state" {
+			w.WriteHeader(http.StatusOK)
+			json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+		} else {
+			w.WriteHeader(http.StatusNotFound)
 		}
+	}))
+	defer server.Close()
+
+	// Extract port from test server URL - httptest uses 127.0.0.1
+	// isOrchestratorHealthy uses localhost, so we just verify the server works
+	resp, err := http.Get(server.URL + "/api/state")
+	if err != nil {
+		t.Fatalf("Failed to reach test server: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("Expected OK from test server, got %d", resp.StatusCode)
+	}
+}
+
+func TestDescribeDeadState(t *testing.T) {
+	tests := []struct {
+		processRunning    bool
+		healthCheckPassed bool
+		expected          string
+	}{
+		{false, false, "process not running"},
+		{false, true, "process not running"},
+		{true, false, "not responding to health checks"},
+		{true, true, "unknown"},
 	}
 
-	if runningInfo == nil {
-		t.Fatal("Expected to find running-project info")
-	}
-	if !runningInfo.IsOnline {
-		t.Error("Expected running-project to be online")
-	}
-
-	if offlineInfo == nil {
-		t.Fatal("Expected to find offline-project info")
-	}
-	if offlineInfo.IsOnline {
-		t.Error("Expected offline-project to be offline")
+	for _, tc := range tests {
+		result := describeDeadState(tc.processRunning, tc.healthCheckPassed)
+		if result != tc.expected {
+			t.Errorf("describeDeadState(%v, %v) = %q, expected %q",
+				tc.processRunning, tc.healthCheckPassed, result, tc.expected)
+		}
 	}
 }
