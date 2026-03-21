@@ -137,9 +137,55 @@ tmux session: "proof-orchestrator"
 - `/tmp/proof-worker-N.log` -- worker output (Claude Code session transcript)
 - `/tmp/orchestrator-signal-N` -- completion signal (exit code)
 
-## Supervisor
+## Agent Teams
 
-The Supervisor is an adaptive monitoring layer that catches problems existing alarms miss and documents what should have fired.
+The orchestrator can launch Claude agent teams in tmux sessions for parallel work. This is required because Claude can't spawn agent teams from within itself, but it CAN create tmux sessions and launch Claude there.
+
+### Why tmux for Agent Teams
+
+```
+Claude session (running orchestrator)
+    └── tmux session (independent)
+            └── Claude (fresh context)
+                    └── Agent team (4+ teammates in parallel)
+```
+
+When the orchestrator runs inside a Claude session, it cannot spawn agent teams directly. The solution is to create a tmux session, launch Claude in it, and send an agent team prompt. That Claude instance has its own context and can spawn teammates.
+
+### Usage
+
+```go
+// Define tasks for each teammate
+tasks := []AgentTask{
+    {Name: "file1.go", Items: []string{"implement X", "add tests"}},
+    {Name: "file2.go", Items: []string{"implement Y", "add docs"}},
+}
+
+// Build and launch
+prompt := BuildAgentTeamPrompt("/path/to/repo", tasks)
+cfg := &AgentTeamConfig{
+    SessionName: "my-team",
+    WorkDir:     "/path/to/repo",
+    Prompt:      prompt,
+}
+
+team, _ := LaunchAgentTeam(cfg)
+team.WaitWithProgress(30*time.Minute, 30*time.Second)
+team.Kill()
+```
+
+### Quick Usage
+
+```go
+// For simple cases
+QuickTeam("session-name", "/path/to/repo", prompt, 30*time.Minute)
+```
+
+### Files
+
+- `internal/orchestrator/agent_team.go` - Agent team management
+
+## Supervisor
 
 ### Purpose
 
