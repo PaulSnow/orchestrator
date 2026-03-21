@@ -29,6 +29,8 @@ type DashboardServer struct {
 	mu                   sync.Mutex
 	registry             *RegistryManager
 	connectivityChecker  *ConnectivityChecker
+	stopChan             chan struct{}
+	stopOnce             sync.Once
 }
 
 // NewDashboardServer creates a new dashboard server instance.
@@ -46,6 +48,7 @@ func NewDashboardServer(cfg *RunConfig, state *StateManager, events *EventBroadc
 		port:                port,
 		registry:            registry,
 		connectivityChecker: connChecker,
+		stopChan:            make(chan struct{}),
 	}
 }
 
@@ -91,6 +94,7 @@ func (ds *DashboardServer) Start() error {
 	// Action endpoints
 	mux.HandleFunc("/api/open-tmux", ds.handleOpenTmux)
 	mux.HandleFunc("/api/reload", ds.handleReload)
+	mux.HandleFunc("/api/stop", ds.handleStopOrchestrator)
 
 	// Dashboard HTML
 	mux.HandleFunc("/", ds.handleDashboard)
@@ -800,6 +804,74 @@ func (ds *DashboardServer) handleReload(w http.ResponseWriter, r *http.Request) 
 	})
 }
 
+// handleStopOrchestrator handles requests to stop this orchestrator.
+// IMPORTANT: This endpoint is blocked when accessed via proxy to prevent
+// accidentally stopping the wrong orchestrator. Users must navigate to
+// the orchestrator's own dashboard to stop it.
+func (ds *DashboardServer) handleStopOrchestrator(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
+
+	if r.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		json.NewEncoder(w).Encode(map[string]string{
+			"error": "method not allowed, use POST",
+		})
+		return
+	}
+
+	// Check if this request came via proxy by looking at X-Forwarded headers
+	// or the Referer. If the request is being proxied, block it.
+	if r.Header.Get("X-Forwarded-Host") != "" || r.Header.Get("X-Proxied-From") != "" {
+		w.WriteHeader(http.StatusForbidden)
+		json.NewEncoder(w).Encode(map[string]string{
+			"error": "cannot stop orchestrator via proxy - navigate to the orchestrator directly",
+		})
+		return
+	}
+
+	// Check Referer for proxy path
+	referer := r.Header.Get("Referer")
+	if strings.Contains(referer, "/proxy/") {
+		w.WriteHeader(http.StatusForbidden)
+		json.NewEncoder(w).Encode(map[string]string{
+			"error": "cannot stop orchestrator via proxy - navigate to the orchestrator directly",
+		})
+		return
+	}
+
+	// Signal stop
+	ds.stopOnce.Do(func() {
+		LogMsg("[dashboard] Stop requested via API")
+		close(ds.stopChan)
+
+		// Emit stopping event so clients can react
+		if ds.events != nil {
+			ds.events.EmitEvent("orchestrator_stopping", map[string]any{
+				"project": ds.cfg.Project,
+				"message": "Orchestrator is shutting down",
+			})
+		}
+	})
+
+	json.NewEncoder(w).Encode(map[string]any{
+		"success": true,
+		"message": "Stop signal sent",
+		"project": ds.cfg.Project,
+	})
+}
+
+// GetStopChannel returns the stop channel for monitoring shutdown requests.
+func (ds *DashboardServer) GetStopChannel() <-chan struct{} {
+	return ds.stopChan
+}
+
 // handleProxy proxies requests to another orchestrator's dashboard.
 // This allows viewing other orchestrators without knowing their ports.
 func (ds *DashboardServer) handleProxy(w http.ResponseWriter, r *http.Request) {
@@ -836,13 +908,15 @@ func (ds *DashboardServer) handleProxy(w http.ResponseWriter, r *http.Request) {
 
 	proxy := httputil.NewSingleHostReverseProxy(targetURL)
 
-	// Customize the director to set the correct path
+	// Customize the director to set the correct path and add proxy header
 	originalDirector := proxy.Director
 	proxy.Director = func(req *http.Request) {
 		originalDirector(req)
 		req.URL.Path = remainingPath
 		req.URL.RawQuery = r.URL.RawQuery
 		req.Host = targetURL.Host
+		// Mark this request as proxied so the target can detect it
+		req.Header.Set("X-Proxied-From", ds.cfg.Project)
 	}
 
 	// Add CORS headers for API endpoints
@@ -1359,6 +1433,7 @@ const dashboardHTML = `<!DOCTYPE html>
                 <button class="control-btn" onclick="openTmux()">Open tmux session</button>
                 <button class="control-btn" onclick="refreshState()">Refresh state</button>
                 <button class="control-btn" onclick="syncFromGitHub()" style="background: #238636;">Sync from GitHub</button>
+                <button class="control-btn" id="stop-btn" onclick="stopOrchestrator()" style="background: #da3633; display: none;">Stop Orchestrator</button>
             </div>
         </div>
 
@@ -1622,6 +1697,35 @@ const dashboardHTML = `<!DOCTYPE html>
                 .catch(err => {
                     alert('Sync error: ' + err);
                 });
+        }
+
+        function stopOrchestrator() {
+            const projectName = document.querySelector('.header h1')?.textContent || 'this orchestrator';
+            if (!confirm('Stop orchestrator for "' + projectName + '"?\n\nThis will shut down all workers and exit.')) {
+                return;
+            }
+            fetch('/api/stop', {method: 'POST'})
+                .then(r => r.json())
+                .then(data => {
+                    if (data.success) {
+                        alert('Orchestrator is shutting down...');
+                        // The page will become unresponsive as the server shuts down
+                    } else {
+                        alert('Stop failed: ' + (data.error || 'Unknown error'));
+                    }
+                })
+                .catch(err => {
+                    alert('Stop error: ' + err);
+                });
+        }
+
+        // Show/hide stop button based on whether we're viewing directly or via proxy
+        function updateStopButtonVisibility() {
+            const stopBtn = document.getElementById('stop-btn');
+            if (stopBtn) {
+                // Show only when viewing this orchestrator directly (not via proxy)
+                stopBtn.style.display = (viewingOrchestrator === null) ? 'inline-block' : 'none';
+            }
         }
 
         function formatLastSeen(isoString) {
@@ -1918,6 +2022,7 @@ const dashboardHTML = `<!DOCTYPE html>
             }
 
             viewingOrchestrator = project;
+            updateStopButtonVisibility();
 
             // Show breadcrumb
             const breadcrumb = document.getElementById('breadcrumb');
@@ -2025,6 +2130,7 @@ const dashboardHTML = `<!DOCTYPE html>
         // Return to hub view (the orchestrator we're running in)
         function returnToHub() {
             viewingOrchestrator = null;
+            updateStopButtonVisibility();
 
             // Hide breadcrumb
             document.getElementById('breadcrumb').style.display = 'none';
@@ -2133,6 +2239,9 @@ const dashboardHTML = `<!DOCTYPE html>
         if (orchestrators && orchestrators.length > 0) {
             updateSwitcherDropdown(orchestrators);
         }
+
+        // Show stop button (only visible when viewing this orchestrator directly)
+        updateStopButtonVisibility();
 
         // ========================================
         // Orchestrator Removal Functions
