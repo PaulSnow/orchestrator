@@ -358,24 +358,35 @@ OPTIONS`)
 	// Create dashboard server (runs throughout entire lifecycle)
 	var dashboardServer *orchestrator.DashboardServer
 	if *webPort > 0 {
-		dashboardServer = orchestrator.NewDashboardServer(primaryCfg, state, events, *webPort)
-		dashboardServer.Start()
-		fmt.Printf("  Dashboard: http://localhost:%d\n", *webPort)
-		defer dashboardServer.Stop()
+		actualPort := *webPort
 
-		// Register this orchestrator in the global registry
+		// Check for existing orchestrator and takeover if offline
 		if !*dryRun {
-			if err := orchestrator.RegisterOrchestrator(
+			regResult, err := orchestrator.RegisterOrchestratorWithTakeover(
 				primaryCfg.Project,
 				*webPort,
 				primaryCfg.ConfigPath,
 				numWorkers,
 				len(primaryCfg.Issues),
-			); err != nil {
-				fmt.Printf("  Warning: Failed to register orchestrator: %v\n", err)
+			)
+			if err != nil {
+				// Another orchestrator is already running
+				fmt.Fprintf(os.Stderr, "ERROR: %v\n", err)
+				os.Exit(1)
 			}
 			defer orchestrator.DeregisterOrchestrator()
+
+			// Use the port from registration (may be reused from dead orchestrator)
+			if regResult.TookOver {
+				actualPort = regResult.Port
+				fmt.Printf("  Taking over from offline orchestrator (reusing port %d)\n", actualPort)
+			}
 		}
+
+		dashboardServer = orchestrator.NewDashboardServer(primaryCfg, state, events, actualPort)
+		dashboardServer.Start()
+		fmt.Printf("  Dashboard: http://localhost:%d\n", dashboardServer.GetPort())
+		defer dashboardServer.Stop()
 	}
 
 	// Run review gate unless skipped
@@ -681,23 +692,34 @@ func cmdReview(args []string) {
 	// Start dashboard server if enabled
 	var dashboardServer *orchestrator.DashboardServer
 	if *webPort > 0 {
-		dashboardServer = orchestrator.NewDashboardServer(primaryCfg, state, events, *webPort)
-		dashboardServer.SetReviewGate(reviewGate)
-		dashboardServer.Start()
-		fmt.Printf("Dashboard: http://localhost:%d\n", *webPort)
-		fmt.Println()
+		actualPort := *webPort
 
-		// Register this orchestrator in the global registry
-		if err := orchestrator.RegisterOrchestrator(
+		// Check for existing orchestrator and takeover if offline
+		regResult, err := orchestrator.RegisterOrchestratorWithTakeover(
 			primaryCfg.Project,
 			*webPort,
 			primaryCfg.ConfigPath,
 			0, // no workers in review mode
 			len(primaryCfg.Issues),
-		); err != nil {
-			fmt.Printf("Warning: Failed to register orchestrator: %v\n", err)
+		)
+		if err != nil {
+			// Another orchestrator is already running
+			fmt.Fprintf(os.Stderr, "ERROR: %v\n", err)
+			os.Exit(1)
 		}
 		defer orchestrator.DeregisterOrchestrator()
+
+		// Use the port from registration (may be reused from dead orchestrator)
+		if regResult.TookOver {
+			actualPort = regResult.Port
+			fmt.Printf("Taking over from offline orchestrator (reusing port %d)\n", actualPort)
+		}
+
+		dashboardServer = orchestrator.NewDashboardServer(primaryCfg, state, events, actualPort)
+		dashboardServer.SetReviewGate(reviewGate)
+		dashboardServer.Start()
+		fmt.Printf("Dashboard: http://localhost:%d\n", dashboardServer.GetPort())
+		fmt.Println()
 	}
 
 	// Run review

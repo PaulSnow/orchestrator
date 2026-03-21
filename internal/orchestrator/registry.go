@@ -3,6 +3,7 @@ package orchestrator
 import (
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 	"sync"
@@ -93,31 +94,88 @@ func (rm *RegistryManager) saveRegistry(reg *Registry) error {
 	return AtomicWrite(rm.registryPath, reg)
 }
 
+// RegisterResult contains the result of a registration operation.
+type RegisterResult struct {
+	// Port is the port the orchestrator should use
+	Port int
+	// TookOver is true if we took over from a dead orchestrator
+	TookOver bool
+	// PreviousEntry is the entry that was cleaned up (if takeover occurred)
+	PreviousEntry *OrchestratorEntry
+}
+
 // Register registers the current orchestrator instance.
 // Returns error if another orchestrator is already running on the same project.
 func (rm *RegistryManager) Register(project string, port int, configPath string, numWorkers, totalIssues int) error {
+	result, err := rm.RegisterWithTakeover(project, port, configPath, numWorkers, totalIssues)
+	if err != nil {
+		return err
+	}
+	// Note: caller should use RegisterWithTakeover if they want to reuse the port
+	_ = result
+	return nil
+}
+
+// RegisterWithTakeover registers the current orchestrator instance with takeover support.
+// If an offline orchestrator exists for this project, it takes over and returns
+// the previous port in the result. The caller can then use this port for their dashboard.
+// Returns error if another orchestrator is already running (and healthy) on the same project.
+func (rm *RegistryManager) RegisterWithTakeover(project string, port int, configPath string, numWorkers, totalIssues int) (*RegisterResult, error) {
 	rm.mu.Lock()
 	defer rm.mu.Unlock()
 
 	reg, err := rm.loadRegistry()
 	if err != nil {
-		return fmt.Errorf("loading registry: %w", err)
+		return nil, fmt.Errorf("loading registry: %w", err)
 	}
 
-	// Check if another orchestrator is already running on this project
 	myPID := os.Getpid()
-	for _, existing := range reg.Orchestrators {
+	result := &RegisterResult{
+		Port:     port,
+		TookOver: false,
+	}
+
+	// Check for existing orchestrator on this project
+	var existingIndex int = -1
+	for i, existing := range reg.Orchestrators {
 		if existing.Project == project && existing.PID != myPID {
-			// Check if the process is still alive
-			if isProcessRunning(existing.PID) {
-				return fmt.Errorf("another orchestrator (PID %d) is already running on project %q - only one orchestrator per repository allowed", existing.PID, project)
+			existingIndex = i
+
+			// Check if the process is running
+			processRunning := isProcessRunning(existing.PID)
+
+			// Check HTTP health if process is running
+			healthCheckPassed := false
+			if processRunning {
+				healthCheckPassed = isOrchestratorHealthy(existing.Port)
 			}
+
+			isAlive := processRunning && healthCheckPassed
+
+			if isAlive {
+				return nil, fmt.Errorf("orchestrator already running for %q on port %d (PID %d) - only one orchestrator per repository allowed",
+					project, existing.Port, existing.PID)
+			}
+
+			// Orchestrator is offline - we can take over
+			LogMsg(fmt.Sprintf("Taking over from offline orchestrator for %q (PID %d was %s)",
+				project, existing.PID, describeDeadState(processRunning, healthCheckPassed)))
+
+			result.TookOver = true
+			result.Port = existing.Port // Reuse the port
+			result.PreviousEntry = &existing
+			break
 		}
+	}
+
+	// Remove the existing entry if we're taking over
+	if existingIndex >= 0 {
+		reg.Orchestrators = append(reg.Orchestrators[:existingIndex], reg.Orchestrators[existingIndex+1:]...)
 	}
 
 	entry := OrchestratorEntry{
 		Project:     project,
-		Port:        port,
+		Port:        result.Port,
 		PID:         myPID,
 		ConfigPath:  configPath,
 		StartTime:   NowISO(),
@@ -144,10 +202,10 @@ func (rm *RegistryManager) Register(project string, port int, configPath string,
 	rm.currentEntry = &entry
 
 	if err := rm.saveRegistry(reg); err != nil {
-		return fmt.Errorf("saving registry: %w", err)
+		return nil, fmt.Errorf("saving registry: %w", err)
 	}
 
-	return nil
+	return result, nil
 }
 
 // Deregister removes the current orchestrator from the registry.
@@ -250,24 +308,9 @@ func (rm *RegistryManager) ListOrchestrators() ([]OrchestratorEntry, error) {
 	return activeEntries, nil
 }
 
-// ListAllOrchestratorsRaw returns all registered orchestrators including offline ones.
-// It does not clean up stale entries and includes an IsOnline flag for each entry.
-func (rm *RegistryManager) ListAllOrchestratorsRaw() ([]OrchestratorEntry, error) {
-	rm.mu.RLock()
-	defer rm.mu.RUnlock()
-
-	reg, err := rm.loadRegistry()
-	if err != nil {
-		return nil, fmt.Errorf("loading registry: %w", err)
-	}
-
-	return reg.Orchestrators, nil
-}
-
 // GetOrchestratorByProject finds an orchestrator by project name.
-// This includes offline orchestrators.
 func (rm *RegistryManager) GetOrchestratorByProject(project string) (*OrchestratorEntry, error) {
-	entries, err := rm.ListAllOrchestratorsRaw()
+	entries, err := rm.ListOrchestrators()
 	if err != nil {
 		return nil, err
 	}
@@ -291,7 +334,6 @@ func (rm *RegistryManager) GetOrchestratorInfoByProject(project string) (*Orches
 	}
 
 	currentPID := os.Getpid()
-	isOnline := isProcessRunning(entry.PID)
 	info := &OrchestratorInfo{
 		Project:      entry.Project,
 		Port:         entry.Port,
@@ -303,7 +345,6 @@ func (rm *RegistryManager) GetOrchestratorInfoByProject(project string) (*Orches
 		TotalIssues:  entry.TotalIssues,
 		DashboardURL: fmt.Sprintf("http://localhost:%d", entry.Port),
 		IsCurrent:    entry.PID == currentPID,
-		IsOnline:     isOnline,
 	}
 
 	// Calculate uptime
@@ -390,6 +431,117 @@ const (
 	ConnectivityChecking ConnectivityStatus = "checking"
 )
 
+// isOrchestratorHealthy checks if an orchestrator is responding to health checks.
+// This pings the orchestrator's HTTP endpoint to verify it's actually running and responsive.
+func isOrchestratorHealthy(port int) bool {
+	client := &http.Client{
+		Timeout: 2 * time.Second,
+	}
+
+	// Try the /api/state endpoint which always exists on dashboard server
+	resp, err := client.Get(fmt.Sprintf("http://localhost:%d/api/state", port))
+	if err != nil {
+		return false
+	}
+	defer resp.Body.Close()
+
+	return resp.StatusCode == http.StatusOK
+}
+
+// TakeoverResult contains information about a takeover operation.
+type TakeoverResult struct {
+	// TookOver is true if we took over from a dead orchestrator
+	TookOver bool
+	// PreviousPort is the port from the dead orchestrator (to reuse)
+	PreviousPort int
+	// PreviousEntry is the entry that was cleaned up
+	PreviousEntry *OrchestratorEntry
+}
+
+// CheckAndTakeover checks if there's an existing orchestrator for the project.
+// If found and offline (not responding to health checks), it cleans up the old entry
+// and returns the port to reuse. If found and online, returns an error.
+// If not found, returns a nil result.
+func (rm *RegistryManager) CheckAndTakeover(project string) (*TakeoverResult, error) {
+	rm.mu.Lock()
+	defer rm.mu.Unlock()
+
+	reg, err := rm.loadRegistry()
+	if err != nil {
+		return nil, fmt.Errorf("loading registry: %w", err)
+	}
+
+	// Find existing entry for this project
+	var existingEntry *OrchestratorEntry
+	var existingIndex int = -1
+	for i, entry := range reg.Orchestrators {
+		if entry.Project == project {
+			existingEntry = &reg.Orchestrators[i]
+			existingIndex = i
+			break
+		}
+	}
+
+	if existingEntry == nil {
+		// No existing orchestrator for this project
+		return nil, nil
+	}
+
+	myPID := os.Getpid()
+	if existingEntry.PID == myPID {
+		// This is our own entry (shouldn't happen during initial launch)
+		return nil, nil
+	}
+
+	// Check if the process is running
+	processRunning := isProcessRunning(existingEntry.PID)
+
+	// Check if the orchestrator is actually responding to HTTP requests
+	// This catches cases where the process exists but the server is dead/hung
+	healthCheckPassed := false
+	if processRunning {
+		healthCheckPassed = isOrchestratorHealthy(existingEntry.Port)
+	}
+
+	// Orchestrator is alive if both process is running AND health check passes
+	isAlive := processRunning && healthCheckPassed
+
+	if isAlive {
+		return nil, fmt.Errorf("orchestrator already running for %q on port %d (PID %d)",
+			project, existingEntry.Port, existingEntry.PID)
+	}
+
+	// Orchestrator is offline - take over
+	LogMsg(fmt.Sprintf("Taking over offline orchestrator for %q (PID %d was %s)",
+		project, existingEntry.PID, describeDeadState(processRunning, healthCheckPassed)))
+
+	result := &TakeoverResult{
+		TookOver:      true,
+		PreviousPort:  existingEntry.Port,
+		PreviousEntry: existingEntry,
+	}
+
+	// Remove the old entry from registry
+	reg.Orchestrators = append(reg.Orchestrators[:existingIndex], reg.Orchestrators[existingIndex+1:]...)
+
+	if err := rm.saveRegistry(reg); err != nil {
+		return nil, fmt.Errorf("saving registry after takeover: %w", err)
+	}
+
+	return result, nil
+}
+
+// describeDeadState returns a human-readable description of why an orchestrator is considered dead.
+func describeDeadState(processRunning, healthCheckPassed bool) string {
+	if !processRunning {
+		return "process not running"
+	}
+	if !healthCheckPassed {
+		return "not responding to health checks"
+	}
+	return "unknown"
+}
+
 // OrchestratorInfo represents enriched orchestrator information for the API.
 type OrchestratorInfo struct {
 	Project      string             `json:"project"`
@@ -403,18 +555,11 @@ type OrchestratorInfo struct {
 	DashboardURL string             `json:"dashboard_url"`
 	Uptime       string             `json:"uptime"`
 	IsCurrent    bool               `json:"is_current"`
-	// IsOnline indicates if the orchestrator process is still running (PID check)
-	IsOnline bool `json:"is_online"`
-	// Connectivity indicates if the orchestrator's dashboard is reachable
-	Connectivity ConnectivityStatus `json:"connectivity"`
-	// LastSeen is the timestamp when the orchestrator was last seen online (for offline orchestrators)
-	LastSeen string `json:"last_seen,omitempty"`
 }
 
-// GetOrchestratorInfos returns enriched orchestrator information for all orchestrators
-// including offline ones. The IsOnline field indicates if the process is still running.
+// GetOrchestratorInfos returns enriched orchestrator information.
 func (rm *RegistryManager) GetOrchestratorInfos() ([]OrchestratorInfo, error) {
-	entries, err := rm.ListAllOrchestratorsRaw()
+	entries, err := rm.ListOrchestrators()
 	if err != nil {
 		return nil, err
 	}
@@ -423,7 +568,6 @@ func (rm *RegistryManager) GetOrchestratorInfos() ([]OrchestratorInfo, error) {
 	infos := make([]OrchestratorInfo, 0, len(entries))
 
 	for _, entry := range entries {
-		isOnline := isProcessRunning(entry.PID)
 		info := OrchestratorInfo{
 			Project:      entry.Project,
 			Port:         entry.Port,
@@ -435,7 +579,6 @@ func (rm *RegistryManager) GetOrchestratorInfos() ([]OrchestratorInfo, error) {
 			TotalIssues:  entry.TotalIssues,
 			DashboardURL: fmt.Sprintf("http://localhost:%d", entry.Port),
 			IsCurrent:    entry.PID == currentPID,
-			IsOnline:     isOnline,
 		}
 
 		// Calculate uptime
@@ -444,38 +587,7 @@ func (rm *RegistryManager) GetOrchestratorInfos() ([]OrchestratorInfo, error) {
 			info.Uptime = formatUptime(uptime)
 		}
 
-		// Default connectivity to checking (will be enriched by caller if needed)
-		if entry.PID == currentPID {
-			info.Connectivity = ConnectivityOnline
-		} else {
-			info.Connectivity = ConnectivityChecking
-		}
-
 		infos = append(infos, info)
-	}
-
-	return infos, nil
-}
-
-// GetOrchestratorInfosWithConnectivity returns enriched orchestrator information
-// with connectivity status from the provided ConnectivityChecker.
-func (rm *RegistryManager) GetOrchestratorInfosWithConnectivity(cc *ConnectivityChecker) ([]OrchestratorInfo, error) {
-	infos, err := rm.GetOrchestratorInfos()
-	if err != nil {
-		return nil, err
-	}
-
-	if cc == nil {
-		return infos, nil
-	}
-
-	// Enrich with connectivity status
-	for i := range infos {
-		status, lastSeen := cc.GetStatus(infos[i].Project)
-		infos[i].Connectivity = status
-		if status == ConnectivityOffline && !lastSeen.IsZero() {
-			infos[i].LastSeen = lastSeen.Format(time.RFC3339)
-		}
 	}
 
 	return infos, nil
@@ -514,6 +626,12 @@ func GetGlobalRegistry() *RegistryManager {
 // RegisterOrchestrator is a convenience function to register the current orchestrator.
 func RegisterOrchestrator(project string, port int, configPath string, numWorkers, totalIssues int) error {
 	return GetGlobalRegistry().Register(project, port, configPath, numWorkers, totalIssues)
+}
+
+// RegisterOrchestratorWithTakeover is a convenience function to register with takeover support.
+// Returns the result which includes the port to use (may be different if taking over).
+func RegisterOrchestratorWithTakeover(project string, port int, configPath string, numWorkers, totalIssues int) (*RegisterResult, error) {
+	return GetGlobalRegistry().RegisterWithTakeover(project, port, configPath, numWorkers, totalIssues)
 }
 
 // DeregisterOrchestrator is a convenience function to deregister the current orchestrator.
