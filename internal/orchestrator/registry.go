@@ -8,6 +8,8 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"github.com/PaulSnow/orchestrator/internal/daemon"
 )
 
 // OrchestratorStatus represents the status of an orchestrator instance.
@@ -461,4 +463,181 @@ func UpdateOrchestratorStatus(status OrchestratorStatus) error {
 // ListAllOrchestrators is a convenience function to list all orchestrators.
 func ListAllOrchestrators() ([]OrchestratorInfo, error) {
 	return GetGlobalRegistry().GetOrchestratorInfos()
+}
+
+// DaemonAwareRegistry wraps the file-based registry and adds daemon registration.
+// It registers with the daemon on startup and monitors for daemon restarts.
+type DaemonAwareRegistry struct {
+	fileRegistry  *RegistryManager
+	daemonClient  *daemon.Client
+	registered    bool
+	currentEntry  *registrationEntry
+	stopHeartbeat chan struct{}
+	mu            sync.Mutex
+}
+
+type registrationEntry struct {
+	project     string
+	port        int
+	configPath  string
+	numWorkers  int
+	totalIssues int
+}
+
+var (
+	globalDaemonRegistry *DaemonAwareRegistry
+	daemonRegistryOnce   sync.Once
+)
+
+// GetDaemonRegistry returns the global daemon-aware registry.
+func GetDaemonRegistry() *DaemonAwareRegistry {
+	daemonRegistryOnce.Do(func() {
+		globalDaemonRegistry = &DaemonAwareRegistry{
+			fileRegistry: GetGlobalRegistry(),
+			daemonClient: daemon.DefaultClient(),
+		}
+	})
+	return globalDaemonRegistry
+}
+
+// Register registers with both the daemon and the file-based registry.
+// If the daemon is not running, it only registers with the file-based registry.
+func (r *DaemonAwareRegistry) Register(project string, port int, configPath string, numWorkers, totalIssues int) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	// Always register with file-based registry as backup
+	if err := r.fileRegistry.Register(project, port, configPath, numWorkers, totalIssues); err != nil {
+		return fmt.Errorf("file registry: %w", err)
+	}
+
+	// Store entry for re-registration
+	r.currentEntry = &registrationEntry{
+		project:     project,
+		port:        port,
+		configPath:  configPath,
+		numWorkers:  numWorkers,
+		totalIssues: totalIssues,
+	}
+
+	// Try to register with daemon
+	if r.daemonClient.IsDaemonRunning() {
+		if err := r.daemonClient.Register(project, port, numWorkers, totalIssues); err != nil {
+			// Log warning but don't fail - file registry is the backup
+			LogMsg(fmt.Sprintf("Warning: daemon registration failed: %v", err))
+		} else {
+			r.registered = true
+			LogMsg(fmt.Sprintf("Registered with daemon: %s (port %d)", project, port))
+		}
+	} else {
+		LogMsg("Daemon not running, using file-based registry only")
+	}
+
+	// Start heartbeat goroutine to detect daemon restarts and re-register
+	if r.stopHeartbeat == nil {
+		r.stopHeartbeat = make(chan struct{})
+		go r.heartbeatLoop()
+	}
+
+	return nil
+}
+
+// Deregister removes registration from both daemon and file-based registry.
+func (r *DaemonAwareRegistry) Deregister() error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	// Stop heartbeat
+	if r.stopHeartbeat != nil {
+		close(r.stopHeartbeat)
+		r.stopHeartbeat = nil
+	}
+
+	// Deregister from daemon if registered
+	if r.registered && r.currentEntry != nil {
+		if err := r.daemonClient.Deregister(r.currentEntry.project); err != nil {
+			LogMsg(fmt.Sprintf("Warning: daemon deregistration failed: %v", err))
+		} else {
+			LogMsg(fmt.Sprintf("Deregistered from daemon: %s", r.currentEntry.project))
+		}
+		r.registered = false
+	}
+
+	// Always deregister from file registry
+	if err := r.fileRegistry.Deregister(); err != nil {
+		return fmt.Errorf("file registry deregister: %w", err)
+	}
+
+	r.currentEntry = nil
+	return nil
+}
+
+// UpdateStatus updates status in both registries.
+func (r *DaemonAwareRegistry) UpdateStatus(status OrchestratorStatus) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	// Update file registry
+	return r.fileRegistry.UpdateStatus(status)
+}
+
+// heartbeatLoop periodically checks if daemon is running and re-registers if needed.
+func (r *DaemonAwareRegistry) heartbeatLoop() {
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-r.stopHeartbeat:
+			return
+		case <-ticker.C:
+			r.checkAndReregister()
+		}
+	}
+}
+
+// checkAndReregister checks if daemon is available and re-registers if needed.
+func (r *DaemonAwareRegistry) checkAndReregister() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if r.currentEntry == nil {
+		return
+	}
+
+	daemonRunning := r.daemonClient.IsDaemonRunning()
+
+	// If daemon just came up and we're not registered, re-register
+	if daemonRunning && !r.registered {
+		if err := r.daemonClient.Register(
+			r.currentEntry.project,
+			r.currentEntry.port,
+			r.currentEntry.numWorkers,
+			r.currentEntry.totalIssues,
+		); err != nil {
+			LogMsg(fmt.Sprintf("Re-registration with daemon failed: %v", err))
+		} else {
+			r.registered = true
+			LogMsg(fmt.Sprintf("Re-registered with daemon: %s", r.currentEntry.project))
+		}
+	} else if !daemonRunning && r.registered {
+		// Daemon went down
+		r.registered = false
+		LogMsg("Daemon connection lost, will re-register when available")
+	}
+}
+
+// RegisterWithDaemon is a convenience function that uses the daemon-aware registry.
+func RegisterWithDaemon(project string, port int, configPath string, numWorkers, totalIssues int) error {
+	return GetDaemonRegistry().Register(project, port, configPath, numWorkers, totalIssues)
+}
+
+// DeregisterFromDaemon is a convenience function to deregister using daemon-aware registry.
+func DeregisterFromDaemon() error {
+	return GetDaemonRegistry().Deregister()
+}
+
+// UpdateDaemonStatus is a convenience function to update status.
+func UpdateDaemonStatus(status OrchestratorStatus) error {
+	return GetDaemonRegistry().UpdateStatus(status)
 }
