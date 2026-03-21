@@ -49,6 +49,8 @@ func main() {
 		cmdActivity(args)
 	case "add-issue":
 		cmdAddIssue(args)
+	case "daemon":
+		cmdDaemon(args)
 	case "version", "-v", "--version":
 		printVersion()
 	case "help", "-h", "--help":
@@ -107,6 +109,7 @@ COMMANDS
   cleanup    Kill tmux session and optionally remove worktrees
   status     Show current progress (one-shot)
   dashboard  Live terminal dashboard with auto-refresh
+  daemon     Start hub dashboard showing all orchestrators
   metrics    Show productivity metrics and trends
   activity   Show recent activity log
   add-issue  Add an issue to config mid-run
@@ -1015,4 +1018,53 @@ func getValidStages() []string {
 		stages = append(stages, s)
 	}
 	return stages
+}
+
+func cmdDaemon(args []string) {
+	fs := flag.NewFlagSet("daemon", flag.ExitOnError)
+	fs.Usage = func() {
+		fmt.Println(`orchestrator daemon - Start unified hub dashboard
+
+DESCRIPTION
+  Starts a central dashboard server that shows all running orchestrators.
+  This provides a single entry point to monitor multiple orchestrator instances.
+
+  The dashboard shows:
+  - List of all running orchestrators
+  - Status, project name, workers, and progress for each
+  - Links to individual orchestrator dashboards
+  - Auto-refreshing via Server-Sent Events
+
+USAGE
+  orchestrator daemon
+  orchestrator daemon --port 8100
+
+OPTIONS`)
+		fs.PrintDefaults()
+	}
+	port := fs.Int("port", 8100, "Port for the daemon hub dashboard")
+	fs.Parse(args)
+
+	fmt.Println("+" + strings.Repeat("=", 58) + "+")
+	fmt.Println("|  Orchestrator Hub — Unified Dashboard                    |")
+	fmt.Println("+" + strings.Repeat("=", 58) + "+")
+	fmt.Println()
+
+	// Create and start the daemon server
+	daemon := orchestrator.NewDaemonServer(*port)
+	if err := daemon.Start(); err != nil {
+		fmt.Fprintf(os.Stderr, "Error starting daemon: %v\n", err)
+		os.Exit(1)
+	}
+
+	actualPort := daemon.GetPort()
+	fmt.Printf("Dashboard running at http://localhost:%d\n", actualPort)
+	fmt.Println()
+	fmt.Println("The hub dashboard shows all running orchestrators.")
+	fmt.Println("Start orchestrators with 'orchestrator launch <epic-number>'")
+	fmt.Println()
+	fmt.Println("Press Ctrl+C to stop the daemon.")
+
+	// Block forever (user will Ctrl+C to exit)
+	select {}
 }
