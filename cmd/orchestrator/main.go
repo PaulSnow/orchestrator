@@ -67,44 +67,60 @@ OVERVIEW
   Orchestrates multiple Claude Code sessions working on GitHub/GitLab issues
   in parallel. Each worker gets its own git worktree and tmux window.
 
+  Full documentation: https://github.com/PaulSnow/orchestrator
+
+QUICK START (from within a git repo)
+  1. Create an epic issue on GitHub with a task list (see EPIC FORMAT below)
+  2. Create the referenced issues with clear requirements
+  3. Run: orchestrator launch <epic-number>
+
 WORKFLOW
-  1. Load issues from config file OR GitHub epic issue
-  2. Run review gate (optional) - validates issues are well-specified
+  1. Load issues from GitHub epic issue (recommended) or JSON config
+  2. Run review gate - validates issues are well-specified
   3. Create git worktrees for each assigned issue
   4. Launch Claude workers in tmux windows with issue-specific prompts
   5. Monitor progress, reassign completed workers to next issues
+  6. Create PRs and merge when work is complete
+  7. Clean up logs when issues/epics complete
 
-CONFIGURATION
+EPIC FORMAT
+  Create a GitHub issue as the "epic" containing a task list. Each line
+  references another issue that workers will implement:
 
-  Option A: JSON Config File
-    Create a JSON file with issues array:
-    {
-      "project": "my-project",
-      "repos": {
-        "default": {
-          "path": "/path/to/repo",
-          "worktree_base": "/path/to/worktrees",
-          "branch_prefix": "feature/issue-"
-        }
-      },
-      "issues": [
-        {"number": 1, "title": "First issue", "priority": 1, "wave": 1},
-        {"number": 2, "title": "Second issue", "depends_on": [1]}
-      ]
-    }
+    ## Tasks
+    - [ ] #101 - Add user authentication
+    - [ ] #102 - Create database schema (blocked by #101)
+    - [ ] #103 - Build REST API (depends on #101, #102)
+    - [x] #104 - Already done (skipped)
 
-  Option B: GitHub Epic Issue
-    Use a GitHub issue as the config source. The epic body contains a task
-    list with issue references:
+  Syntax rules:
+    - Line format: "- [ ] #N - Title" or "- [ ] #N Title"
+    - Checked boxes [x] are skipped (already complete)
+    - Dependencies: "(blocked by #N)" or "(depends on #N, #M)"
+    - Multiple dependencies supported: "(blocked by #1, #2, #3)"
 
-    - [ ] #101 - Add authentication module
-    - [ ] #102 - Create user schema (blocked by #101)
-    - [x] #103 - Already completed (skipped)
+ISSUE REQUIREMENTS
+  Each referenced issue should contain enough detail for an AI to implement:
+
+    ## Description
+    Clear explanation of what needs to be built or fixed.
+
+    ## Acceptance Criteria
+    - Specific, testable requirements
+    - Expected behavior descriptions
+    - Edge cases to handle
+
+    ## Technical Notes (optional)
+    - Files likely to be modified
+    - APIs or libraries to use
+    - Constraints or gotchas
+
+  The review gate validates issues have sufficient detail before launching.
 
 COMMANDS
   launch     Start workers and monitor until completion (main command)
   review     Run review gate only, don't launch workers
-  cleanup    Kill tmux session and optionally remove worktrees
+  cleanup    Stop workers, remove worktrees, clean up logs
   status     Show current progress (one-shot)
   dashboard  Live terminal dashboard with auto-refresh
   metrics    Show productivity metrics and trends
@@ -114,44 +130,54 @@ COMMANDS
 
 EXAMPLES
 
-  # Launch with config file (most common)
-  orchestrator launch --config config/my-issues.json
+  # Launch from epic issue (recommended - run from within the repo)
+  cd /path/to/repo
+  orchestrator launch 42
 
-  # Launch from GitHub epic issue
-  orchestrator launch --epic https://github.com/owner/repo/issues/42 \
-    --repo /path/to/repo --worktrees /tmp/worktrees
+  # Launch with custom worker count
+  orchestrator launch 42 --workers 3
 
-  # Review issues without launching (check if issues are well-specified)
-  orchestrator launch --config config/issues.json --review-only
+  # Review issues first without launching workers
+  orchestrator launch 42 --review-only
 
-  # Skip review gate (for re-runs after issues already reviewed)
-  orchestrator launch --config config/issues.json --skip-review
+  # Skip review for re-runs
+  orchestrator launch 42 --skip-review
 
-  # Run with 3 parallel workers instead of default 5
-  orchestrator launch --config config/issues.json --workers 3
+  # Check status
+  orchestrator status
 
-  # Dry run - validate config without making changes
-  orchestrator launch --config config/issues.json --dry-run
+  # Clean up logs
+  orchestrator cleanup --logs --all
 
-  # Check status of running orchestration
-  orchestrator status --config config/issues.json
+JSON CONFIG (alternative to epic)
+  For complex setups, use a JSON config file:
+    {
+      "project": "owner/repo",
+      "repos": {
+        "default": {
+          "path": "/path/to/repo",
+          "worktree_base": "/tmp/worktrees",
+          "branch_prefix": "feature/issue-"
+        }
+      },
+      "issues": [
+        {"number": 101, "title": "Add auth", "priority": 1},
+        {"number": 102, "title": "Add schema", "depends_on": [101]}
+      ]
+    }
 
-  # Clean up after run
-  orchestrator cleanup --config config/issues.json
+  Launch with: orchestrator launch --config config/issues.json
 
 WEB DASHBOARD
-  By default, a web dashboard runs at http://localhost:8123 showing:
-  - Issue status (pending, in_progress, completed, failed)
-  - Active worker assignments
-  - Real-time progress updates via SSE
-
+  Dashboard runs at http://localhost:8123 showing real-time progress.
   Disable with --web-port 0
 
 TMUX SESSION
-  Workers run in tmux windows. Attach to monitor:
-    tmux attach -t <session-name>
+  Workers run in tmux windows: tmux attach -t <project-name>
 
-  Session name defaults to project name from config.
+LOG FILES
+  Worker logs: /tmp/orchestrator-{project}-epic{N}-issue{M}-worker{W}.log
+  Logs auto-cleanup when PRs merge. Manual: orchestrator cleanup --logs
 
 Use "orchestrator <command> -h" for command-specific options.`)
 }
