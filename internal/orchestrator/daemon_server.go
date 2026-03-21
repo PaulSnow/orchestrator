@@ -432,8 +432,16 @@ func (ds *DaemonServer) handleDashboard(w http.ResponseWriter, r *http.Request) 
 // handleIdleState returns empty state for offline mode.
 func (ds *DaemonServer) handleIdleState(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
+
+	// Detect repo from current directory
+	project := "No Repository"
+	repoInfo, err := DetectRepoInfo()
+	if err == nil {
+		project = repoInfo.Owner + "/" + repoInfo.Name
+	}
+
 	state := map[string]any{
-		"project":         "Orchestrator Hub",
+		"project":         project,
 		"version":         Version,
 		"elapsed_seconds": 0,
 		"phase":           "idle",
