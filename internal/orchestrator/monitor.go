@@ -1139,9 +1139,10 @@ func RunMonitorLoop(cfg *RunConfig, state *StateManager, noDelay bool) {
 	consistencyChecker := NewConsistencyChecker(cfg, state)
 
 	// Create and start supervisor for adaptive problem detection
-	supervisor := NewSupervisor(cfg, state)
-	supervisor.Start()
-	defer supervisor.Stop()
+	// Start all supervisors (GC, Architect, Overseer, Coder)
+	supervisors := NewSupervisorCoordinator(cfg, state)
+	supervisors.Start()
+	defer supervisors.Stop()
 
 	// Fast scan goroutine - checks for completed local branches every 15 seconds
 	go func() {
@@ -1334,11 +1335,11 @@ func RunMonitorLoopGlobal(
 		LogMsg("Skipping initial delay (--no-delay)")
 	}
 
-	// Create and start supervisor for adaptive problem detection
+	// Start all supervisors (GC, Architect, Overseer, Coder)
 	// Uses the first config's state for the supervisor
-	supervisor := NewSupervisor(configs[0], state)
-	supervisor.Start()
-	defer supervisor.Stop()
+	supervisors := NewSupervisorCoordinator(configs[0], state)
+	supervisors.Start()
+	defer supervisors.Stop()
 
 	cycle := 0
 	for {

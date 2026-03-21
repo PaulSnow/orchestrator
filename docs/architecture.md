@@ -185,66 +185,114 @@ QuickTeam("session-name", "/path/to/repo", prompt, 30*time.Minute)
 
 - `internal/orchestrator/agent_team.go` - Agent team management
 
-## Supervisor
+## Supervisor Hierarchy
 
-### Purpose
+The orchestrator uses a hierarchy of supervisors, each with a specific role. The key principle: **every supervisor records issues to minimize its own future use**.
 
-Existing alarms in `decisions.go` detect problems like:
-- Log file not updating (stall detection)
-- API crash patterns in output
-- Process exit with non-zero code
+### Supervisor Types
 
-But these alarms have blind spots. The Supervisor catches what they miss and generates improvement reports.
+```
+┌─────────────────────────────────────────────────────────────┐
+│                 SUPERVISOR COORDINATOR                       │
+│  Manages all supervisors, generates unified reports          │
+├─────────────────────────────────────────────────────────────┤
+│  Garbage Collector    │ Cleans leaked resources              │
+│    - orphan tmux      │ Records: what leaked and why         │
+│    - stale worktrees  │ Improves: cleanup code paths         │
+│    - dangling logs    │                                      │
+├─────────────────────────────────────────────────────────────┤
+│  Architect            │ Reviews issues before work starts    │
+│    - validates tasks  │ Records: what was unclear/missing    │
+│    - checks deps      │ Improves: issue templates            │
+│    - cross-issue      │                                      │
+├─────────────────────────────────────────────────────────────┤
+│  Overseer             │ Monitors running work                │
+│    - stall detection  │ Records: what alarms missed          │
+│    - escalates to     │ Improves: alarm thresholds           │
+│      Coder            │                                      │
+├─────────────────────────────────────────────────────────────┤
+│  Coder                │ Agent teams for complex tasks        │
+│    - parallel work    │ Records: why simple worker failed    │
+│    - via tmux teams   │ Improves: task decomposition         │
+└─────────────────────────────────────────────────────────────┘
+```
 
-### Detection Capabilities
+### Garbage Collector
+
+Cleans up resources that leaked due to crashes or bugs:
+- Orphan tmux sessions (inactive > 2 hours)
+- Stale worktrees (issue completed/failed)
+- Dangling log/signal files
+- Zombie Claude processes
+
+**Reports:** `~/.orchestrator/improvements/gc-YYYY-MM-DD.md`
+
+### Architect
+
+Reviews issues before workers start:
+- Title clarity (action verb, sufficient length)
+- Description existence
+- Dependency validity (no missing, no failed, no circular)
+- Cross-issue conflicts (same files, missing deps)
+
+**Reports:** `~/.orchestrator/improvements/architect-YYYY-MM-DD.md`
+
+### Overseer
+
+Monitors running workers and catches problems alarms miss:
 
 | Problem Type | Description | Why Alarms Miss It |
 |--------------|-------------|-------------------|
-| `thinking_loop` | Claude says "thinking..." repeatedly but makes no progress | Log mtime updates (not stale), but content is filler |
-| `error_loop` | Same error appears 3+ times | `logHasErrors()` checks IF error exists, not repetition |
-| `silent_stall` | Log active but no code changes for 10+ min | Pre-stall window before timeout fires |
-| `circular_work` | Edit-revert cycles with no net changes | Worktree mtime updates even when changes reverted |
+| `thinking_loop` | "thinking..." with no progress | Log mtime updates |
+| `error_loop` | Same error 3+ times | `logHasErrors()` doesn't count |
+| `silent_stall` | Log active, no code changes | Pre-stall window |
+| `circular_work` | Edit-revert cycles | Worktree mtime updates |
 
-### Adaptive Polling
+Adaptive polling: 15s-5min based on intervention rate.
 
-The Supervisor adjusts its polling interval based on intervention rate:
+**Reports:** `~/.orchestrator/improvements/overseer-YYYY-MM-DD.md`
 
-| Recent Interventions | Polling Interval | Interpretation |
-|---------------------|------------------|----------------|
-| >10 per hour | 15 seconds | Alarms broken, poll fast |
-| 5-10 per hour | 30 seconds | Alarms need work |
-| 2-5 per hour | 1 minute | Occasional misses |
-| 1-2 per hour | 2 minutes | Alarms mostly working |
-| 0 per hour | 5 minutes | Alarms working well |
+### Coder
 
-### Alarm Miss Reports
+Handles complex tasks via agent teams in tmux:
+- Launched when worker fails repeatedly
+- Breaks issue into teammate tasks
+- Uses `LaunchAgentTeam()` for parallel execution
 
-When the Supervisor catches a problem, it records:
-- What problem was detected
-- Which alarm should have fired
-- Why that alarm didn't fire
-- Suggested code fix with file location
-
-Daily reports are generated to `~/.orchestrator/improvements/YYYY-MM-DD.md`.
+**Reports:** `~/.orchestrator/improvements/coder-YYYY-MM-DD.md`
 
 ### Files
 
 ```
 internal/orchestrator/
-  supervisor.go          Main loop, adaptive polling, AlarmMiss type
-  supervisor_detect.go   Problem detection: isThinkingLoop, isErrorLoop, etc.
-  supervisor_report.go   Daily markdown report generation
+  supervisor_coordinator.go  Manages all supervisors
+  supervisor_gc.go           Garbage collection
+  supervisor_architect.go    Issue review
+  supervisor_overseer.go     Runtime monitoring + escalation
+  supervisor_coder.go        Agent teams for complex tasks
+  supervisor.go              Base supervisor (adaptive polling)
+  supervisor_detect.go       Problem detection functions
+  supervisor_report.go       Report generation
 ```
 
 ### Integration
 
-The Supervisor runs as a goroutine in `RunMonitorLoop()` and `RunMonitorLoopGlobal()`:
+The SupervisorCoordinator runs in `RunMonitorLoop()`:
 
 ```go
-supervisor := NewSupervisor(cfg, state)
-supervisor.Start()
-defer supervisor.Stop()
+supervisors := NewSupervisorCoordinator(cfg, state)
+supervisors.Start()
+defer supervisors.Stop()
 ```
+
+### Self-Improvement
+
+All reports go to `~/.orchestrator/improvements/`. Each report includes:
+- What problems were found
+- Why existing checks missed them
+- Specific code locations to fix
+
+The goal: supervisors intervene less as base alarms improve
 
 ## Data Flow
 
