@@ -56,7 +56,7 @@ func NewRunConfig() *RunConfig {
 		Review:             NewReviewConfig(),
 		Web:                NewWebConfig(),
 		TmuxSession:        "proof-orchestrator",
-		StaggerDelay:       30,
+		StaggerDelay:       3,
 	}
 }
 

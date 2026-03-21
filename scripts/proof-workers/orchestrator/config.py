@@ -30,7 +30,7 @@ class RunConfig:
     pipeline: list[str] = field(default_factory=lambda: ["implement"])
     project_context: ProjectContext = field(default_factory=ProjectContext)
     tmux_session: str = "proof-orchestrator"
-    stagger_delay: int = 30  # seconds between worker launches
+    stagger_delay: int = 3  # seconds between worker launches
 
     # Derived paths (set after loading)
     config_path: Optional[Path] = None

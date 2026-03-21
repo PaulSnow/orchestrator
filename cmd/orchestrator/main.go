@@ -49,8 +49,6 @@ func main() {
 		cmdActivity(args)
 	case "add-issue":
 		cmdAddIssue(args)
-	case "daemon":
-		cmdDaemon(args)
 	case "version", "-v", "--version":
 		printVersion()
 	case "help", "-h", "--help":
@@ -63,17 +61,17 @@ func main() {
 }
 
 func printUsage() {
-	fmt.Println(`orchestrator - Parallel Claude Code worker orchestration
+	fmt.Println(`orchestrator - Parallel Claude Code worker orchestration via tmux
 
 OVERVIEW
   Orchestrates multiple Claude Code sessions working on GitHub/GitLab issues
-  in parallel. Each worker gets its own git worktree and runs as a subprocess.
+  in parallel. Each worker gets its own git worktree and tmux window.
 
 WORKFLOW
   1. Load issues from config file OR GitHub epic issue
   2. Run review gate (optional) - validates issues are well-specified
   3. Create git worktrees for each assigned issue
-  4. Launch Claude workers as subprocesses with issue-specific prompts
+  4. Launch Claude workers in tmux windows with issue-specific prompts
   5. Monitor progress, reassign completed workers to next issues
 
 CONFIGURATION
@@ -106,10 +104,9 @@ CONFIGURATION
 COMMANDS
   launch     Start workers and monitor until completion (main command)
   review     Run review gate only, don't launch workers
-  cleanup    Stop workers and optionally remove worktrees
+  cleanup    Kill tmux session and optionally remove worktrees
   status     Show current progress (one-shot)
   dashboard  Live terminal dashboard with auto-refresh
-  daemon     Start hub dashboard showing all orchestrators
   metrics    Show productivity metrics and trends
   activity   Show recent activity log
   add-issue  Add an issue to config mid-run
@@ -150,9 +147,11 @@ WEB DASHBOARD
 
   Disable with --web-port 0
 
-WORKER PROCESSES
-  Workers run as direct subprocesses. View logs in the state directory:
-    tail -f <state-dir>/workers/worker-N.log
+TMUX SESSION
+  Workers run in tmux windows. Attach to monitor:
+    tmux attach -t <session-name>
+
+  Session name defaults to project name from config.
 
 Use "orchestrator <command> -h" for command-specific options.`)
 }
@@ -177,7 +176,7 @@ USAGE
   orchestrator launch --config <file>        # Legacy - uses JSON config file
 
 DESCRIPTION
-  Launches Claude Code workers as parallel subprocesses. Each worker gets
+  Launches Claude Code workers in parallel tmux windows. Each worker gets
   an isolated git worktree and works on one issue at a time. When a worker
   completes, it's automatically assigned the next available issue.
 
@@ -227,6 +226,7 @@ OPTIONS`)
 	}
 	dryRun := fs.Bool("dry-run", false, "Validate config and show plan without making changes")
 	workers := fs.Int("workers", defaultNumWorkers, "Number of parallel Claude workers")
+	session := fs.String("session", "", "Tmux session name (default: project name from config)")
 	configDir := fs.String("config-dir", "", "Directory with *-issues.json configs (merges all)")
 	config := fs.String("config", "", "JSON config file with issues array")
 	epic := fs.String("epic", "", "GitHub epic issue URL to use as config source")
@@ -302,7 +302,15 @@ OPTIONS`)
 		os.Exit(1)
 	}
 	numWorkers := *workers
-	staggerDelay := 30
+	// Default session name to project name
+	tmuxSession := *session
+	if tmuxSession == "" && len(configs) > 0 {
+		tmuxSession = configs[0].Project
+		if tmuxSession == "" {
+			tmuxSession = "orchestrator"
+		}
+	}
+	staggerDelay := 3
 	for _, c := range configs {
 		if c.StaggerDelay > staggerDelay {
 			staggerDelay = c.StaggerDelay
@@ -327,6 +335,7 @@ OPTIONS`)
 
 	primaryCfg := configs[0]
 	primaryCfg.NumWorkers = numWorkers
+	primaryCfg.TmuxSession = tmuxSession
 	state := orchestrator.NewStateManager(primaryCfg)
 
 	// Create shared event broadcaster
@@ -354,9 +363,9 @@ OPTIONS`)
 		fmt.Printf("  Dashboard: http://localhost:%d\n", *webPort)
 		defer dashboardServer.Stop()
 
-		// Register this orchestrator with daemon and file registry
+		// Register this orchestrator in the global registry
 		if !*dryRun {
-			if err := orchestrator.RegisterWithDaemon(
+			if err := orchestrator.RegisterOrchestrator(
 				primaryCfg.Project,
 				*webPort,
 				primaryCfg.ConfigPath,
@@ -365,7 +374,7 @@ OPTIONS`)
 			); err != nil {
 				fmt.Printf("  Warning: Failed to register orchestrator: %v\n", err)
 			}
-			defer orchestrator.DeregisterFromDaemon()
+			defer orchestrator.DeregisterOrchestrator()
 		}
 	}
 
@@ -428,7 +437,7 @@ OPTIONS`)
 	// Check prerequisites
 	fmt.Println("Checking prerequisites...")
 	var missing []string
-	for _, cmd := range []string{"claude"} {
+	for _, cmd := range []string{"tmux", "claude"} {
 		if _, err := exec.LookPath(cmd); err != nil {
 			missing = append(missing, cmd)
 		}
@@ -447,6 +456,7 @@ OPTIONS`)
 		fmt.Printf("  %s: %d issues (%d done, %d pending, %d failed)\n", cfg.Project, total, completed, pending, failed)
 	}
 	fmt.Printf("  Workers: %d\n", numWorkers)
+	fmt.Printf("  Session: %s\n", tmuxSession)
 	fmt.Println()
 
 	// Fetch origin
@@ -542,11 +552,21 @@ OPTIONS`)
 	}
 	fmt.Println()
 
-	// Initialize process manager
-	fmt.Println("-- Initializing process manager --")
-	pm := orchestrator.GetProcessManager()
-	_ = pm // process manager ready
-	fmt.Printf("  Process manager ready for %d workers\n", len(assignments))
+	// Create tmux session
+	fmt.Println("-- Creating tmux session --")
+	if !*dryRun && orchestrator.SessionExists(tmuxSession) {
+		fmt.Fprintf(os.Stderr, "ERROR: tmux session '%s' already exists.\n", tmuxSession)
+		os.Exit(1)
+	}
+
+	if !*dryRun {
+		orchestrator.CreateSession(tmuxSession, "orchestrator", primaryCfg.OrchRoot)
+		for _, a := range assignments {
+			orchestrator.NewWindow(tmuxSession, fmt.Sprintf("worker-%d", a.workerID), primaryCfg.OrchRoot)
+		}
+		orchestrator.NewWindow(tmuxSession, "dashboard", primaryCfg.OrchRoot)
+	}
+	fmt.Printf("  %d windows created\n", len(assignments)+2)
 	fmt.Println()
 
 	// Launch workers
@@ -579,11 +599,8 @@ OPTIONS`)
 			}
 
 			issueState.UpdateIssueStatus(a.issue.Number, "in_progress", &a.workerID)
-
-			// Launch worker as direct subprocess (no tmux)
-			if err := orchestrator.LaunchWorkerProcess(wtPath, promptPath, logFile, signalFile, a.workerID, a.issue.Number, stageName, false); err != nil {
-				fmt.Fprintf(os.Stderr, "WARNING: failed to launch worker %d: %v\n", a.workerID, err)
-			}
+			orchestrator.SendCommand(tmuxSession, fmt.Sprintf("worker-%d", a.workerID),
+				orchestrator.BuildClaudeCmd(wtPath, promptPath, logFile, signalFile, a.workerID, a.issue.Number, stageName, false))
 
 			// Emit worker assigned event
 			events.EmitWorkerAssigned(a.workerID, a.issue.Number, a.issue.Title, stageName)
@@ -598,7 +615,7 @@ OPTIONS`)
 
 	fmt.Println(strings.Repeat("=", 60))
 	fmt.Println("  All workers launched.")
-	fmt.Printf("  View logs: tail -f %s/workers/worker-*.log\n", primaryCfg.StateDir)
+	fmt.Printf("  Attach: tmux attach -t %s\n", tmuxSession)
 	fmt.Println(strings.Repeat("=", 60))
 
 	// Run monitor loop in-process (blocks until all issues complete)
@@ -606,14 +623,15 @@ OPTIONS`)
 		fmt.Println()
 		fmt.Println("-- Starting Monitor Loop --")
 
-		// Set worker count for all configs
+		// Set all configs to use this tmux session and worker count
 		for _, cfg := range configs {
+			cfg.TmuxSession = tmuxSession
 			cfg.NumWorkers = numWorkers
 		}
 
 		if len(configs) > 1 {
 			// Multi-project mode
-			orchestrator.RunMonitorLoopGlobal(configs, state, numWorkers, "", false)
+			orchestrator.RunMonitorLoopGlobal(configs, state, numWorkers, tmuxSession, false)
 		} else {
 			// Single project mode
 			orchestrator.RunMonitorLoop(primaryCfg, state, false)
@@ -621,7 +639,7 @@ OPTIONS`)
 
 		// Orchestration complete
 		events.SetPhase(orchestrator.PhaseCompleted, "all work done")
-		orchestrator.UpdateDaemonStatus(orchestrator.StatusCompleted)
+		orchestrator.UpdateOrchestratorStatus(orchestrator.StatusCompleted)
 		fmt.Println()
 		fmt.Println("Orchestration complete.")
 	}
@@ -669,8 +687,8 @@ func cmdReview(args []string) {
 		fmt.Printf("Dashboard: http://localhost:%d\n", *webPort)
 		fmt.Println()
 
-		// Register this orchestrator with daemon and file registry
-		if err := orchestrator.RegisterWithDaemon(
+		// Register this orchestrator in the global registry
+		if err := orchestrator.RegisterOrchestrator(
 			primaryCfg.Project,
 			*webPort,
 			primaryCfg.ConfigPath,
@@ -679,7 +697,7 @@ func cmdReview(args []string) {
 		); err != nil {
 			fmt.Printf("Warning: Failed to register orchestrator: %v\n", err)
 		}
-		defer orchestrator.DeregisterFromDaemon()
+		defer orchestrator.DeregisterOrchestrator()
 	}
 
 	// Run review
@@ -725,11 +743,11 @@ func cmdReview(args []string) {
 func cmdCleanup(args []string) {
 	fs := flag.NewFlagSet("cleanup", flag.ExitOnError)
 	fs.Usage = func() {
-		fmt.Println(`orchestrator cleanup - Stop workers and clean up resources
+		fmt.Println(`orchestrator cleanup - Clean up tmux session and worktrees
 
 DESCRIPTION
   Stops all workers and cleans up resources:
-  - Stops all running worker processes
+  - Kills the tmux session
   - Removes git worktrees (unless --keep-worktrees)
   - Clears state files
 
@@ -997,53 +1015,4 @@ func getValidStages() []string {
 		stages = append(stages, s)
 	}
 	return stages
-}
-
-func cmdDaemon(args []string) {
-	fs := flag.NewFlagSet("daemon", flag.ExitOnError)
-	fs.Usage = func() {
-		fmt.Println(`orchestrator daemon - Start unified hub dashboard
-
-DESCRIPTION
-  Starts a central dashboard server that shows all running orchestrators.
-  This provides a single entry point to monitor multiple orchestrator instances.
-
-  The dashboard shows:
-  - List of all running orchestrators
-  - Status, project name, workers, and progress for each
-  - Links to individual orchestrator dashboards
-  - Auto-refreshing via Server-Sent Events
-
-USAGE
-  orchestrator daemon
-  orchestrator daemon --port 8100
-
-OPTIONS`)
-		fs.PrintDefaults()
-	}
-	port := fs.Int("port", 8100, "Port for the daemon hub dashboard")
-	fs.Parse(args)
-
-	fmt.Println("+" + strings.Repeat("=", 58) + "+")
-	fmt.Println("|  Orchestrator Hub — Unified Dashboard                    |")
-	fmt.Println("+" + strings.Repeat("=", 58) + "+")
-	fmt.Println()
-
-	// Create and start the daemon server
-	daemon := orchestrator.NewDaemonServer(*port)
-	if err := daemon.Start(); err != nil {
-		fmt.Fprintf(os.Stderr, "Error starting daemon: %v\n", err)
-		os.Exit(1)
-	}
-
-	actualPort := daemon.GetPort()
-	fmt.Printf("Dashboard running at http://localhost:%d\n", actualPort)
-	fmt.Println()
-	fmt.Println("The hub dashboard shows all running orchestrators.")
-	fmt.Println("Start orchestrators with 'orchestrator launch <epic-number>'")
-	fmt.Println()
-	fmt.Println("Press Ctrl+C to stop the daemon.")
-
-	// Block forever (user will Ctrl+C to exit)
-	select {}
 }

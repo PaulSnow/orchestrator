@@ -147,7 +147,7 @@ All state files under `state/` are gitignored.
 
 **Worker stalls**: The monitor detects stalls after the configured stall timeout (default 900s). It restarts with a compressed progress summary (commits, files changed, failure hint).
 
-**API rate limits**: Workers are launched with a configurable stagger delay (default 30s). Increase `stagger_delay` in the config if rate limited.
+**API rate limits**: Workers are launched with a configurable stagger delay (default 3s). Increase `stagger_delay` in the config if rate limited.
 
 **Claude API crash (No messages returned)**: The decision engine detects these and restarts with a fresh prompt (no continuation context) to avoid repeating the same failure.
 
