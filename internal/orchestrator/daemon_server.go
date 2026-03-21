@@ -124,14 +124,34 @@ func (ds *DaemonServer) handleOrchestrators(w http.ResponseWriter, r *http.Reque
 
 	infos, err := ds.registry.GetOrchestratorInfos()
 	if err != nil {
-		json.NewEncoder(w).Encode(map[string]string{
-			"error": err.Error(),
-		})
-		return
+		infos = []OrchestratorInfo{} // Empty list on error
 	}
 
 	// Enrich with live progress data by querying each orchestrator
-	enrichedInfos := make([]map[string]any, 0, len(infos))
+	enrichedInfos := make([]map[string]any, 0, len(infos)+1)
+
+	// Always include "self" as the current orchestrator (idle mode)
+	project := "No Repository"
+	if repoInfo, err := DetectRepoInfo(); err == nil {
+		project = repoInfo.Owner + "/" + repoInfo.Name
+	}
+	selfEntry := map[string]any{
+		"project":       project,
+		"port":          ds.port,
+		"pid":           0,
+		"status":        "idle",
+		"num_workers":   0,
+		"total_issues":  0,
+		"is_current":    true,
+		"is_online":     true,
+		"completed":     0,
+		"in_progress":   0,
+		"pending":       0,
+		"failed":        0,
+		"active_workers": 0,
+	}
+	enrichedInfos = append(enrichedInfos, selfEntry)
+
 	for _, info := range infos {
 		enriched := map[string]any{
 			"project":       info.Project,
@@ -144,7 +164,7 @@ func (ds *DaemonServer) handleOrchestrators(w http.ResponseWriter, r *http.Reque
 			"total_issues":  info.TotalIssues,
 			"dashboard_url": info.DashboardURL,
 			"uptime":        info.Uptime,
-			"is_current":    info.IsCurrent,
+			"is_current":    false, // Other orchestrators are not current
 			"is_online":     info.IsOnline,
 		}
 
