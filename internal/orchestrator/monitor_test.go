@@ -479,6 +479,148 @@ func TestAllDone_AllComplete(t *testing.T) {
 	}
 }
 
+// TestAllDone_PRPendingBlocks verifies AllDone returns false when
+// there are issues with open PRs waiting to be merged (pr_pending).
+// This is the key test for issue #58 - orchestrator must not exit
+// until all PRs are actually merged.
+func TestAllDone_PRPendingBlocks(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	cfg := NewRunConfig()
+	cfg.NumWorkers = 2
+	cfg.StateDir = tmpDir
+	cfg.Issues = []*Issue{
+		{Number: 1, Title: "Completed Issue", Status: "completed"},
+		{Number: 2, Title: "PR Pending Issue", Status: "pr_pending", BranchName: "feature/issue-2"},
+	}
+
+	state := NewStateManager(cfg)
+	state.EnsureDirs()
+
+	// All workers idle
+	for i := 1; i <= cfg.NumWorkers; i++ {
+		worker := &Worker{
+			WorkerID: i,
+			Status:   "idle",
+		}
+		state.SaveWorker(worker)
+	}
+
+	// No pending issues
+	pending := GetPendingCount(cfg)
+	if pending != 0 {
+		t.Errorf("Expected 0 pending issues, got %d", pending)
+	}
+
+	// But there is one pr_pending issue
+	prPending := GetPRPendingCount(cfg)
+	if prPending != 1 {
+		t.Errorf("Expected 1 pr_pending issue, got %d", prPending)
+	}
+
+	// AllDone should return false because PR is not yet merged
+	if AllDone(cfg, state) {
+		t.Error("AllDone should return false when there are pr_pending issues (open PRs waiting to be merged)")
+	}
+
+	// Now simulate the PR being merged by changing status to completed
+	cfg.Issues[1].Status = "completed"
+
+	// Now AllDone should return true
+	if !AllDone(cfg, state) {
+		t.Error("AllDone should return true after all PRs are merged")
+	}
+}
+
+// TestAllDoneGlobal_PRPendingBlocks verifies AllDoneGlobal returns false when
+// any config has issues with open PRs waiting to be merged.
+func TestAllDoneGlobal_PRPendingBlocks(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	// First config - all completed
+	cfg1 := NewRunConfig()
+	cfg1.NumWorkers = 2
+	cfg1.StateDir = tmpDir
+	cfg1.Project = "project1"
+	cfg1.Issues = []*Issue{
+		{Number: 1, Title: "Completed", Status: "completed"},
+	}
+
+	// Second config - has pr_pending
+	cfg2 := NewRunConfig()
+	cfg2.NumWorkers = 2
+	cfg2.StateDir = tmpDir
+	cfg2.Project = "project2"
+	cfg2.Issues = []*Issue{
+		{Number: 10, Title: "PR Pending", Status: "pr_pending", BranchName: "feature/issue-10"},
+	}
+
+	configs := []*RunConfig{cfg1, cfg2}
+
+	state := NewStateManager(cfg1)
+	state.EnsureDirs()
+
+	// All workers idle
+	for i := 1; i <= 2; i++ {
+		worker := &Worker{
+			WorkerID: i,
+			Status:   "idle",
+		}
+		state.SaveWorker(worker)
+	}
+
+	// Should return false because cfg2 has pr_pending issue
+	if AllDoneGlobal(configs, state, 2) {
+		t.Error("AllDoneGlobal should return false when any config has pr_pending issues")
+	}
+
+	// Mark cfg2's issue as completed (PR merged)
+	cfg2.Issues[0].Status = "completed"
+
+	// Now should return true
+	if !AllDoneGlobal(configs, state, 2) {
+		t.Error("AllDoneGlobal should return true when all PRs are merged")
+	}
+}
+
+// TestGetPRPendingCount verifies pr_pending issue counting.
+func TestGetPRPendingCount(t *testing.T) {
+	cfg := NewRunConfig()
+	cfg.Issues = []*Issue{
+		{Number: 1, Status: "completed"},
+		{Number: 2, Status: "pr_pending"},
+		{Number: 3, Status: "pending"},
+		{Number: 4, Status: "pr_pending"},
+		{Number: 5, Status: "in_progress"},
+		{Number: 6, Status: "failed"},
+	}
+
+	count := GetPRPendingCount(cfg)
+	if count != 2 {
+		t.Errorf("Expected 2 pr_pending issues, got %d", count)
+	}
+
+	issues := GetPRPendingIssues(cfg)
+	if len(issues) != 2 {
+		t.Errorf("Expected 2 pr_pending issues, got %d", len(issues))
+	}
+
+	// Verify correct issues were returned
+	found2 := false
+	found4 := false
+	for _, issue := range issues {
+		if issue.Number == 2 {
+			found2 = true
+		}
+		if issue.Number == 4 {
+			found4 = true
+		}
+	}
+	if !found2 || !found4 {
+		t.Error("GetPRPendingIssues should return issues 2 and 4")
+	}
+}
+
 // --- Helper Function Tests ---
 
 // TestBuildClaudeCmd verifies the command string is correctly built

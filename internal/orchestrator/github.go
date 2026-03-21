@@ -202,7 +202,6 @@ type PRLifecycleResult struct {
 	Error         error
 }
 
-<<<<<<< HEAD
 // RebaseResult represents the outcome of a rebase attempt.
 type RebaseResult struct {
 	Success      bool
