@@ -682,6 +682,139 @@ func TestCollectWorkerSnapshot_WithSignalFile(t *testing.T) {
 	}
 }
 
+// TestComputeEffectiveStatus verifies the worker status computation logic.
+func TestComputeEffectiveStatus(t *testing.T) {
+	// Mock time for consistent testing
+	originalNowUnix := nowUnix
+	defer func() { nowUnix = originalNowUnix }()
+	nowUnix = func() int64 { return 1000 }
+
+	tests := []struct {
+		name           string
+		worker         *Worker
+		claudeRunning  bool
+		lastOutputTime *float64
+		expectedStatus string
+	}{
+		{
+			name: "idle when no issue assigned",
+			worker: &Worker{
+				WorkerID:    1,
+				IssueNumber: nil,
+				Status:      "running",
+			},
+			claudeRunning:  false,
+			lastOutputTime: nil,
+			expectedStatus: WorkerStatusIdle,
+		},
+		{
+			name: "starting when issue assigned but process not started",
+			worker: &Worker{
+				WorkerID:       1,
+				IssueNumber:    IntPtr(42),
+				Status:         "running",
+				ProcessStarted: false,
+			},
+			claudeRunning:  false,
+			lastOutputTime: nil,
+			expectedStatus: WorkerStatusStarting,
+		},
+		{
+			name: "running when process active and recent output",
+			worker: &Worker{
+				WorkerID:       1,
+				IssueNumber:    IntPtr(42),
+				Status:         "running",
+				ProcessStarted: true,
+			},
+			claudeRunning:  true,
+			lastOutputTime: floatPtr(990), // 10 seconds ago
+			expectedStatus: WorkerStatusRunning,
+		},
+		{
+			name: "waiting when process active but no recent output",
+			worker: &Worker{
+				WorkerID:       1,
+				IssueNumber:    IntPtr(42),
+				Status:         "running",
+				ProcessStarted: true,
+			},
+			claudeRunning:  true,
+			lastOutputTime: floatPtr(900), // 100 seconds ago (> 30s threshold)
+			expectedStatus: WorkerStatusWaiting,
+		},
+		{
+			name: "completed status preserved",
+			worker: &Worker{
+				WorkerID:       1,
+				IssueNumber:    IntPtr(42),
+				Status:         WorkerStatusCompleted,
+				ProcessStarted: true,
+			},
+			claudeRunning:  false,
+			lastOutputTime: nil,
+			expectedStatus: WorkerStatusCompleted,
+		},
+		{
+			name: "failed status preserved",
+			worker: &Worker{
+				WorkerID:       1,
+				IssueNumber:    IntPtr(42),
+				Status:         WorkerStatusFailed,
+				ProcessStarted: true,
+			},
+			claudeRunning:  false,
+			lastOutputTime: nil,
+			expectedStatus: WorkerStatusFailed,
+		},
+		{
+			name: "uses stored status when process not running",
+			worker: &Worker{
+				WorkerID:       1,
+				IssueNumber:    IntPtr(42),
+				Status:         "running",
+				ProcessStarted: true,
+			},
+			claudeRunning:  false,
+			lastOutputTime: nil,
+			expectedStatus: "running",
+		},
+		{
+			name: "running at exact threshold boundary (30s exactly is still running)",
+			worker: &Worker{
+				WorkerID:       1,
+				IssueNumber:    IntPtr(42),
+				Status:         "running",
+				ProcessStarted: true,
+			},
+			claudeRunning:  true,
+			lastOutputTime: floatPtr(970), // exactly 30 seconds ago - still running (not > 30)
+			expectedStatus: WorkerStatusRunning,
+		},
+		{
+			name: "waiting just past threshold",
+			worker: &Worker{
+				WorkerID:       1,
+				IssueNumber:    IntPtr(42),
+				Status:         "running",
+				ProcessStarted: true,
+			},
+			claudeRunning:  true,
+			lastOutputTime: floatPtr(969), // 31 seconds ago (> 30s threshold)
+			expectedStatus: WorkerStatusWaiting,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			status := tt.worker.ComputeEffectiveStatus(tt.claudeRunning, tt.lastOutputTime)
+			if status != tt.expectedStatus {
+				t.Errorf("ComputeEffectiveStatus() = %q, want %q", status, tt.expectedStatus)
+			}
+		})
+	}
+}
+
 // TestAllDoneGlobal verifies the global version checks all configs.
 func TestAllDoneGlobal(t *testing.T) {
 	tmpDir := t.TempDir()

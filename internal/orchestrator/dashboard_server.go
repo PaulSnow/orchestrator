@@ -317,9 +317,16 @@ func (ds *DashboardServer) buildWorkersResponse() []map[string]any {
 			continue
 		}
 
+		// Check if Claude is running and get log mtime for effective status
+		claudeRunning := IsClaudeRunningDirect(i)
+		_, logMtime := ds.state.GetLogStats(i)
+
+		// Compute effective status based on actual state
+		effectiveStatus := worker.ComputeEffectiveStatus(claudeRunning, logMtime)
+
 		workerData := map[string]any{
 			"worker_id":   worker.WorkerID,
-			"status":      worker.Status,
+			"status":      effectiveStatus,
 			"stage":       worker.Stage,
 			"retry_count": worker.RetryCount,
 			"branch":      worker.Branch,
@@ -1126,6 +1133,8 @@ const dashboardHTML = `<!DOCTYPE html>
             font-weight: bold;
         }
         .status-running { background: #00d9ff22; color: #00d9ff; }
+        .status-starting { background: #ffaa0022; color: #ffaa00; }
+        .status-waiting { background: #6a5acd22; color: #9370db; }
         .status-idle { background: #88888822; color: #888; }
         .status-failed { background: #ff444422; color: #ff4444; }
         .status-completed { background: #00ff8822; color: #00ff88; }

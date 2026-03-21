@@ -135,9 +135,11 @@ func (cc *ConsistencyChecker) ScanAndFixCompletedWork() int {
 			for i := 1; i <= cc.cfg.NumWorkers; i++ {
 				worker := cc.state.LoadWorker(i)
 				if worker != nil && worker.IssueNumber != nil && *worker.IssueNumber == issue.Number {
-					worker.Status = "idle"
+					worker.Status = WorkerStatusIdle
 					worker.IssueNumber = nil
 					worker.SourceConfig = ""
+					worker.ProcessStarted = false
+					worker.LastOutputTime = ""
 					cc.state.SaveWorker(worker)
 					cc.state.ClearSignal(i)
 					LogMsg(fmt.Sprintf("[auto-complete] Cleared worker %d from issue #%d", i, issue.Number))
@@ -571,8 +573,10 @@ func (cc *ConsistencyChecker) AutoFix(inc Inconsistency) error {
 		if inc.WorkerID != nil {
 			worker := cc.state.LoadWorker(*inc.WorkerID)
 			if worker != nil {
-				worker.Status = "idle"
+				worker.Status = WorkerStatusIdle
 				worker.IssueNumber = nil
+				worker.ProcessStarted = false
+				worker.LastOutputTime = ""
 				cc.state.SaveWorker(worker)
 				LogMsg(fmt.Sprintf("[consistency] Auto-fixed: set worker %d to idle", *inc.WorkerID))
 			}
@@ -583,6 +587,8 @@ func (cc *ConsistencyChecker) AutoFix(inc Inconsistency) error {
 			worker := cc.state.LoadWorker(*inc.WorkerID)
 			if worker != nil {
 				worker.IssueNumber = nil
+				worker.ProcessStarted = false
+				worker.LastOutputTime = ""
 				cc.state.SaveWorker(worker)
 				LogMsg(fmt.Sprintf("[consistency] Auto-fixed: cleared issue from idle worker %d", *inc.WorkerID))
 			}
@@ -610,7 +616,9 @@ func (cc *ConsistencyChecker) AutoFix(inc Inconsistency) error {
 					worker := cc.state.LoadWorker(wid)
 					if worker != nil {
 						worker.IssueNumber = nil
-						worker.Status = "idle"
+						worker.Status = WorkerStatusIdle
+						worker.ProcessStarted = false
+						worker.LastOutputTime = ""
 						cc.state.SaveWorker(worker)
 						LogMsg(fmt.Sprintf("[consistency] Auto-fixed: cleared duplicate assignment from worker %d", wid))
 					}
