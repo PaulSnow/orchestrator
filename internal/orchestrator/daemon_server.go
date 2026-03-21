@@ -615,10 +615,13 @@ const daemonDashboardHTML = `<!DOCTYPE html>
                 });
         }
 
+        let wasConnected = false;
+
         function connectSSE() {
             evtSource = new EventSource('/api/events');
 
             evtSource.onopen = () => {
+                wasConnected = true;
                 updateConnectionStatus(true);
             };
 
@@ -639,6 +642,9 @@ const daemonDashboardHTML = `<!DOCTYPE html>
             });
 
             evtSource.onerror = () => {
+                if (wasConnected) {
+                    wasConnected = false;
+                }
                 updateConnectionStatus(false);
                 evtSource.close();
                 setTimeout(connectSSE, 3000);

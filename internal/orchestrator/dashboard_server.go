@@ -1639,13 +1639,47 @@ const dashboardHTML = `<!DOCTYPE html>
             addEvent('issue_review', JSON.parse(e.data));
         });
 
-        evtSource.onerror = () => {
-            addEvent('connection_error', null);
+        // Track connection state to avoid log spam
+        let wasConnected = false;
+
+        evtSource.onopen = () => {
+            if (!wasConnected) {
+                wasConnected = true;
+            } else {
+                // Reconnected after disconnect
+                addEvent('reconnected', null);
+            }
+            updateOfflineStatus(false);
         };
+
+        evtSource.onerror = () => {
+            if (wasConnected) {
+                addEvent('disconnected', null);
+                wasConnected = false;
+            }
+            updateOfflineStatus(true);
+        };
+
+        let isOffline = false;
+
+        function updateOfflineStatus(offline) {
+            isOffline = offline;
+            const runtimeEl = document.getElementById('runtime');
+            const projectEl = document.getElementById('project-name');
+            if (offline) {
+                runtimeEl.textContent = 'Offline';
+                runtimeEl.style.color = '#ff4444';
+                projectEl.style.opacity = '0.5';
+            } else {
+                runtimeEl.style.color = '';
+                projectEl.style.opacity = '1';
+                // Runtime will be updated by the periodic refresh
+            }
+        }
 
         // Periodic refresh for runtime display
         setInterval(() => {
-            if (state.started_at) {
+            if (!isOffline && state.started_at) {
                 const start = new Date(state.started_at);
                 const elapsed = (Date.now() - start.getTime()) / 1000;
                 document.getElementById('runtime').textContent = 'Running ' + formatElapsed(elapsed);
@@ -1799,7 +1833,22 @@ const dashboardHTML = `<!DOCTYPE html>
             proxyEvtSource.addEventListener('log_update', (e) => {
                 fetch(proxyBase + '/api/workers').then(r => r.json()).then(updateWorkers);
             });
-            proxyEvtSource.onerror = () => addEvent('connection_error', { proxied: true });
+            let proxyWasConnected = false;
+            proxyEvtSource.onopen = () => {
+                if (!proxyWasConnected) {
+                    proxyWasConnected = true;
+                } else {
+                    addEvent('reconnected', { proxied: true });
+                }
+                updateOfflineStatus(false);
+            };
+            proxyEvtSource.onerror = () => {
+                if (proxyWasConnected) {
+                    addEvent('disconnected', { proxied: true });
+                    proxyWasConnected = false;
+                }
+                updateOfflineStatus(true);
+            };
 
             // Store the proxied event source
             window.currentProxyEvtSource = proxyEvtSource;
@@ -1873,7 +1922,22 @@ const dashboardHTML = `<!DOCTYPE html>
             });
             newEvtSource.addEventListener('reviewing_issue', (e) => addEvent('reviewing_issue', JSON.parse(e.data)));
             newEvtSource.addEventListener('issue_review', (e) => addEvent('issue_review', JSON.parse(e.data)));
-            newEvtSource.onerror = () => addEvent('connection_error', null);
+            let hubWasConnected = false;
+            newEvtSource.onopen = () => {
+                if (!hubWasConnected) {
+                    hubWasConnected = true;
+                } else {
+                    addEvent('reconnected', null);
+                }
+                updateOfflineStatus(false);
+            };
+            newEvtSource.onerror = () => {
+                if (hubWasConnected) {
+                    addEvent('disconnected', null);
+                    hubWasConnected = false;
+                }
+                updateOfflineStatus(true);
+            };
 
             // Refresh hub state
             refreshState();
