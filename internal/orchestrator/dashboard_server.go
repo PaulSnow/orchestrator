@@ -286,7 +286,7 @@ func (ds *DashboardServer) buildStateResponse() map[string]any {
 	return map[string]any{
 		"phase":           ds.events.GetPhase(),
 		"project":         ds.cfg.Project,
-		"version":         Version,
+		"version":         GetVersion(),
 		"repos":           repos,
 		"config_path":     ds.cfg.ConfigPath,
 		"started_at":      ds.events.GetStartedAt().Format(time.RFC3339),
@@ -992,9 +992,6 @@ func (ds *DashboardServer) handleDashboard(w http.ResponseWriter, r *http.Reques
 	w.Header().Set("Expires", "0")
 	fmt.Fprint(w, dashboardHTML)
 }
-
-// Version is set by main.go at startup
-var Version = "dev"
 
 const dashboardHTML = `<!DOCTYPE html>
 <html>

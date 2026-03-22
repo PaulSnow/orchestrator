@@ -465,7 +465,7 @@ func (ds *DaemonServer) handleIdleState(w http.ResponseWriter, r *http.Request) 
 	state := map[string]any{
 		"phase":           "idle",
 		"project":         project,
-		"version":         Version,
+		"version":         GetVersion(),
 		"repos":           []map[string]any{},
 		"config_path":     "",
 		"started_at":      time.Now().Format(time.RFC3339),

@@ -24,6 +24,9 @@ var (
 const defaultNumWorkers = 5
 
 func main() {
+	// Set version info in orchestrator package for dashboard/status display
+	orchestrator.SetVersion(Version, GitCommit, BuildDate)
+
 	if len(os.Args) < 2 {
 		printUsage()
 		os.Exit(1)
@@ -423,9 +426,6 @@ OPTIONS`)
 	events := orchestrator.NewEventBroadcaster(primaryCfg.Project)
 	orchestrator.SetGlobalEventBroadcaster(events)
 
-	// Set version for dashboard
-	orchestrator.Version = Version
-
 	fmt.Println("+" + strings.Repeat("=", 58) + "+")
 	fmt.Println("|  Unified Orchestrator — Multi-Project                    |")
 	fmt.Println("+" + strings.Repeat("=", 58) + "+")
@@ -758,7 +758,6 @@ func cmdReview(args []string) {
 	// Create event broadcaster
 	events := orchestrator.NewEventBroadcaster(primaryCfg.Project)
 	orchestrator.SetGlobalEventBroadcaster(events)
-	orchestrator.Version = Version
 
 	fmt.Println("+" + strings.Repeat("=", 58) + "+")
 	fmt.Println("|  Orchestrator Review Gate                                |")
