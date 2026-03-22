@@ -64,18 +64,26 @@ func printUsage() {
 	fmt.Println(`orchestrator - Parallel Claude Code worker orchestration via tmux
 
 OVERVIEW
-  Orchestrates multiple Claude Code sessions working on GitHub/GitLab issues
-  in parallel. Each worker gets its own git worktree and tmux window.
+  Issue-based orchestration for Claude Code. Works directly with GitHub/GitLab
+  issues - no config files needed. Each worker gets its own git worktree and
+  tmux window to work on issues in parallel.
+
+  IMPORTANT: One orchestrator per repository. Multiple repositories can run
+  simultaneously (each gets its own orchestrator identified by owner/repo).
 
   Full documentation: https://github.com/PaulSnow/orchestrator
 
-QUICK START (from within a git repo)
+QUICK START (issue-based - recommended)
   1. Create an epic issue on GitHub with a task list (see EPIC FORMAT below)
   2. Create the referenced issues with clear requirements
-  3. Run: orchestrator launch <epic-number>
+  3. cd /path/to/your/repo
+  4. orchestrator launch <epic-number>
+
+  The orchestrator auto-detects your repository from 'git remote' and loads
+  all issues directly from GitHub/GitLab. No configuration files required.
 
 WORKFLOW
-  1. Load issues from GitHub epic issue (recommended) or JSON config
+  1. Load issues from GitHub/GitLab epic issue
   2. Run review gate - validates issues are well-specified
   3. Create git worktrees for each assigned issue
   4. Launch Claude workers in tmux windows with issue-specific prompts
@@ -84,7 +92,7 @@ WORKFLOW
   7. Clean up logs when issues/epics complete
 
 EPIC FORMAT
-  Create a GitHub issue as the "epic" containing a task list. Each line
+  An "epic" is a GitHub/GitLab issue containing a task list. Each checkbox
   references another issue that workers will implement:
 
     ## Tasks
@@ -117,6 +125,20 @@ ISSUE REQUIREMENTS
 
   The review gate validates issues have sufficient detail before launching.
 
+MULTI-REPOSITORY USAGE
+  You can run orchestrators in different repositories simultaneously:
+
+    Terminal 1:                    Terminal 2:
+    cd ~/projects/repo-a           cd ~/projects/repo-b
+    orchestrator launch 50         orchestrator launch 100
+
+  Each repository is identified by its git remote (owner/repo), so they won't
+  conflict. The orchestrator prevents multiple instances per repository via a
+  shared registry at ~/.orchestrator/registry.json
+
+  Ports are allocated dynamically (dashboard: 8123+, daemon: 8100+), so no
+  manual port configuration is needed.
+
 COMMANDS
   launch     Start workers and monitor until completion (main command)
   review     Run review gate only, don't launch workers
@@ -130,7 +152,7 @@ COMMANDS
 
 EXAMPLES
 
-  # Launch from epic issue (recommended - run from within the repo)
+  # Launch from epic issue (issue-based - recommended)
   cd /path/to/repo
   orchestrator launch 42
 
@@ -143,14 +165,17 @@ EXAMPLES
   # Skip review for re-runs
   orchestrator launch 42 --skip-review
 
-  # Check status
+  # Check status across all running orchestrators
   orchestrator status
 
   # Clean up logs
   orchestrator cleanup --logs --all
 
-JSON CONFIG (alternative to epic)
-  For complex setups, use a JSON config file:
+LEGACY: JSON CONFIG FILES
+  The orchestrator primarily uses GitHub/GitLab issues. JSON config files are
+  supported for legacy/testing purposes, but not recommended for normal use.
+
+  If needed, you can create a JSON config file:
     {
       "project": "owner/repo",
       "repos": {
@@ -168,12 +193,16 @@ JSON CONFIG (alternative to epic)
 
   Launch with: orchestrator launch --config config/issues.json
 
+  Note: Issue-based approach is preferred as it keeps your issues as the
+  single source of truth on GitHub/GitLab.
+
 WEB DASHBOARD
   Dashboard runs at http://localhost:8123 showing real-time progress.
+  Auto-allocated ports if multiple orchestrators are running.
   Disable with --web-port 0
 
 TMUX SESSION
-  Workers run in tmux windows: tmux attach -t <project-name>
+  Workers run in tmux windows: tmux attach -t <repo-name>
 
 LOG FILES
   Worker logs: /tmp/orchestrator-{project}-epic{N}-issue{M}-worker{W}.log
@@ -198,27 +227,34 @@ func cmdLaunch(args []string) {
 		fmt.Println(`orchestrator launch - Start parallel Claude workers on issues
 
 USAGE
-  orchestrator launch <epic-number>          # Recommended - auto-detects repo
-  orchestrator launch --config <file>        # Legacy - uses JSON config file
+  orchestrator launch <epic-number>          # Issue-based (recommended)
+  orchestrator launch --config <file>        # Legacy JSON config
 
 DESCRIPTION
   Launches Claude Code workers in parallel tmux windows. Each worker gets
   an isolated git worktree and works on one issue at a time. When a worker
   completes, it's automatically assigned the next available issue.
 
-  The epic issue contains a task list with checkboxes that reference other
-  issues. The orchestrator parses this list and assigns issues to workers.
-  When an issue is completed, its checkbox is automatically checked.
+  The orchestrator is issue-based: it loads issues directly from GitHub/GitLab
+  using an epic issue as the source. The epic contains a task list with
+  checkboxes referencing other issues. No config files needed.
 
-INPUT SOURCES (pick one)
+INPUT SOURCES
 
-  <epic-number>         Epic issue number (auto-detects repo from git remote)
-  --config <file>       JSON config file with issues array
-  --config-dir <dir>    Directory containing *-issues.json files (merges all)
+  <epic-number>         Epic issue number (auto-detects repo from 'git remote')
+                        RECOMMENDED: Works with the current repository
+
   --epic <url>          Full GitHub/GitLab epic issue URL
+                        Use when you need to specify the epic URL explicitly
+
+  --config <file>       JSON config file with issues array (LEGACY)
+                        Supported for backward compatibility and testing
+
+  --config-dir <dir>    Directory with *-issues.json files (LEGACY)
+                        Merges all config files in the directory
 
 EPIC FORMAT
-  The epic issue body should contain a task list like:
+  An epic is a GitHub/GitLab issue with a task list:
 
     ## Tasks
     - [ ] #101 - Implement feature A
@@ -226,26 +262,45 @@ EPIC FORMAT
     - [x] #103 - Already completed
 
   Dependencies are parsed from "(blocked by #N)" or "(depends on #N)".
+  Checked boxes [x] are skipped (already done).
 
 REVIEW GATE
   By default, issues are reviewed before work begins to ensure they are
   well-specified. Use --skip-review for re-runs or --review-only to check
   issues without launching workers.
 
+REPOSITORY DETECTION
+  When you run 'orchestrator launch 42' from within a git repository:
+  1. Detects repo from 'git remote get-url origin'
+  2. Extracts owner/repo (e.g., "PaulSnow/orchestrator")
+  3. Uses this as the unique project identifier
+  4. Fetches epic issue #42 from GitHub/GitLab
+  5. Loads all referenced issues automatically
+
+  This means you can run orchestrators in different repos simultaneously:
+    Terminal 1: cd ~/repo-a && orchestrator launch 50
+    Terminal 2: cd ~/repo-b && orchestrator launch 100
+
+  Each repo gets its own orchestrator (identified by owner/repo from git).
+  Only one orchestrator allowed per repository.
+
 EXAMPLES
 
-  # Launch from epic issue (run from within the repo)
+  # Launch from epic issue (recommended)
   cd /path/to/myrepo
   orchestrator launch 42
 
   # Launch with custom worker count
   orchestrator launch 42 --workers 3
 
-  # Launch with config file (legacy)
-  orchestrator launch --config config/issues.json
-
-  # Review only - validate issues are ready
+  # Review only - validate issues without launching
   orchestrator launch 42 --review-only
+
+  # Skip review for re-runs
+  orchestrator launch 42 --skip-review
+
+  # Legacy: Launch with config file
+  orchestrator launch --config config/issues.json
 
 OPTIONS`)
 		fs.PrintDefaults()
