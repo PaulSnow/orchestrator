@@ -15,18 +15,47 @@ The orchestrator coordinates multiple Claude Code sessions working on GitHub/Git
 - **Hot-reload** - Picks up new tasks added to the epic
 - **Web dashboard** - Real-time progress monitoring
 
+## Installation
+
+### Option 1: Install from Source (Recommended)
+
+```bash
+# Install latest from main branch
+go install github.com/PaulSnow/orchestrator/cmd/orchestrator@latest
+
+# Or install specific version
+go install github.com/PaulSnow/orchestrator/cmd/orchestrator@v2.0.0
+```
+
+### Option 2: Build from Source
+
+```bash
+# Clone the repository
+git clone https://github.com/PaulSnow/orchestrator.git
+cd orchestrator
+
+# Build with version info
+make build
+
+# Or quick dev build
+make dev
+
+# Binary is created as ./orchestrator
+```
+
+### Option 3: Download Release Binary
+
+Download pre-built binaries from [GitHub Releases](https://github.com/PaulSnow/orchestrator/releases).
+
 ## Quick Start
 
 ```bash
-# Build
-go build -o orchestrator ./cmd/orchestrator
-
 # From within your repo, launch workers on epic issue #42
 cd /path/to/your/repo
-./orchestrator launch 42
+orchestrator launch 42
 
-# With options
-./orchestrator launch 42 --workers 4
+# With custom worker count
+orchestrator launch 42 --workers 3
 
 # Dashboard opens automatically at http://localhost:8123
 ```
@@ -123,6 +152,76 @@ Platform auto-detected from git remote URL.
 - tmux
 - `gh` CLI (for GitHub) or `glab` CLI (for GitLab)
 - Claude Code CLI
+
+## Building and Development
+
+### Build with Version Info
+
+The orchestrator embeds version information at build time:
+
+```bash
+# Build with full version info (uses git describe)
+make build
+
+# Quick dev build (no version)
+make dev
+
+# Check version that will be embedded
+make version
+
+# Run tests
+make test
+```
+
+### Version Display
+
+```bash
+# Show version
+orchestrator version
+# Output: orchestrator v2.0.0-60-gfebe509
+#   commit: febe509
+#   built:  2026-03-22T18:30:11Z
+
+# Version also appears in dashboard header
+```
+
+The version is automatically derived from git tags using semantic versioning:
+- **Tagged release**: `v2.0.0`
+- **Post-release**: `v2.0.0-5-gabcd123` (5 commits after v2.0.0)
+- **Dirty tree**: `v2.0.0-5-gabcd123-dirty` (uncommitted changes)
+
+### Multi-Repository Usage
+
+The orchestrator can run in multiple repositories simultaneously:
+
+```bash
+# Terminal 1
+cd ~/projects/repo-a
+orchestrator launch 50
+
+# Terminal 2
+cd ~/projects/repo-b
+orchestrator launch 100
+```
+
+Each repository is identified by its git remote (owner/repo), so they won't conflict. Only one orchestrator is allowed per repository (enforced via `~/.orchestrator/registry.json`).
+
+## Contributing
+
+We welcome contributions! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for:
+- Development workflow (commit, push, pull request)
+- Release process (tag, publish, distribute)
+- Code style guidelines
+- Testing requirements
+
+### Quick Contribution Guide
+
+1. Fork the repository
+2. Create a feature branch: `git checkout -b feature/your-feature`
+3. Make your changes and add tests
+4. Commit using conventional commits: `git commit -m "feat: add feature"`
+5. Push to your fork: `git push origin feature/your-feature`
+6. Open a Pull Request
 
 ## License
 

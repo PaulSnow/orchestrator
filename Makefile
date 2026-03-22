@@ -32,3 +32,7 @@ version:
 	@echo "Version:    $(VERSION)"
 	@echo "Git Commit: $(GIT_COMMIT)"
 	@echo "Build Date: $(BUILD_DATE)"
+
+# Build release binaries for all platforms
+release:
+	@./scripts/build-release.sh $(VERSION)
