@@ -424,15 +424,6 @@ func TestRegisterWithTakeover_DeadProcess(t *testing.T) {
 	if entries[0].Port != oldPort {
 		t.Errorf("Expected registered port %d, got %d", oldPort, entries[0].Port)
 	}
-// ConnectivityStatus represents the online/offline status of an orchestrator.
-type ConnectivityStatus string
-
-const (
-	ConnectivityOnline   ConnectivityStatus = "online"
-	ConnectivityOffline  ConnectivityStatus = "offline"
-	ConnectivityChecking ConnectivityStatus = "checking"
-)
-
 }
 
 func TestRegisterWithTakeover_ProcessAliveButUnhealthy(t *testing.T) {

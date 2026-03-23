@@ -718,11 +718,7 @@ func hasMeaningfulOutput(logTail string) bool {
 		}
 	}
 
-	if len(strings.TrimSpace(logTail)) < 200 {
-		return false
-	}
-
-	return true
+	return len(strings.TrimSpace(logTail)) >= 200
 }
 
 func logHasErrors(logTail string) bool {

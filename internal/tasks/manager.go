@@ -134,7 +134,7 @@ func (m *Manager) StartTask(id string) error {
 	if found.Type != "" {
 		entry += fmt.Sprintf("- **type**: %s\n", found.Type)
 	}
-	entry += fmt.Sprintf("- **assigned**: in-progress\n")
+	entry += "- **assigned**: in-progress\n"
 	if found.Description != "" {
 		entry += fmt.Sprintf("- **description**: %s\n", found.Description)
 	}

@@ -132,12 +132,6 @@ func (c *Coder) HandleComplexIssue(issue *Issue) error {
 func (c *Coder) analyzeAndPlanTasks(issue *Issue) []AgentTask {
 	var tasks []AgentTask
 
-	// Get context from issue description
-	desc := issue.Description
-	if desc == "" {
-		desc = issue.Title
-	}
-
 	// Default task structure based on common patterns
 	repo := c.cfg.RepoForIssue(issue)
 	lang := "Go" // default

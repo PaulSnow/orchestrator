@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net"
 	"net/http"
 	"net/http/httputil"
@@ -925,63 +924,6 @@ func (ds *DashboardServer) handleProxy(w http.ResponseWriter, r *http.Request) {
 	}
 
 	proxy.ServeHTTP(w, r)
-}
-
-// handleProxySSE handles SSE connections to a proxied orchestrator.
-// This is a special case because SSE requires streaming.
-func (ds *DashboardServer) handleProxySSE(w http.ResponseWriter, r *http.Request, targetPort int) {
-	targetURL := fmt.Sprintf("http://localhost:%d/api/events", targetPort)
-
-	// Create an HTTP client for the SSE connection
-	client := &http.Client{
-		Timeout: 0, // No timeout for SSE
-	}
-
-	req, err := http.NewRequestWithContext(r.Context(), "GET", targetURL, nil)
-	if err != nil {
-		http.Error(w, "failed to create request", http.StatusInternalServerError)
-		return
-	}
-
-	resp, err := client.Do(req)
-	if err != nil {
-		http.Error(w, "failed to connect to target orchestrator", http.StatusBadGateway)
-		return
-	}
-	defer resp.Body.Close()
-
-	// Set SSE headers
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("Connection", "keep-alive")
-	w.Header().Set("Access-Control-Allow-Origin", "*")
-
-	flusher, ok := w.(http.Flusher)
-	if !ok {
-		http.Error(w, "SSE not supported", http.StatusInternalServerError)
-		return
-	}
-
-	// Stream the response
-	buf := make([]byte, 4096)
-	for {
-		select {
-		case <-r.Context().Done():
-			return
-		default:
-			n, err := resp.Body.Read(buf)
-			if n > 0 {
-				w.Write(buf[:n])
-				flusher.Flush()
-			}
-			if err == io.EOF {
-				return
-			}
-			if err != nil {
-				return
-			}
-		}
-	}
 }
 
 // handleDashboard serves the HTML dashboard.
